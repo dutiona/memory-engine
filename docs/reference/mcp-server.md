@@ -383,7 +383,7 @@ embedder answers decides what happens to the item:
 | No connection made (refused, DNS, TLS) | unchanged, still due | waits |
 | 401 or 403 | unchanged, still due | paused, with the error; re-probed on the backoff schedule, cleared by the next answer |
 | 400, 413 or 422 | failed, for good, with its error; it stays found by full-text search | the pause, if any, clears |
-| No answer: a timeout, a reset, a broken body | backs off alone, with its error | a pause holds: no answer says anything about the key |
+| No answer: a timeout, a reset, a broken body | backs off alone, with its error | a pause holds: nothing answered, so nothing shows the key works |
 | A 5xx or any other answer | backs off alone, with its error | the pause, if any, clears |
 
 The backoff is 1 s doubling to 60 s, per item, and retries go on however long the outage lasts. After an answer that

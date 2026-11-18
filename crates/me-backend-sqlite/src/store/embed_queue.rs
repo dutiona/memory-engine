@@ -146,8 +146,9 @@ pub fn complete(
 /// Record a failed attempt on fact `fact_id`, in one transaction.
 ///
 /// `Retry` and `Fail` count the attempt and keep `error` on the row; `Fail`, and `Retry` when
-/// the embedder answered, clear the pause. `Hold` changes no queue row; paused, it keeps the first pause
-/// time and the latest `error`. Every failure records its time, `error` and `fact_id`.
+/// the embedder answered, clear the pause. `Hold` changes no queue row; paused, it keeps the
+/// first pause time and the latest `error`. Every failure records its time, `error` and
+/// `fact_id`.
 ///
 /// # Errors
 ///

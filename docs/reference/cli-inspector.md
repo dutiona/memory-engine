@@ -264,9 +264,9 @@ The one operation that deletes (ADR-0020 §8, #1023). Exactly one target:
 
 Both also take every wisdom fact derived from a taken fact, the summaries naming one, the activities that promoted
 one, every incident edge, and the embedding queue's last error and pause error when a taken fact's attempt left them
-(an embedder may echo its input; their times stay, and so does a pause), in one transaction. A forgotten fact's tombstone keeps its hash and loses its reason, so
-the content stays blocked from re-import; an erased fact that was never forgotten can come back from a source that
-still holds it. Expired facts a taken fact had replaced are listed as `orphaned` and stay expired; facts left with the
+(an embedder may echo its input; their times stay, and so does a pause), in one transaction. A forgotten fact's
+tombstone keeps its hash and loses its reason, so the content stays blocked from re-import; an erased fact that was
+never forgotten can come back from a source that still holds it. Expired facts a taken fact had replaced are listed as `orphaned` and stay expired; facts left with the
 same content are listed as `copies`. Output: `erased: activities=0 checkpoints=0 edges=2 events=0 facts=1 summaries=0`
 (every kind, so a new table needs no CLI change) and the copies and orphans when there are any; the JSON report; or one
 `kind=N` per line.

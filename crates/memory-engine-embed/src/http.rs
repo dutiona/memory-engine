@@ -743,8 +743,8 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     /// over-length 400 (`exceed_context_size_error` with an integer `n_ctx`), the text is
     /// split within `n_ctx − 1` tokens. That answer to a text or piece counted within a
     /// declared limit larger than `n_ctx − 1` splits the text again, once, within
-    /// `n_ctx − 1`. An over-length text is split into consecutive pieces
-    /// that rejoin exactly, each within the limit as the server counts it: provider
+    /// `n_ctx − 1`. An over-length text is split into consecutive pieces that rejoin exactly,
+    /// each within the limit as the server counts it: provider
     /// `llama.cpp`, or a server that answered that 400, counts at its `/tokenize`; any other
     /// counts the conservative bound of its UTF-8 bytes + 2, as does a server with no
     /// `/tokenize` (a `warn` per text that falls back). A text whose bytes + 2 fit is never
