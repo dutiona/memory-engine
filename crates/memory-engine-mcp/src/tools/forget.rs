@@ -20,9 +20,9 @@ struct Args {
 pub fn definition() -> Tool {
     super::tool(
         "forget",
-        "Retract one of this session's memories so it does not come up again: it and any identical \
-         copy leave recall, and later imports and promotions keep it out. Acts only on this session's \
-         memories and the user level's. Answers forgotten, already forgotten or not found.",
+        "Retract one of this session's memories or the user level's so it does not come up again: \
+         it and any identical copy among them leave recall, and later imports and promotions keep \
+         its text out. Answers forgotten, already forgotten or not found.",
         json!({
             "type": "object",
             "properties": {
