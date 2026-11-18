@@ -76,9 +76,10 @@ impl SendError {
             .filter(|&limit| limit > 0)
     }
 
-    /// What a server without llama-server's `/tokenize` answers there.
+    /// What a server without llama-server's `/tokenize` answers there, or one whose body
+    /// limit refuses to count this text (413).
     const fn no_tokenizer(&self) -> bool {
-        matches!(&self.refusal, Some((status, _)) if matches!(status.as_u16(), 400 | 404 | 405 | 422))
+        matches!(&self.refusal, Some((status, _)) if matches!(status.as_u16(), 400 | 404 | 405 | 413 | 422))
     }
 }
 
@@ -562,7 +563,7 @@ impl HttpEmbeddingProvider {
 
     /// `text`'s tokens as llama-server counts an embedding input, its end-of-sequence token
     /// included; `None` when the server has no `/tokenize` (a 400, 404, 405 or 422 there, or a
-    /// body without a `tokens` list).
+    /// body without a `tokens` list) or will not count this text there (413).
     ///
     /// # Errors
     ///

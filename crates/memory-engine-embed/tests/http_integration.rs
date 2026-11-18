@@ -579,6 +579,7 @@ async fn over_length_missing_tokenize_falls_back_to_the_byte_bound() {
         ResponseTemplate::new(404),
         ResponseTemplate::new(400),
         ResponseTemplate::new(405),
+        ResponseTemplate::new(413),
         ResponseTemplate::new(422),
         ResponseTemplate::new(200).set_body_json(json!({ "count": 3 })),
         ResponseTemplate::new(200).set_body_string("<html>not here</html>"),
