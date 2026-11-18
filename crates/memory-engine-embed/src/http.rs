@@ -747,9 +747,10 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     /// that rejoin exactly, each within the limit as the server counts it: provider
     /// `llama.cpp`, or a server that answered that 400, counts at its `/tokenize`; any other
     /// counts the conservative bound of its UTF-8 bytes + 2, as does a server with no
-    /// `/tokenize` (with one `warn`). A text whose bytes + 2 fit is never counted. Each piece
-    /// is embedded in order, one request at a time, and the text's one vector is their mean
-    /// weighted by each piece's count, L2-normalised (decision D1; per-chunk vectors: #1084).
+    /// `/tokenize` (a `warn` per text that falls back). A text whose bytes + 2 fit is never
+    /// counted. Each piece is embedded in order, one request at a time, and the text's one
+    /// vector is their mean weighted by each piece's count, L2-normalised (decision D1;
+    /// per-chunk vectors: #1084).
     ///
     /// Auto-detects the response format:
     /// - `OpenAI`: `{ "data": [{ "embedding": [...] }] }` (first item used)

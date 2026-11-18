@@ -170,8 +170,7 @@ impl<'a> FactStore<'a> {
     }
 
     /// Insert a new fact with no tombstone check, for an explicit single assertion with its
-    /// vector (`add-fact`). A fresh assertion is not a forgotten fact coming back, and
-    /// `remember` never refuses (ADR-0020 §8).
+    /// vector (`add-fact`). A fresh assertion is not a forgotten fact coming back.
     ///
     /// # Errors
     ///
@@ -485,13 +484,9 @@ impl<'a> FactStore<'a> {
             .map_err(|e| StorageError::backend(e).into())
     }
 
-    /// Count active facts (`t_expired IS NULL`) without materializing any rows.
-    ///
-    /// A `COUNT(*)` companion to [`list_active`](Self::list_active): consolidation
-    /// uses it to test its O(N·M) / O(N²) safety caps **before** the expensive
-    /// `list_active` load — which would otherwise deserialize every embedding BLOB
-    /// (~147 MB for 50k×768-dim) only to discover the corpus is over the cap and
-    /// skip both passes (#659).
+    /// Count active facts (`t_expired IS NULL`) without materializing any rows: the
+    /// `COUNT(*)` companion of [`list_active`](Self::list_active). Consolidation's safety
+    /// caps count with [`count_active_with_vector`](Self::count_active_with_vector).
     ///
     /// # Errors
     ///
