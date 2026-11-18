@@ -1,6 +1,6 @@
 [package]
 name = "me-archive"
-version = "0.2.0-rc.1"
+version = "0.2.0-rc.2"
 edition = "2024"
 rust-version.workspace = true
 description = "Archive primitive: `.pak` cold-storage compaction over MemoryCtx + ColdStorage (Wave 2 #816 / S4, sub-PR 3b)"

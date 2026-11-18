@@ -1,6 +1,6 @@
 [package]
 name = "me-resolve"
-version = "0.2.0-rc.1"
+version = "0.2.0-rc.2"
 edition = "2024"
 rust-version.workspace = true
 description = "Resolve primitive: bi-temporal arbiter-driven conflict resolution (Wave 2 #816 / S3, sub-PR 3)"
