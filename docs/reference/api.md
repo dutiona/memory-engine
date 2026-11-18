@@ -234,10 +234,9 @@ activity promotion. Only `add_fact`/`add_fact_precomputed`, the single explicit 
 The crate root (`lib.rs`) re-exports these items for convenience:
 
 - **Engine**: `MemoryEngine`, `EngineConfig`
-- **Error**: `MemoryError`, `Result`
-- **Traits**: `EmbeddingProvider` (note: `PersistenceClassifier` is available via `memory_engine::traits::PersistenceClassifier`, not re-exported at root)
+- **Error**: `MemoryError`, `Result`, and the typed causes `ArchiveError`, `ConflictError`, `CycleError`, `MigrationError`, `RerankerError`, `StorageError`
+- **Traits**: `ConflictArbiter`, `ConflictResolution`, `ConsolidationConfig`, `ConsolidationStats`, `CrudDecision`, `CycleCtx`, `DeltaProposer`, `DreamCtx`, `DreamCycle`, `EmbeddingProvider`, `InsightStream`, `PersistenceClassifier`, `Reranker`, `SummarizableContent`, `SummaryGenerator`
 - **Types**: all public types from the `types` module (`Event`, `Fact`, `Edge`, `Summary`, `NewEvent`, `NewFact`, `NewEdge`, `NewSummary`, `EventType`, `FactType`, `ConsolidationLevel`, `ScopeQuery`, `ScopeNode`, `AddFactOptions`)
-- **Store utilities**: `serialize_embedding`, `deserialize_embedding`
 
 ## Feature Flags
 
