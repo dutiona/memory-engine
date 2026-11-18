@@ -1,6 +1,6 @@
 # Geometric Associative Memory — Design
 
-> **Status:** Design doc for the geometric associative memory epic family (E0–E5). Operators are the ground; features emerge from operator compositions. Source notes: [note 34](../../autonomous-agent-project/raw/landscape/34-geometric-memory-operator-taxonomy.md) (operator taxonomy), [note 35](../../autonomous-agent-project/raw/landscape/35-memory-data-structure-landscape.md) (data-structure inventory), [note 37](../../autonomous-agent-project/raw/landscape/37-geometric-associative-memory-bibliography.md) (verified bibliography).
+> **Status:** Design doc for the geometric associative memory epic family (E0–E5). Operators are the ground; features emerge from operator compositions. Source notes, in the companion `autonomous-agent-project` research repository: note 34, `raw/landscape/34-geometric-memory-operator-taxonomy.md` (operator taxonomy); note 35, `raw/landscape/35-memory-data-structure-landscape.md` (data-structure inventory); note 37, `raw/landscape/37-geometric-associative-memory-bibliography.md` (verified bibliography).
 
 ---
 

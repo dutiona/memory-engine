@@ -230,11 +230,11 @@ This split is shipped, not aspirational. The cognitive-science basis is the pros
 
 | Method                               | Source                                                          | Behavior                                                                                                                                                              |
 | ------------------------------------ | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MemoryEngine::list_due(now, scope)` | [`src/engine/scheduling.rs:17`](../../src/engine/scheduling.rs) | Returns active facts where `t_valid IS NOT NULL ∧ t_valid <= now` and `(t_invalid IS NULL ∨ t_invalid > now)`, scoped via `ScopeQuery::Subtree` semantics on `scope`. |
-| `MemoryEngine::next_due_time(scope)` | [`src/engine/scheduling.rs:39`](../../src/engine/scheduling.rs) | Returns the earliest `t_valid` strictly in the future as a polling-interval hint. `None` if no future-dated facts in scope.                                           |
-| `Fact::surfaced_at`                  | [`src/types.rs:141`](../../src/types.rs)                        | First-fire timestamp. `None` until the fact is returned by `list_due`; subsequent calls observe the persisted value. The DB-authoritative value always wins on read.  |
+| `MemoryEngine::list_due(now, scope)` | [`crates/memory-engine/src/engine/scheduling.rs`](../../crates/memory-engine/src/engine/scheduling.rs) | Returns active facts where `t_valid IS NOT NULL ∧ t_valid <= now` and `(t_invalid IS NULL ∨ t_invalid > now)`, scoped via `ScopeQuery::Subtree` semantics on `scope`. |
+| `MemoryEngine::next_due_time(scope)` | [`crates/memory-engine/src/engine/scheduling.rs`](../../crates/memory-engine/src/engine/scheduling.rs) | Returns the earliest `t_valid` strictly in the future as a polling-interval hint. `None` if no future-dated facts in scope.                                           |
+| `Fact::surfaced_at`                  | [`crates/me-types/src/types/facts.rs`](../../crates/me-types/src/types/facts.rs)                        | First-fire timestamp. `None` until the fact is returned by `list_due`; subsequent calls observe the persisted value. The DB-authoritative value always wins on read.  |
 
-The store-level primitives live in [`src/store/facts.rs:397`](../../src/store/facts.rs) (`list_due`), [`src/store/facts.rs:432`](../../src/store/facts.rs) (`next_due_time`), and [`src/store/facts.rs:470`](../../src/store/facts.rs) (`stamp_surfaced`). Two unit tests guard the round-trip behavior: `list_due_surfaces_facts_with_past_t_valid` and `next_due_time_returns_earliest_future_t_valid`.
+The store-level primitives `list_due`, `next_due_time` and `stamp_surfaced` live in [`crates/me-backend-sqlite/src/store/facts.rs`](../../crates/me-backend-sqlite/src/store/facts.rs). Two unit tests guard the round-trip behavior: `list_due_surfaces_facts_with_past_t_valid` and `next_due_time_returns_earliest_future_t_valid`.
 
 ### Firing models
 

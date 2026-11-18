@@ -33,7 +33,7 @@ cargo clippy --all-targets            # lint (pedantic + nursery)
 cargo fmt --check                     # format check
 cargo bench                           # Criterion benchmarks
 cargo doc --no-deps --open            # API reference
-uv run sphinx-build -b html docs docs/_build  # narrative docs (Python 3.12+)
+uv run --locked sphinx-build -b html -W --keep-going -E docs docs/_build  # narrative docs (Python 3.12+)
 just --list                           # dev task runner (install: cargo install just) — linkmap / symbols / fuzz-build
 sh plugins/memory-engine/tests/run.sh # the Claude Code plugin's shell suite (its full gate: AGENTS.md, plugins/memory-engine/README.md)
 ```
@@ -54,6 +54,7 @@ export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intr
 cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only; #915 widens to --workspace)
 cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
+uv run --locked sphinx-build -b html -W --keep-going -E docs docs/_build  # Sphinx site: a warning fails it (#1046); local only, no CI job runs Sphinx
 cargo +nightly fuzz build                                              # Fuzz gate (#993) — detached fuzz/ consumes the facade API; needs nightly + cargo-fuzz
 ```
 

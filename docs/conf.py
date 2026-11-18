@@ -17,18 +17,17 @@ myst_enable_extensions = [
     "tasklist",
 ]
 
-suppress_warnings = ["myst.header"]
-
 templates_path = ["_templates"]
 exclude_patterns = [
     "_build",
     "Thumbs.db",
     ".DS_Store",
     "ROADMAP.md",
+    # A branch's implementation plan, archived to an issue before merge.
+    "plans",
 ]
 
 html_theme = "sphinx_rtd_theme"
-html_static_path = ["_static"]
 
 html_theme_options = {
     "navigation_depth": 3,
@@ -36,3 +35,5 @@ html_theme_options = {
 }
 
 myst_heading_anchors = 3
+# GitHub renders a plain ```mermaid fence natively; this makes Sphinx render it too.
+myst_fence_as_directive = ["mermaid"]

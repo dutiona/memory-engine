@@ -35,7 +35,7 @@ cargo run --example custom_traits
 
 ```bash
 cargo doc --no-deps --open     # API reference
-uv run sphinx-build -b html docs docs/_build  # narrative docs (requires Python 3.12+)
+uv run --locked sphinx-build -b html -W --keep-going -E docs docs/_build  # narrative docs (requires Python 3.12+)
 ```
 
 ## Code Style

@@ -43,3 +43,11 @@ design/index
 
 reference/index
 ```
+
+```{toctree}
+:maxdepth: 1
+:caption: Audits
+
+audits/S0.3-bootstrap-audit
+audits/S0.5-redaction-gate
+```

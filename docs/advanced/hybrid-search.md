@@ -184,7 +184,7 @@ The `Reranker::rerank()` method is failable (`-> Result<Vec<SearchResult>>`). Er
 
 ### Contract Enforcement
 
-After each `rerank()` call, the engine validates that the output is a valid subset of the input candidates — no fabricated fact IDs, no duplicates, and output length <= input length. Violations produce `MemoryError::Reranker` with a diagnostic message identifying the specific breach. See the [Reranker trait documentation](../../src/traits.rs) for the full contract.
+After each `rerank()` call, the engine validates that the output is a valid subset of the input candidates — no fabricated fact IDs, no duplicates, and output length <= input length. Violations produce `MemoryError::Reranker` with a diagnostic message identifying the specific breach. See the [Reranker trait documentation](../../crates/me-traits/src/lib.rs) for the full contract.
 
 See [Extensibility](extensibility.md) for trait definition, implementation example, and engine wiring.
 
