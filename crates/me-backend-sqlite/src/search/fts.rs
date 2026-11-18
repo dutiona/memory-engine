@@ -399,7 +399,7 @@ mod tests {
         store.insert(&make_fact("Rust language")).unwrap();
 
         // An empty MATCH string is an FTS5 syntax error -> caught and mapped
-        // to an empty result vec (fts.rs:30-83), never an Err.
+        // to an empty result vec, never an Err.
         let results = fts_search(&conn, "", 10, None, None).unwrap();
         assert_eq!(results, []);
     }
@@ -411,7 +411,7 @@ mod tests {
         store.insert(&make_fact("Rust language")).unwrap();
 
         // Some(&[]) serializes to "[]"; the `scope_id IN (SELECT ... json_each)`
-        // subquery is empty, so no row can match (fts.rs:43-45) — distinct
+        // subquery is empty, so no row can match — distinct
         // from None, which disables the filter entirely.
         let scoped = fts_search(&conn, "Rust", 10, None, Some(&[])).unwrap();
         assert!(
