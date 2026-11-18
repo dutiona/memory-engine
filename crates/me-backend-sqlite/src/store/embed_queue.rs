@@ -28,7 +28,8 @@ pub const LAST_ERROR_AT: &str = "embed_last_error_at";
 /// The last embed failure's error.
 pub const LAST_ERROR: &str = "embed_last_error";
 
-/// Insert `fact` without a vector and queue it, due at `now`, in one transaction.
+/// Insert `fact` without a vector and queue it, due at `now`, in one transaction; a store
+/// with no identity yet records `embed_dim` as its dimension.
 ///
 /// # Errors
 ///
@@ -49,6 +50,7 @@ pub fn insert_deferred(
         params![id, now.to_rfc3339()],
     )
     .map_err(StorageError::backend)?;
+    embedding_meta::record_dim_if_unknown(&tx, embed_dim)?;
     tx.commit().map_err(StorageError::backend)?;
     Ok(id)
 }

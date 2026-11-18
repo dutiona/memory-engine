@@ -134,8 +134,8 @@ the connection is read-only, and checks the schema version without migrating. It
 live server and a writer and changes nothing. A store below schema v17 has no queue: `status` exits 1 with an error
 naming the migration it needs (a store newer than the binary is refused too), and the store stays as it was.
 
-A store whose facts all wait has no embedding identity yet, so the commands that open the engine (`stats`, `query`,
-…) refuse it with an error that names that state and points to `status`.
+A store whose facts all wait has no embedding identity yet; its first fact recorded the store's dimension, so the
+commands that open the engine (`stats`, `query`, `dump`, `erase`, …) open it at that dimension.
 
 #### `export -o <path>` — Export State
 

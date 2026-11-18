@@ -26,8 +26,15 @@
 
 use rusqlite::{Connection, Transaction};
 
-use me_types::error::{MemoryError, Result};
+use me_types::error::{MemoryError, Result, StorageError};
 use me_types::types::EmbeddingFingerprint;
+
+/// The `config` key holding the store's dimension while it has no identity.
+///
+/// Its first deferred insert (#1021) writes it, so a store whose facts all wait for their
+/// vectors can still be opened at its dimension, and the identity's first write drops it. A
+/// pre-#613 store carried the same key.
+pub const STORE_DIM: &str = "embed_dim";
 
 /// Load the persisted embedding identity, if one has been recorded.
 ///
@@ -43,7 +50,8 @@ pub fn load(conn: &Connection) -> Result<Option<EmbeddingFingerprint>> {
     Ok(super::embedding_spaces::find_active(conn)?.map(|s| s.fingerprint))
 }
 
-/// Unconditionally persist the identity tuple, overwriting any existing value.
+/// Unconditionally persist the identity tuple, overwriting any existing value, and drop the
+/// [`STORE_DIM`] it supersedes.
 ///
 /// Upserts the single `active` registry row. Used by [`record_if_absent`] (first-write
 /// path) and reserved for restore/import, where the tuple is reconstructed from a snapshot.
@@ -53,7 +61,27 @@ pub fn load(conn: &Connection) -> Result<Option<EmbeddingFingerprint>> {
 /// Returns `MemoryError::Storage` on write failure or `MemoryError::Internal` if a
 /// dimension overflows `i64`.
 pub fn store(tx: &Transaction, fp: &EmbeddingFingerprint) -> Result<()> {
-    super::embedding_spaces::upsert_active_fingerprint(tx, fp)
+    super::embedding_spaces::upsert_active_fingerprint(tx, fp)?;
+    tx.execute("DELETE FROM config WHERE key = ?1", [STORE_DIM])
+        .map_err(StorageError::backend)?;
+    Ok(())
+}
+
+/// Record `dim` as the store's dimension ([`STORE_DIM`]) unless an identity or a dimension
+/// is already recorded.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Storage` on a query or write failure.
+pub fn record_dim_if_unknown(tx: &Transaction, dim: usize) -> Result<()> {
+    if load(tx)?.is_none() {
+        tx.execute(
+            "INSERT OR IGNORE INTO config (key, value) VALUES (?1, ?2)",
+            rusqlite::params![STORE_DIM, dim.to_string()],
+        )
+        .map_err(StorageError::backend)?;
+    }
+    Ok(())
 }
 
 /// Write-once recording of the identity on the first embedding write.

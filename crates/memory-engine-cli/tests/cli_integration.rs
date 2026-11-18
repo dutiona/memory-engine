@@ -730,6 +730,53 @@ async fn dump_events() {
         .stdout(predicate::str::contains("Events"));
 }
 
+// --- a store whose facts all wait for their vectors (#1021) ---
+
+#[tokio::test]
+async fn a_store_whose_facts_all_wait_opens_for_stats_dump_and_erase() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("waiting.db");
+    let mut engine = memory_engine::MemoryEngine::builder(4)
+        .path(db.clone())
+        .build()
+        .unwrap();
+    for content in ["the kestrel nests", "the falcon hunts"] {
+        engine
+            .add_fact_deferred(&memory_engine::AddFactRequest {
+                content: content.into(),
+                fact_type: memory_engine::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            })
+            .await
+            .unwrap();
+    }
+    engine.close().await.unwrap();
+    let db = db.to_str().unwrap();
+
+    cli()
+        .args(["--db", db, "--format", "plain", "stats"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("facts.active=2"));
+    cli()
+        .args(["--db", db, "dump", "facts"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("the falcon hunts"));
+    cli()
+        .args(["--db", db, "erase", "--fact", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("facts=1"));
+    cli()
+        .args(["--db", db, "--format", "plain", "stats"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("facts.active=1"));
+}
+
 // --- error handling ---
 
 #[test]

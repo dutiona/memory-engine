@@ -325,8 +325,9 @@ const fn default_timeout() -> u64 {
 /// Probe the embedding dimension from an existing database.
 ///
 /// Reads `dim` from the active `embedding_spaces` row (v13+, #622), falling back to the
-/// legacy `embedding_meta` config row (v12, #613) and then to the bare `embed_dim` key of
-/// pre-#613 databases. Opens the file read-only. Mirrors `peek_embed_dim_from_db` in
+/// legacy `embedding_meta` config row (v12, #613) and then to the bare `embed_dim` key: the
+/// dimension of a store whose facts all wait for their vectors (#1021), as pre-#613 databases
+/// carried it. Opens the file read-only. Mirrors `peek_embed_dim_from_db` in
 /// `memory-engine-cli/src/db.rs`.
 ///
 /// # Errors
@@ -394,7 +395,8 @@ pub fn probe_embed_dim(db_path: &Path) -> Result<usize, String> {
         return usize::try_from(dim).map_err(|_| "embedding_meta 'dim' out of range".to_owned());
     }
 
-    // Legacy fallback: a pre-#613 database carried a bare `embed_dim` key.
+    // No identity before the first vector: a store whose facts all wait records its
+    // dimension in the bare `embed_dim` key (#1021), as a pre-#613 database did.
     let legacy: Option<String> = conn
         .query_row(
             "SELECT value FROM config WHERE key = 'embed_dim'",

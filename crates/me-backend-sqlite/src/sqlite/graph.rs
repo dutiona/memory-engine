@@ -2483,6 +2483,53 @@ mod tests {
         assert_eq!(count(&pool, "SELECT COUNT(*) FROM facts"), 1);
     }
 
+    /// A store whose facts all wait has no identity, so its first deferred insert records the
+    /// dimension the CLI opens it at; the first vector's identity then replaces it.
+    #[tokio::test]
+    async fn the_store_dimension_is_written_once_and_never_beside_an_identity() {
+        use me_storage::SchemaManager;
+        use me_types::types::EmbeddingFingerprint;
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let be = backend(Arc::clone(&pool));
+        let dim = || crate::store::schema::get_config(&pool.write(), "embed_dim").unwrap();
+        let now = Utc::now();
+
+        let first = be
+            .insert_fact_deferred(&without_vector("first"), now)
+            .await
+            .unwrap();
+        assert_eq!(dim(), Some(DIM.to_string()));
+        pool.write()
+            .execute("UPDATE config SET value = '7' WHERE key = 'embed_dim'", [])
+            .unwrap();
+        be.insert_fact_deferred(&without_vector("second"), now)
+            .await
+            .unwrap();
+        assert_eq!(dim(), Some("7".into()), "written once");
+
+        be.complete_embedding(
+            first,
+            &[0.1; DIM],
+            &EmbeddingFingerprint::new("mock", "test", DIM),
+            DIM,
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            be.load_embedding_fingerprint()
+                .await
+                .unwrap()
+                .map(|fp| fp.dim),
+            Some(DIM)
+        );
+        assert_eq!(dim(), None, "the identity is the store's one dimension");
+        be.insert_fact_deferred(&without_vector("third"), now)
+            .await
+            .unwrap();
+        assert_eq!(dim(), None);
+    }
+
     #[tokio::test]
     async fn a_deferred_insert_that_fails_leaves_nothing() {
         let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
