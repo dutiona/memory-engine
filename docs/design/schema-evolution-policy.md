@@ -159,11 +159,12 @@ yet". It satisfies `NOT NULL` without rebuilding `facts`, and it never decodes a
 `EmbeddingDimension` rather than scoring a placeholder). Every vector reader filters with one
 predicate, `HAS_VECTOR` (`length(embedding) > 0`): brute-force vector search, the HNSW build,
 its sidecar and its re-rank fetch, the dedup/cluster/global snapshot, the dream cycle's
-selection and dormant resonance; reconstruction retains only real vectors and empties the
-queue; the sidecar fingerprint counts the vectorless facts (`vectorless_fact_count`); restore
-re-queues a fact dumped with an empty embedding. Only the generic hydration maps `X''` to an
-empty `Fact::embedding`. Postgres does not mirror the queue yet (#634). A v16 binary refuses a
-v17 store; rolling an image back means restoring the `memory.db.v16.bak` the first open writes.
+selection and dormant resonance; an unforget re-indexes only a restored fact that has a vector;
+reconstruction retains only real vectors and empties the queue; the sidecar fingerprint counts
+the vectorless facts (`vectorless_fact_count`); restore re-queues a fact dumped with an empty
+embedding. Only the generic hydration maps `X''` to an empty `Fact::embedding`. Postgres does
+not mirror the queue yet (#634). A v16 binary refuses a v17 store; rolling an image back means
+restoring the `memory.db.v16.bak` the first open writes.
 
 ## Event Envelope Versioning
 

@@ -11,6 +11,7 @@ use rusqlite::{OptionalExtension, params};
 use super::SqliteBackend;
 use crate::store::erase;
 use crate::store::events::EventStore;
+use crate::store::facts::HAS_VECTOR;
 use crate::store::scopes::ScopeStore;
 use crate::store::tombstones;
 use me_storage::ScopedWrite;
@@ -91,9 +92,13 @@ impl Retraction for SqliteBackend {
                 let mut embeddings = Vec::new();
                 for &(fact, active) in &restored {
                     if active {
+                        // A fact still waiting for its vector (#1021) has none to index: the
+                        // drain's fill indexes it, now that it is active again.
                         let blob: Option<Vec<u8>> = tx
                             .query_row(
-                                "SELECT embedding FROM facts WHERE id = ?1",
+                                &format!(
+                                    "SELECT embedding FROM facts WHERE id = ?1 AND {HAS_VECTOR}"
+                                ),
                                 params![fact],
                                 |r| r.get(0),
                             )
@@ -315,6 +320,45 @@ mod tests {
         let retry = be.erase(&EraseTarget::Fact(id), Utc::now()).await.unwrap();
         assert_eq!(retry.erased_facts, Vec::<i64>::new());
         assert!(retry.purged, "{:?}", retry.purge_error);
+    }
+
+    /// A fact forgotten while it waits for its vector (#1021) unforgets like any other and
+    /// keeps its queue row: it has no vector to index yet, so the drain's fill indexes it.
+    #[tokio::test]
+    async fn unforget_restores_a_fact_still_waiting_for_its_vector() {
+        use me_types::types::{EventType, NewEvent, UnforgetOutcome};
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let id = crate::test_util::seed_without_vector(&pool.write(), "waiting");
+        let be = backend(&pool);
+        let record = NewEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::MemoryOp,
+            payload: serde_json::json!({}),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "test".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        be.forget_fact(id, &[1], "wrong", Utc::now(), "rec", &record)
+            .await
+            .unwrap();
+        assert_eq!(
+            be.unforget_fact(id, Utc::now()).await.unwrap(),
+            UnforgetOutcome::Restored {
+                facts: vec![(id, true)]
+            }
+        );
+        let queued: i64 = pool
+            .write()
+            .query_row(
+                "SELECT COUNT(*) FROM embed_queue WHERE fact_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 1, "it still waits for the drain");
     }
 
     /// A read-only handle refuses an erasure before it touches the store's sidecar.
