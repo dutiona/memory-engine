@@ -33,13 +33,6 @@ This page summarizes the public API surface of the `memory-engine` crate.
 | `ingest`   | `(&self, event: &NewEvent) -> Result<i64>`                                                       | Append an event to the log. Returns the event ID.                                                                                                            |
 | `add_fact` | `(&self, content, fact_type, source_event_id, embedder, scope, opts, classifier) -> Result<i64>` | Compute embedding, blake3 hash, resolve scope, optionally auto-pin via classifier, and insert a fact. Embedding is computed before acquiring the write lock. |
 
-### Bootstrap
-
-| Method                | Signature                                                                                 | Description                                                                                                             |
-| --------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `bootstrap_session`   | `(&self, reader, embedder, extractor, config, classifier) -> Result<BootstrapReport>`     | Bootstrap a single JSONL session log. Savepoint-wrapped for crash safety. Uses marker event for idempotency.            |
-| `bootstrap_directory` | `(&self, dir: &Path, embedder, extractor, config, classifier) -> Result<BootstrapReport>` | Bootstrap all top-level `*.jsonl` files in a directory. Aggregates reports. Individual failures are logged and skipped. |
-
 ### Facts
 
 | Method              | Signature                                                     | Description                                           |
