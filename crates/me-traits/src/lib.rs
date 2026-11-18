@@ -51,8 +51,9 @@ pub trait EmbeddingProvider: Send + Sync {
     ///
     /// Returns an error if embedding computation fails. Return
     /// [`MemoryError::Embedder`](me_types::error::MemoryError::Embedder) so the
-    /// deferred-embedding queue (#1021) can tell an unreachable embedder, a rejected key and a
-    /// rejected input apart; it counts any other error as
+    /// deferred-embedding queue (#1021) can tell an unreachable embedder, a rejected key, a
+    /// rejected input and a request that got no answer apart; it counts any other error as an
+    /// answer with no vector,
     /// [`EmbedderError::Failed`](me_types::error::EmbedderError::Failed).
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
 

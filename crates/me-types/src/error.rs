@@ -439,7 +439,7 @@ impl StorageError {
 #[non_exhaustive]
 pub enum EmbedderError {
     /// The request never reached the server: reqwest's `is_connect()` (refused, DNS, TLS). A
-    /// timeout, even one that ends during connect, is `Failed`: reqwest's blocking client
+    /// timeout, even one that ends during connect, is `NoAnswer`: reqwest's blocking client
     /// reports it as a request timeout.
     #[error("{0}")]
     Unreachable(String),
@@ -449,7 +449,11 @@ pub enum EmbedderError {
     /// 400, 413 or 422: this input will not be embedded as sent.
     #[error("{0}")]
     InputRejected(String),
-    /// No usable answer: a timeout, a reset after sending, a broken body, any other non-2xx.
+    /// The request may have reached the server, but no answer came back: a timeout, a reset
+    /// after sending, a broken body. It says nothing about the key.
+    #[error("{0}")]
+    NoAnswer(String),
+    /// The server answered, with no usable vector: any other non-2xx.
     #[error("{0}")]
     Failed(String),
 }
@@ -1164,6 +1168,7 @@ mod tests {
             (EmbedderError::Unreachable("refused".into()), "refused"),
             (EmbedderError::KeyRejected("401".into()), "401"),
             (EmbedderError::InputRejected("400".into()), "400"),
+            (EmbedderError::NoAnswer("timed out".into()), "timed out"),
             (EmbedderError::Failed("503".into()), "503"),
         ] {
             assert_eq!(err.to_string(), message);

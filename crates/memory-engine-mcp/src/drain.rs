@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use memory_engine::error::MemoryError;
+use memory_engine::error::EmbedderError;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::{Backoff, MemoryEngine, NextEmbedding, Settled};
 use tokio::sync::RwLock;
@@ -82,10 +82,13 @@ pub async fn run(
         };
         let embedder = Arc::clone(&provider);
         let content = item.content.clone();
-        // Dropping the blocking client's internal runtime on an executor thread panics.
+        // Dropping the blocking client's internal runtime on an executor thread panics. A
+        // call that panicked got no answer, so it keeps a pause.
         let result = tokio::task::spawn_blocking(move || embedder.embed(&content))
             .await
-            .unwrap_or_else(|e| Err(MemoryError::Internal(format!("the embed call failed: {e}"))));
+            .unwrap_or_else(|e| {
+                Err(EmbedderError::NoAnswer(format!("the embed call failed: {e}")).into())
+            });
         let settled = {
             let _fence = fence.read().await;
             engine

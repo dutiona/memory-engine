@@ -65,7 +65,8 @@ pub enum Settled {
     Embedded,
     /// The embedder refused this input (400, 413, 422): the item failed, for good.
     Rejected,
-    /// No usable answer for this item, or a vector the store refused: only it backs off.
+    /// No answer, no usable answer for this item, or a vector the store refused: only it
+    /// backs off.
     Retrying,
     /// No request reached the embedder: no item changed, the item stays due.
     Unreachable,
@@ -104,10 +105,12 @@ impl MemoryEngine {
     /// | `Embedder(Unreachable)` | no item changes | `Unreachable` |
     /// | `Embedder(KeyRejected)` | no item changes, the queue is paused | `KeyRejected` |
     /// | `Embedder(InputRejected)` | the item fails | `Rejected` |
+    /// | `Embedder(NoAnswer)` | only the item backs off, by `backoff.delay(attempts + 1)` | `Retrying` |
     /// | any other error | only the item backs off, by `backoff.delay(attempts + 1)` | `Retrying` |
     ///
-    /// An answered request clears the pause. A vector whose post-commit index update
-    /// fails is stored, so it is `Embedded` (logged), never retried.
+    /// An answered request clears the pause; `NoAnswer` and `Unreachable` say nothing about
+    /// the key, so they keep it. A vector whose post-commit index update fails is stored, so
+    /// it is `Embedded` (logged), never retried.
     ///
     /// # Errors
     ///
@@ -195,13 +198,14 @@ impl MemoryEngine {
             MemoryError::Embedder(EmbedderError::InputRejected(_)) => {
                 (EmbeddingFailure::Fail, Settled::Rejected)
             }
-            _ => {
+            other => {
                 let delay = backoff.delay(item.attempts.saturating_add(1));
                 let at = TimeDelta::from_std(delay)
                     .ok()
                     .and_then(|delay| now.checked_add_signed(delay))
                     .unwrap_or(DateTime::<Utc>::MAX_UTC);
-                (EmbeddingFailure::Retry { at }, Settled::Retrying)
+                let answered = !matches!(other, MemoryError::Embedder(EmbedderError::NoAnswer(_)));
+                (EmbeddingFailure::Retry { at, answered }, Settled::Retrying)
             }
         };
         self.storage
@@ -548,6 +552,39 @@ mod tests {
 
         step(&s.engine, &KEY_401).await;
         assert_eq!(step(&s.engine, &rejected).await.1, Settled::Rejected);
+        assert_eq!(config(&s.engine, PAUSED_SINCE).await, None);
+        assert_eq!(config(&s.engine, PAUSE_ERROR).await, None);
+    }
+
+    /// A timeout, a reset or a broken body is no answer: it backs its item off like a 5xx
+    /// but says nothing about the key, so the pause stays until a real answer.
+    #[tokio::test]
+    async fn no_answer_keeps_the_pause_and_an_answer_clears_it() {
+        let s = store();
+        let id = deferred(&s.engine, "a").await;
+        let timed_out = answers(|_| Err(EmbedderError::NoAnswer("timed out".into()).into()));
+
+        step(&s.engine, &KEY_401).await;
+        let since = config(&s.engine, PAUSED_SINCE).await;
+        assert!(since.is_some());
+        assert_eq!(step(&s.engine, &timed_out).await, (id, Settled::Retrying));
+        let (attempts, _, last_error, failed_at) = queue_row(&s.path, id).unwrap();
+        assert_eq!((attempts, failed_at), (1, None), "only the item backs off");
+        assert_eq!(last_error.as_deref(), Some("embedder: timed out"));
+        assert_eq!(config(&s.engine, PAUSED_SINCE).await, since);
+        assert_eq!(
+            config(&s.engine, PAUSE_ERROR).await.as_deref(),
+            Some("embedder: 401")
+        );
+
+        rusqlite::Connection::open(&s.path)
+            .unwrap()
+            .execute(
+                "UPDATE embed_queue SET next_attempt_at = '2000-01-01T00:00:00+00:00'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(step(&s.engine, &ANSWER_503).await, (id, Settled::Retrying));
         assert_eq!(config(&s.engine, PAUSED_SINCE).await, None);
         assert_eq!(config(&s.engine, PAUSE_ERROR).await, None);
     }

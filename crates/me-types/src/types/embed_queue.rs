@@ -32,6 +32,8 @@ pub enum EmbeddingFailure {
     Retry {
         /// When the item is due again.
         at: DateTime<Utc>,
+        /// Whether the embedder answered, which proves the key works and clears a pause.
+        answered: bool,
     },
     /// This input will never embed as sent: the item stops being taken.
     Fail,

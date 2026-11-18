@@ -145,8 +145,8 @@ pub fn complete(
 
 /// Record a failed attempt on fact `fact_id`, in one transaction.
 ///
-/// `Retry` and `Fail` count the attempt and keep `error` on the row; an answer came back,
-/// so they clear the pause. `Hold` changes no queue row; paused, it keeps the first pause
+/// `Retry` and `Fail` count the attempt and keep `error` on the row; `Fail`, and `Retry` when
+/// the embedder answered, clear the pause. `Hold` changes no queue row; paused, it keeps the first pause
 /// time and the latest `error`. Every failure records its time, `error` and `fact_id`.
 ///
 /// # Errors
@@ -164,7 +164,7 @@ pub fn record_failure(
         .unchecked_transaction()
         .map_err(StorageError::backend)?;
     match failure {
-        EmbeddingFailure::Retry { at } => {
+        EmbeddingFailure::Retry { at, answered } => {
             tx.execute(
                 "UPDATE embed_queue SET attempts = attempts + 1, next_attempt_at = ?2,
                         last_error = ?3
@@ -172,7 +172,9 @@ pub fn record_failure(
                 params![fact_id, at.to_rfc3339(), error],
             )
             .map_err(StorageError::backend)?;
-            clear_pause(&tx)?;
+            if answered {
+                clear_pause(&tx)?;
+            }
         }
         EmbeddingFailure::Fail => {
             tx.execute(

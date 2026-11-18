@@ -188,6 +188,7 @@ const fn kind(err: &MemoryError) -> &'static str {
         MemoryError::Embedder(EmbedderError::Unreachable(_)) => "unreachable",
         MemoryError::Embedder(EmbedderError::KeyRejected(_)) => "key rejected",
         MemoryError::Embedder(EmbedderError::InputRejected(_)) => "input rejected",
+        MemoryError::Embedder(EmbedderError::NoAnswer(_)) => "no answer",
         MemoryError::Embedder(EmbedderError::Failed(_)) => "failed",
         _ => "not an embedder error",
     }
@@ -246,7 +247,7 @@ async fn a_closed_port_is_unreachable() {
 }
 
 #[tokio::test]
-async fn an_answer_slower_than_the_timeout_is_failed() {
+async fn an_answer_slower_than_the_timeout_is_no_answer() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
@@ -273,11 +274,62 @@ async fn an_answer_slower_than_the_timeout_is_failed() {
     .await
     .unwrap()
     .expect_err("an answer after the timeout is no answer");
-    assert_eq!(kind(&err), "failed", "{err}");
+    assert_eq!(kind(&err), "no answer", "{err}");
     assert!(
         err.to_string().contains("embedding HTTP request failed"),
         "{err}"
     );
+}
+
+/// A server that reads one whole request, writes `answer` and closes the connection.
+fn answers_then_closes(answer: &'static [u8]) -> String {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let uri = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0; 4096];
+        let whole = |r: &[u8]| {
+            let text = String::from_utf8_lossy(r);
+            text.split_once("\r\n\r\n").is_some_and(|(head, body)| {
+                let length = head
+                    .lines()
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|n| n.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                body.len() >= length
+            })
+        };
+        while !whole(&request) {
+            let n = stream.read(&mut buf).unwrap();
+            request.extend_from_slice(&buf[..n]);
+        }
+        stream.write_all(answer).unwrap();
+    });
+    uri
+}
+
+#[tokio::test]
+async fn a_connection_that_breaks_off_is_no_answer() {
+    for (answer, says) in [
+        (&b""[..], "embedding HTTP request failed"),
+        (
+            &b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"data\""[..],
+            "embedding response read failed",
+        ),
+    ] {
+        let uri = answers_then_closes(answer);
+        let err = tokio::task::spawn_blocking(move || provider_for(&uri, 4).embed("hello"))
+            .await
+            .unwrap()
+            .expect_err("a connection closed before its answer ends is no answer");
+        assert_eq!(kind(&err), "no answer", "{err}");
+        assert!(err.to_string().contains(says), "{err}");
+    }
 }
 
 #[tokio::test]

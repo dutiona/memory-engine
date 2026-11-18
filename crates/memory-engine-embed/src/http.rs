@@ -460,10 +460,11 @@ impl HttpEmbeddingProvider {
     /// [`MemoryError::Embedder`], by what a retry can do:
     /// [`Unreachable`](EmbedderError::Unreachable) when the request never reached the
     /// server, [`KeyRejected`](EmbedderError::KeyRejected) on 401 or 403,
-    /// [`InputRejected`](EmbedderError::InputRejected) on 400, 413 or 422, and
-    /// [`Failed`](EmbedderError::Failed) on a timeout, a reset, a broken body or any other
-    /// non-2xx (status and capped body included); a non-2xx also carries its status and its
-    /// body parsed as JSON. [`MemoryError::Internal`] when a 2xx body exceeds the size cap.
+    /// [`InputRejected`](EmbedderError::InputRejected) on 400, 413 or 422,
+    /// [`NoAnswer`](EmbedderError::NoAnswer) on a timeout, a reset or a broken body, and
+    /// [`Failed`](EmbedderError::Failed) on any other non-2xx (status and capped body
+    /// included); a non-2xx also carries its status and its body parsed as JSON.
+    /// [`MemoryError::Internal`] when a 2xx body exceeds the size cap.
     fn send_request(&self, url: &str, payload: &serde_json::Value) -> Result<Vec<u8>, SendError> {
         let mut req = self.client.post(url).json(payload);
         if let Some(key) = &self.api_key {
@@ -476,7 +477,7 @@ impl HttpEmbeddingProvider {
             MemoryError::from(if e.is_connect() && !e.is_timeout() {
                 EmbedderError::Unreachable(message)
             } else {
-                EmbedderError::Failed(message)
+                EmbedderError::NoAnswer(message)
             })
         })?;
 
@@ -894,7 +895,7 @@ fn read_body_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>, Memory
     let read = resp
         .take(MAX_BODY + 1)
         .read_to_end(&mut buf)
-        .map_err(|e| EmbedderError::Failed(format!("embedding response read failed: {e}")))?;
+        .map_err(|e| EmbedderError::NoAnswer(format!("embedding response read failed: {e}")))?;
     if read as u64 > MAX_BODY {
         return Err(MemoryError::Internal(format!(
             "embedding response too large: exceeds {MAX_BODY}-byte cap"

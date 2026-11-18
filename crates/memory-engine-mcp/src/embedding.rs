@@ -15,7 +15,8 @@ pub const RECALL_EMBED_LIMIT: Duration = Duration::from_millis(500);
 /// Why a read fell back to full-text search; [`as_str`](Self::as_str) is ADR-0020 §10's cause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Degraded {
-    /// The query embed failed: no connection, an error answer, or anything else.
+    /// The query embed failed: no connection, no answer (a reset, a broken body), an error
+    /// answer, or anything else.
     EmbedderDown,
     /// No answer within [`RECALL_EMBED_LIMIT`].
     EmbedderSlow,

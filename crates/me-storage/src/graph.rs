@@ -625,9 +625,10 @@ pub trait FactGraph: Send + Sync {
     ) -> Result<()>;
 
     /// Record a failed attempt on fact `fact_id`, in one transaction: `Retry` reschedules
-    /// the item, `Fail` fails it (both count the attempt, keep `error` and clear the
-    /// pause), `Hold` changes no queue row (and, paused, keeps the first pause time and
-    /// the latest `error`). Every failure sets the last-error time and text.
+    /// the item, `Fail` fails it (both count the attempt and keep `error`; `Fail`, and a
+    /// `Retry` the embedder answered, clear the pause), `Hold` changes no queue row (and,
+    /// paused, keeps the first pause time and the latest `error`). Every failure sets the
+    /// last-error time and text.
     async fn record_embedding_failure(
         &self,
         fact_id: i64,

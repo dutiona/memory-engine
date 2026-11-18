@@ -304,7 +304,8 @@ When the query embed falls back, the answer names why:
   back; `vector only` when the query holds no word.
 - `degraded`: present only after a fallback (ADR-0020 §10). The query embed gets 500 ms; past that, or on a failure,
   `recall` answers from full-text search with one of three causes: `embedder slow` (no answer within 500 ms),
-  `embedder key rejected` (401 or 403) or `embedder down` (anything else: no connection, another error answer). A
+  `embedder key rejected` (401 or 403) or `embedder down` (anything else: no connection, a connection that broke off
+before its answer, another error answer). A
   query with no word then has nothing to search and answers `"results":[]`. With no embedder configured there is no
   `degraded`: that is configuration, not a fallback. An embed call left behind at 500 ms ends at the provider's own
   timeout and its answer is dropped.
@@ -382,7 +383,8 @@ embedder answers decides what happens to the item:
 | No connection made (refused, DNS, TLS) | unchanged, still due | waits |
 | 401 or 403 | unchanged, still due | paused, with the error; re-probed on the backoff schedule, cleared by the next answer |
 | 400, 413 or 422 | failed, for good, with its error; it stays found by full-text search | the pause, if any, clears |
-| A timeout, a reset, a 5xx or any other answer | backs off alone, with its error | the pause, if any, clears |
+| No answer: a timeout, a reset, a broken body | backs off alone, with its error | a pause holds: no answer says anything about the key |
+| A 5xx or any other answer | backs off alone, with its error | the pause, if any, clears |
 
 The backoff is 1 s doubling to 60 s, per item, and retries go on however long the outage lasts. After an answer that
 embedded nothing, the drain also sleeps by its streak of such answers on the same schedule, so an embedder that is
