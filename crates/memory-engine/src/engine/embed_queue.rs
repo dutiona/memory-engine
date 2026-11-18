@@ -219,7 +219,8 @@ impl MemoryEngine {
 ///
 /// Opens one `SQLite` connection with `SQLITE_OPEN_READ_ONLY` and a busy timeout, checks
 /// that it is read-only, and checks the schema version without migrating, so it runs
-/// beside a live server and changes nothing; it takes no store lock (ADR-0020 §8).
+/// beside a live server and changes nothing; it takes no store lock (ADR-0020 §8). One read
+/// transaction holds every field to the same commit.
 ///
 /// # Errors
 ///
@@ -255,7 +256,12 @@ impl MemoryEngine {
 /// ```
 pub fn read_embed_queue_status(db: &Path) -> Result<EmbedQueueStatus> {
     let conn = open_status_connection(db)?;
-    crate::store::embed_queue::read_status(&conn)
+    // One read transaction: the version, the counts and the queue-wide keys are one commit's.
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
+    crate::store::schema::validate_schema_version(&tx)?;
+    crate::store::embed_queue::read_status(&tx)
 }
 
 fn open_status_connection(db: &Path) -> Result<Connection> {
@@ -265,7 +271,6 @@ fn open_status_connection(db: &Path) -> Result<Connection> {
             "status needs a read-only connection".into(),
         ));
     }
-    crate::store::schema::validate_schema_version(&conn)?;
     Ok(conn)
 }
 

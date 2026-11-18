@@ -229,13 +229,14 @@ pub fn forget_errors_of(conn: &Connection, erased: &[i64]) -> Result<()> {
 }
 
 /// The queue as `status` reports it: counts, the oldest waiting item, and the queue-wide
-/// state. Reads only, so it runs on a read-only connection.
+/// state. Reads only, so it runs on a read-only connection; inside `tx`, so every field
+/// comes from one commit.
 ///
 /// # Errors
 ///
 /// Returns `MemoryError::Storage` on a query failure or an unparseable timestamp.
-pub fn read_status(conn: &Connection) -> Result<EmbedQueueStatus> {
-    let (waiting, oldest, failed): (i64, Option<String>, i64) = conn
+pub fn read_status(tx: &Transaction) -> Result<EmbedQueueStatus> {
+    let (waiting, oldest, failed): (i64, Option<String>, i64) = tx
         .query_row(
             "SELECT COUNT(*) FILTER (WHERE failed_at IS NULL),
                     MIN(enqueued_at) FILTER (WHERE failed_at IS NULL),
@@ -246,7 +247,7 @@ pub fn read_status(conn: &Connection) -> Result<EmbedQueueStatus> {
         )
         .map_err(StorageError::backend)?;
     let time = |key: &str| -> Result<Option<DateTime<Utc>>> {
-        parse_optional_timestamp(get_config(conn, key)?.as_deref())
+        parse_optional_timestamp(get_config(tx, key)?.as_deref())
             .map_err(|e| StorageError::backend(e).into())
     };
     Ok(EmbedQueueStatus {
@@ -255,10 +256,10 @@ pub fn read_status(conn: &Connection) -> Result<EmbedQueueStatus> {
             .map_err(StorageError::backend)?,
         failed: u64::try_from(failed).unwrap_or(0),
         paused_since: time(PAUSED_SINCE)?,
-        pause_error: get_config(conn, PAUSE_ERROR)?,
+        pause_error: get_config(tx, PAUSE_ERROR)?,
         last_success_at: time(LAST_SUCCESS_AT)?,
         last_error_at: time(LAST_ERROR_AT)?,
-        last_error: get_config(conn, LAST_ERROR)?,
+        last_error: get_config(tx, LAST_ERROR)?,
     })
 }
 
