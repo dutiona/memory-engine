@@ -5,10 +5,9 @@
 
 architecture-overview
 design-choices
-roadmap
 research-basis
 schema-evolution-policy
 embedding-identity-and-tei-qwen-migration
+geometric-associative-memory
 adr/index
-plans/2026-03-09-future-phases-design
 ```

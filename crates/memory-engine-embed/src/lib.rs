@@ -26,6 +26,11 @@
 //! [`memory_engine::traits::DeltaProposer`] for the pluggable consolidation backend
 //! (#554), driving an Ollama `/api/generate` endpoint to propose fact merges.
 
+// Panic-safety gate (#725): `unwrap_used = "deny"` forbids `.unwrap()` in production
+// paths, where a panic aborts the *consumer's* process. This crate's own `#[cfg(test)]`
+// unit tests are exempt: a panic there is the intended failure signal.
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 mod http;
 mod proposer;
 

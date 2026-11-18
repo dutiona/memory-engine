@@ -33,7 +33,7 @@ cargo clippy --all-targets            # lint (pedantic + nursery)
 cargo fmt --check                     # format check
 cargo bench                           # Criterion benchmarks
 cargo doc --no-deps --open            # API reference
-uv run sphinx-build -b html docs docs/_build  # narrative docs (Python 3.12+)
+uv run --locked sphinx-build -b html -W --keep-going -E docs docs/_build  # narrative docs (Python 3.12+)
 just --list                           # dev task runner (install: cargo install just) — linkmap / symbols / fuzz-build
 sh plugins/memory-engine/tests/run.sh # the Claude Code plugin's shell suite (its full gate: AGENTS.md, plugins/memory-engine/README.md)
 ```
@@ -54,12 +54,23 @@ export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intr
 cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only; #915 widens to --workspace)
 cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
+uv run --locked sphinx-build -b html -W --keep-going -E docs docs/_build  # Sphinx site: a warning fails it (#1046); local only, no CI job runs Sphinx
 cargo +nightly fuzz build                                              # Fuzz gate (#993) — detached fuzz/ consumes the facade API; needs nightly + cargo-fuzz
 ```
 
 The last line is the **facade-API gate** (#993): the `fuzz/` crate is a *deliberately detached* workspace (empty `[workspace]`, nightly + libFuzzer), so **no `--workspace` command compiles it** — yet it consumes `memory-engine` / `-embed` / `-mcp` public API by path. A facade removal or rename can therefore break a real in-repo consumer with nothing else noticing. It needs `nightly` + `cargo-fuzz` (`rustup toolchain install nightly; cargo install cargo-fuzz --locked`), and it is *incremental* — a seconds-long no-op when the facade is unchanged, a ~2-min rebuild exactly when it changed. `just fuzz-build` is the equivalent one-word wrapper.
 
 The workflow also carries an **MSRV** job — `cargo +1.89 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you change a dependency or edition-sensitive code.
+
+**Image build**: when a change touches `Containerfile`, `.containerignore` or `Cargo.lock`, build the server image from the committed tree (commit first: `git archive` reads `HEAD`) and run both binaries from it. It is heavy: it compiles the workspace again, in release, inside the container. It is bounded to 16 CPUs and 32 GiB by a CPU quota and a memory limit (`--cpuset-cpus` fails under rootless podman, which is usually delegated only the cpu, memory and pids controllers); it keeps no intermediate layers, and it removes its image:
+
+```bash
+git archive --format=tar HEAD | podman build --pull=newer --layers=false --memory=32g \
+    --cpu-period=100000 --cpu-quota=1600000 -t memory-engine:verify -
+podman run --rm --network=none memory-engine:verify --version            # memory-engine-mcp, the entrypoint
+podman run --rm --network=none --entrypoint memory-engine-cli memory-engine:verify --version
+podman rmi memory-engine:verify
+```
 
 **Dispatching CI** (it will not run itself):
 

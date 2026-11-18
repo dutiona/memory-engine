@@ -97,7 +97,7 @@ impl<'a> ScopeStore<'a> {
     /// low-level method inserts `label` verbatim — callers are responsible for
     /// ensuring it is non-empty, contains no `/`, has no leading/trailing
     /// whitespace, and is at most [`me_types::types::MAX_SEGMENT_LEN`] bytes (the
-    /// rules enforced by [`me_types::types::validate_segment`]). Storing a malformed
+    /// rules [`Self::ensure_path`] enforces). Storing a malformed
     /// label here can break round-tripping through
     /// `ScopeTree::resolve_path`. Prefer [`Self::ensure_path`]
     /// for a validated, idempotent alternative.
@@ -348,13 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn ensure_path_rejects_slash_in_label() {
+    fn ensure_path_rejects_leading_whitespace_label() {
         let conn = setup();
         let store = ScopeStore::new(&conn);
-        // A single segment containing a slash would be split by the '/' delimiter,
-        // so we test a label with leading whitespace instead
         let err = store.ensure_path(" leading-space").unwrap_err();
-        assert!(matches!(err, MemoryError::Conflict(_)));
+        assert!(matches!(
+            err,
+            MemoryError::Conflict(ConflictError::ScopeLabel(m))
+                if m == "scope label must not have leading/trailing whitespace"
+        ));
     }
 
     #[test]

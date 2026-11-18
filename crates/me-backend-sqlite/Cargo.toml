@@ -96,17 +96,5 @@ ann = ["dep:hnsw", "dep:space", "dep:rand"]
 # escape hatch needs the port trait's test-only method to exist.
 test-util = ["me-types/test-util", "me-storage/test-util"]
 
-[lints.rust]
-# Duplicated from `[workspace.lints.rust]` (Cargo rejects mixing `workspace = true` with
-# a crate-local addition in the same lint table) so this crate can additionally register
-# `fuzzing` (Sub-PR 2b: `search::fts::fuzz_fts_query`/`snapshot::fuzz_wrap_payload`,
-# set only by `cargo fuzz`, moved from the facade — same fuzz-seam functions, same
-# `--cfg fuzzing`-only cfg) without the otherwise-unknown-cfg warning under `-D warnings`.
-unsafe_code = "forbid"
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-unwrap_used = "deny"
+[lints]
+workspace = true

@@ -32,10 +32,21 @@ export RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intr
 cargo doc --no-deps -p memory-engine                                   # Docs, default features (core crate only)
 cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
+uv run --locked sphinx-build -b html -W --keep-going -E docs docs/_build  # Sphinx site: a warning fails it (#1046); local only, no CI job runs Sphinx
 cargo +nightly fuzz build                                              # Fuzz gate (#993) — detached fuzz/ consumes the facade API; needs nightly + cargo-fuzz
 ```
 
 Run all of them after every change. Do not skip any, and do not substitute a weaker variant — with CI on manual dispatch, there is no second chance to catch it. The last line is the **facade-API gate** (#993): `fuzz/` is a detached workspace that no `--workspace` command compiles, yet it consumes the facade public API by path — so a removal or rename can break it silently. It needs nightly + cargo-fuzz (`just fuzz-build` wraps it) and is incremental (a seconds-long no-op when the facade is unchanged). The workflow also carries an **MSRV** job — `cargo +1.89 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you change a dependency or edition-sensitive code.
+
+**Image build**: when a change touches `Containerfile`, `.containerignore` or `Cargo.lock`, build the server image from the committed tree (commit first: `git archive` reads `HEAD`) and run both binaries from it. It is heavy: it compiles the workspace again, in release, inside the container. It is bounded to 16 CPUs and 32 GiB by a CPU quota and a memory limit (`--cpuset-cpus` fails under rootless podman, which is usually delegated only the cpu, memory and pids controllers); it keeps no intermediate layers, and it removes its image:
+
+```bash
+git archive --format=tar HEAD | podman build --pull=newer --layers=false --memory=32g \
+    --cpu-period=100000 --cpu-quota=1600000 -t memory-engine:verify -
+podman run --rm --network=none memory-engine:verify --version            # memory-engine-mcp, the entrypoint
+podman run --rm --network=none --entrypoint memory-engine-cli memory-engine:verify --version
+podman rmi memory-engine:verify
+```
 
 **The Claude Code plugin** (`plugins/memory-engine/`, listed by `.claude-plugin/marketplace.json`) is POSIX `sh`, outside the cargo matrix, with its own gate:
 

@@ -29,7 +29,6 @@ me-types = { path = "../me-types" }
 me-traits = { path = "../me-traits" }
 me-storage = { path = "../me-storage" }
 me-backend-sqlite = { path = "../me-backend-sqlite" }
-me-backend-postgres = { path = "../me-backend-postgres", optional = true }
 async-trait = "0.1"
 # `Utc::now()` in the fixtures; the DTOs' `DateTime` serde impls are enabled by me-types,
 # so this crate needs no `serde` feature of its own here.
@@ -47,19 +46,18 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [features]
 # The `raw_exec` crash-injection seam + the whole conformance battery. Forwards to every
-# backend dep's own `test-util` (weak `?` forward for the optional PG dep, so enabling
-# `test-util` alone never drags in `me-backend-postgres`). Mirrors the facade's forward.
+# backend dep's own `test-util`. Mirrors the facade's forward.
 test-util = [
     "me-types/test-util",
     "me-storage/test-util",
     "me-backend-sqlite/test-util",
-    "me-backend-postgres?/test-util",
 ]
 # Gates the `cold` behavior module + the `cold_behaviors_into!` suites + factory's
 # `make_with_cold` (mirrors the facade's `archive` forwarding chain exactly).
 archive = ["me-types/archive", "me-storage/archive", "me-backend-sqlite/archive"]
-# Compiles in the (inert, #[ignore]-d) PgFactory + postgres suites.
-backend-postgres = ["dep:me-backend-postgres"]
+# Compiles in the inert, #[ignore]-d PgFactory + postgres suites, which name no PG type
+# yet; #635 adds `dep:me-backend-postgres` with the first code that names `PgBackend`.
+backend-postgres = []
 
 [lints]
 workspace = true

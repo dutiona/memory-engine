@@ -3,10 +3,10 @@
 //! `search::fts::fts_search` (reached from the engine's hybrid search) binds an
 //! untrusted query string into a SQLite FTS5 `MATCH ?` expression. FTS5 has its
 //! own mini query grammar (phrases, `NEAR`, column filters, `AND`/`OR`/`NOT`,
-//! prefix `*`, quoting), and malformed input surfaces as a syntax error at
-//! `query_map` time rather than at prepare time. The contract is total: every
-//! query string must either return rows or be caught and mapped to an empty
-//! result — never a panic, never a propagated error for a syntax-malformed query.
+//! prefix `*`, quoting), and malformed input surfaces as an FTS5 error when the
+//! statement first steps, not at prepare time. The contract is total: every
+//! query string must either return rows or be read as no match — never a
+//! panic, never a propagated error on a healthy store.
 //!
 //! This harness feeds arbitrary bytes (lossy-UTF-8-decoded) through the
 //! `#[cfg(fuzzing)]` `memory_engine::fuzz_seam::fuzz_fts_query` seam, which owns
