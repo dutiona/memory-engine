@@ -11,7 +11,8 @@
 //! Each run uses a fresh in-memory engine and no embedder, so `remember` refuses after
 //! validating its arguments and `recall` runs full-text only: exactly the untrusted-parse
 //! surface. Each run also seeds one fact at the user level, so `set_level` reaches its move
-//! (a fuzzed key's project creation included) for the fact's id 1. No tool writes outside
+//! (a fuzzed key's project creation included) and `forget` its retraction for the fact's
+//! id 1. No tool writes outside
 //! the store (no tool takes a path).
 #![no_main]
 
@@ -32,6 +33,7 @@ const DIM: usize = 8;
 const TOOL_NAMES: &[&str] = &[
     "recall",
     "remember",
+    "forget",
     "set_level",
     "memory_forget",
     "memory_unknown_tool_name",

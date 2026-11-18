@@ -209,6 +209,10 @@ pub struct ApplyResult {
     pub superseded: usize,
     /// Number of [`CycleDelta::Synthesize`] merges applied.
     pub synthesized: usize,
+    /// `Promote`, `AddFact` and `Synthesize` deltas skipped because a forget's tombstone
+    /// blocks their content (#1023): a cycle never brings a forgotten fact back.
+    #[serde(default)]
+    pub blocked: usize,
     /// Ids of facts created by [`CycleDelta::AddFact`], in delta order.
     pub new_fact_ids: Vec<FactId>,
     /// Ids of the synthetic merge facts created by [`CycleDelta::Synthesize`], in

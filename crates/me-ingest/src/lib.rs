@@ -306,6 +306,8 @@ async fn insert_fact_with_embedding(
 /// Returns `MemoryError::Conflict(ConflictError::PolicyParameter)` if any
 /// entry's `opts.base_importance` is set and outside `[0, 1]` (or non-finite);
 /// the whole batch is rejected up front, so no entry is embedded or written.
+/// Returns `MemoryError::Conflict(ConflictError::Forgotten)` if a forget's tombstone
+/// blocks an entry's content (#1023); the whole batch rolls back.
 /// Returns errors from batch embedding, dimension validation, or DB insert.
 /// Returns `MemoryError::Internal` if the embedder returns a different
 /// number of embeddings than input entries.
@@ -342,7 +344,8 @@ pub async fn add_facts_batch(
 ///
 /// Each input entry maps positionally to one `Result<i64, MemoryError>`:
 /// `Ok(id)` if it was embedded and inserted, `Err(e)` if it was rejected by
-/// per-record validation (importance range, oversized content/metadata). The
+/// per-record validation (importance range, oversized content/metadata) or because a
+/// forget's tombstone blocks its content (`Conflict(Forgotten)`, #1023). The
 /// **valid** partition is embedded and inserted in one atomic batch, so the
 /// invalid records are simply skipped rather than failing their neighbours.
 ///
@@ -380,6 +383,12 @@ pub async fn add_facts_batch_partial(
     let mut valid: Vec<&AddFactRequest> = Vec::with_capacity(entries.len());
     for entry in entries {
         match validate_add_fact_request(entry) {
+            // A forget's tombstone blocks the content (#1023): refused per record, never
+            // embedded, so one forgotten line does not roll its neighbours back. The insert
+            // stays gated as the backstop.
+            Ok(()) if ctx.storage.is_forgotten(&entry.content).await? => {
+                validation.push(Some(MemoryError::Conflict(ConflictError::Forgotten)));
+            }
             Ok(()) => {
                 valid.push(entry);
                 validation.push(None);

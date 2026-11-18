@@ -90,6 +90,6 @@ git archive --format=tar <tag> | podman build --pull=newer -t memory-engine:<tag
   `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<port>/mcp` prints `401`.
 - `podman stop` sends SIGTERM: the server drains its tool calls, flushes its snapshot and exits 0.
 - The server holds `<db>.store-lock` while it runs. A CLI container on the same volume refuses every writable command
-  (`prune`, `migrate`, `add-fact`, …) until the server stops; read-only commands and `export` run beside it.
+  (`prune`, `unforget`, `erase`, `migrate`, `add-fact`, …) until the server stops; read-only commands and `export` run beside it.
 
 How the image is deployed (volumes, ports, secrets) is outside this repository.

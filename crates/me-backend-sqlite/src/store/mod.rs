@@ -9,6 +9,7 @@ pub mod checkpoints;
 pub mod edges;
 pub mod embedding_meta;
 pub mod embedding_spaces;
+pub mod erase;
 pub mod events;
 pub mod fact_vectors;
 pub mod facts;
@@ -16,6 +17,7 @@ pub mod lineage;
 pub mod schema;
 pub mod scopes;
 pub mod summaries;
+pub mod tombstones;
 
 pub use scopes::ScopeStore;
 // `UpcasterRegistry`/`UpcasterFn` carved into the me-storage (L1) port (Wave 2 #816);

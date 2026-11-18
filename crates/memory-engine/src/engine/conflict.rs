@@ -47,6 +47,9 @@ impl MemoryEngine {
     ///   missing `old_id` is rejected at lookup. On a writable engine all cases are
     ///   indistinguishable to the caller (each yields `NotFound`); on a read-only engine
     ///   `ReadOnly` takes precedence (the lookup is skipped — see above).
+    /// - [`MemoryError::Conflict`](crate::error::MemoryError::Conflict) wrapping
+    ///   [`ConflictError::Forgotten`](crate::error::ConflictError::Forgotten) — a
+    ///   forget's tombstone blocks the candidate's content (#1023); nothing is written.
     /// - Propagates any error returned by the [`ConflictArbiter`] or the
     ///   underlying database operations.
     ///

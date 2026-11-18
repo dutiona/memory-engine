@@ -743,8 +743,8 @@ fn all_nine_indexes_created() {
             |r| r.get(0),
         )
         .unwrap();
-    // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11) + 1 embedding_spaces one-active (v13) + 1 fact_vectors space (v14)
-    assert_eq!(count, 29);
+    // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11) + 1 embedding_spaces one-active (v13) + 1 fact_vectors space (v14) + 4 tombstone/erasure child keys (v16)
+    assert_eq!(count, 33);
 }
 
 // --- Migration framework tests ---
@@ -1549,6 +1549,9 @@ fn schema_ddl_snapshot_is_stable() {
 -- index: idx_activities_dedup
 CREATE INDEX idx_activities_dedup ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);
 
+-- index: idx_activities_promoted
+CREATE INDEX idx_activities_promoted ON activities(promoted_fact_id);
+
 -- index: idx_activities_scope_recent
 CREATE INDEX idx_activities_scope_recent ON activities(scope_id, last_seen DESC);
 
@@ -1591,6 +1594,12 @@ CREATE INDEX idx_events_session ON events(session_id) WHERE session_id IS NOT NU
 -- index: idx_events_timestamp
 CREATE INDEX idx_events_timestamp ON events(timestamp);
 
+-- index: idx_fact_tombstones_hash
+CREATE INDEX idx_fact_tombstones_hash ON fact_tombstones(content_hash);
+
+-- index: idx_fact_tombstones_record
+CREATE INDEX idx_fact_tombstones_record ON fact_tombstones(record_event_id);
+
 -- index: idx_fact_vectors_space
 CREATE INDEX idx_fact_vectors_space ON fact_vectors(space_id);
 
@@ -1611,6 +1620,9 @@ CREATE INDEX idx_facts_pinned ON facts(is_pinned) WHERE is_pinned = 1;
 
 -- index: idx_facts_scope
 CREATE INDEX idx_facts_scope ON facts(scope_id);
+
+-- index: idx_facts_source_event
+CREATE INDEX idx_facts_source_event ON facts(source_event_id);
 
 -- index: idx_facts_t_valid_due
 CREATE INDEX idx_facts_t_valid_due ON facts(t_valid) WHERE t_valid IS NOT NULL AND t_expired IS NULL;
@@ -1650,6 +1662,9 @@ CREATE TABLE embedding_spaces ( name TEXT PRIMARY KEY, model TEXT NOT NULL, prov
 
 -- table: events
 CREATE TABLE events ( id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', source TEXT NOT NULL, session_id TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), origin_node_id TEXT NOT NULL DEFAULT 'local', sequence_id INTEGER NOT NULL DEFAULT 0, created_at TEXT, event_revision INTEGER NOT NULL DEFAULT 1 );
+
+-- table: fact_tombstones
+CREATE TABLE fact_tombstones ( id INTEGER PRIMARY KEY, fact_id INTEGER UNIQUE REFERENCES facts(id) ON DELETE SET NULL, content_hash TEXT NOT NULL, reason TEXT, forgotten_at TEXT NOT NULL, record_event_id INTEGER REFERENCES events(id) ON DELETE SET NULL, prior_t_expired TEXT, prior_t_invalid TEXT );
 
 -- table: fact_vectors
 CREATE TABLE fact_vectors ( fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE, space_id TEXT NOT NULL REFERENCES embedding_spaces(name) ON DELETE CASCADE, embedding BLOB NOT NULL, PRIMARY KEY (fact_id, space_id) ) WITHOUT ROWID;
@@ -2571,4 +2586,97 @@ fn migrate_v14_to_v15_is_idempotent_on_a_current_schema() {
     migrate(&conn, None).unwrap();
     migrate(&conn, None).unwrap();
     assert_eq!(table_columns(&conn, "embedding_spaces").len(), 12);
+}
+
+// --- v15 → v16 (forget tombstones, #1023) ---
+
+const V16_OBJECTS: [&str; 5] = [
+    "fact_tombstones",
+    "idx_fact_tombstones_hash",
+    "idx_fact_tombstones_record",
+    "idx_facts_source_event",
+    "idx_activities_promoted",
+];
+
+/// Roll a fresh DB back to a simulated v15 state: drop the v16 table and indexes and reset
+/// `schema_version` to 15.
+fn simulate_v15(conn: &Connection) {
+    init_schema(conn).unwrap();
+    conn.execute_batch(
+        "DROP INDEX IF EXISTS idx_fact_tombstones_hash;
+         DROP INDEX IF EXISTS idx_fact_tombstones_record;
+         DROP INDEX IF EXISTS idx_facts_source_event;
+         DROP INDEX IF EXISTS idx_activities_promoted;
+         DROP TABLE IF EXISTS fact_tombstones;",
+    )
+    .unwrap();
+    set_config(conn, "schema_version", "15").unwrap();
+}
+
+#[test]
+fn migrate_v15_to_v16_adds_the_tombstone_table() {
+    let conn = open_memory().unwrap();
+    simulate_v15(&conn);
+    migrate(&conn, None).unwrap();
+    assert_eq!(
+        get_config(&conn, "schema_version").unwrap().as_deref(),
+        Some("16")
+    );
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM fact_tombstones", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "fact_tombstones is created empty");
+}
+
+#[test]
+fn migrate_v15_to_v16_is_idempotent_on_a_current_schema() {
+    let conn = open_memory().unwrap();
+    init_schema(&conn).unwrap();
+    set_config(&conn, "schema_version", "15").unwrap();
+    migrate(&conn, None).unwrap();
+    migrate(&conn, None).unwrap();
+    assert_eq!(
+        get_config(&conn, "schema_version").unwrap().as_deref(),
+        Some(CURRENT_SCHEMA_VERSION.to_string().as_str())
+    );
+}
+
+#[test]
+fn fresh_vs_migrated_tombstones_converge() {
+    let fresh = open_memory().unwrap();
+    init_schema(&fresh).unwrap();
+    let migrated = open_memory().unwrap();
+    simulate_v15(&migrated);
+    migrate(&migrated, None).unwrap();
+    for obj in V16_OBJECTS {
+        assert_eq!(
+            normalized_object_sql(&fresh, obj),
+            normalized_object_sql(&migrated, obj),
+            "fresh-init and migrated {obj} DDL must converge"
+        );
+    }
+}
+
+#[test]
+fn a_tombstone_outlives_its_fact_and_its_record() {
+    let conn = open_memory().unwrap();
+    init_schema(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO events (id, timestamp, event_type, source) VALUES (7, 't', 'memory_op', 'mcp');
+         INSERT INTO facts (id, content, content_hash, embedding, fact_type, t_created, last_accessed)
+             VALUES (3, 'c', 'h', X'00', 'semantic', 't', 't');
+         INSERT INTO fact_tombstones (fact_id, content_hash, reason, forgotten_at, record_event_id)
+             VALUES (3, 'hash', 'wrong', 't', 7);
+         DELETE FROM facts WHERE id = 3;
+         DELETE FROM events WHERE id = 7;",
+    )
+    .unwrap();
+    let row: (Option<i64>, String, Option<i64>) = conn
+        .query_row(
+            "SELECT fact_id, content_hash, record_event_id FROM fact_tombstones",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row, (None, "hash".to_owned(), None));
 }

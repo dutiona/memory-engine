@@ -455,3 +455,41 @@ async fn archive_search_finds_archived_facts() {
         );
     }
 }
+
+/// A forget keeps the fact's row (#1023), so archival — which hard-deletes expired facts —
+/// must leave a forgotten one in place, or unforget would have nothing to restore.
+#[tokio::test]
+async fn archive_leaves_a_forgotten_fact_in_place() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = open_file_engine(dir.path());
+    let ids = add_facts(&engine, 1).await;
+    let record = memory_engine::types::NewEvent {
+        timestamp: Utc::now(),
+        event_type: memory_engine::types::EventType::MemoryOp,
+        payload: serde_json::json!({}),
+        source: "test".into(),
+        session_id: None,
+        scope_id: 1,
+        origin_node_id: "test".into(),
+        sequence_id: 0,
+        created_at: None,
+    };
+    engine
+        .forget_fact(ids[0], &["/".into()], "wrong", "unscoped:test", &record)
+        .await
+        .unwrap();
+    let archived = engine
+        .archive(&ArchivePolicy {
+            expired_before: Utc::now() + Duration::hours(1),
+            min_facts: 1,
+        })
+        .await
+        .unwrap();
+    assert!(
+        archived.is_none(),
+        "a forgotten fact is not an archive candidate"
+    );
+    assert!(engine.get_fact(ids[0]).await.is_ok(), "the row stays");
+    engine.unforget_fact(ids[0]).await.unwrap();
+    assert!(engine.get_fact(ids[0]).await.unwrap().t_expired.is_none());
+}

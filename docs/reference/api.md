@@ -113,7 +113,22 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 | Method   | Signature                                              | Description                                                               |
 | -------- | ------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `forget` | `(&self, policy: &ForgetPolicy) -> Result<PruneStats>` | Soft-delete facts with computed importance below `policy.min_importance`. |
+| `forget` | `(&self, policy: &ForgetPolicy) -> Result<PruneStats>` | Soft-delete facts with computed importance below `policy.min_importance` (the decay prune; the CLI's `prune`). |
+
+### Retraction and erasure
+
+The model's `forget` tool and the maintenance commands `unforget` and `erase` (#1023, ADR-0020 §8).
+
+| Method | Signature | Description |
+| ------ | --------- | ----------- |
+| `forget_fact` | `(&self, id: i64, homes: &[String], reason: &str, record_at: &str, record: &NewEvent) -> Result<(ForgetOutcome, i64)>` | Retract a fact filed at one of `homes` (exact scope paths), and its active identical copies there, behind tombstones, with the call record in the same transaction. Answers `Forgotten`, `AlreadyForgotten` or `NotFound` and the record's id. |
+| `unforget_fact` | `(&self, id: i64) -> Result<UnforgetOutcome>` | Reverse the forget that retracted `id`, restoring every fact it took to its prior state. |
+| `erase` | `(&self, target: &EraseTarget) -> Result<EraseReport>` | Hard-delete a fact, or what a machine wrote, with what was derived from it; purge the files after the commit. |
+
+A tombstone blocks its content from every gated insert: `insert_or_reinforce` (`BootstrapReport::facts_blocked`),
+`add_facts_batch` (refused whole, `Conflict(Forgotten)`), `add_facts_batch_partial` (that entry only), conflict
+resolution, promotion (`promote_atomic` refuses; `apply_cycle_report` skips and counts `ApplyResult::blocked`) and
+activity promotion. Only `add_fact`/`add_fact_precomputed`, the single explicit assertion, are never blocked.
 
 `ForgetPolicy` fields:
 

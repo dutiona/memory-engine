@@ -90,7 +90,7 @@ crates/
   memory-engine/           # L4 facade — src/: engine/ inspect/ resume/ bootstrap/ search/ storage/ lib.rs
   memory-engine-embed/     # HTTP embedding provider + HttpDeltaProposer
   memory-engine-cli/       # inspector binary
-  memory-engine-mcp/       # MCP server: `recall`, `remember`, `set_level` (ADR-0020 §8)
+  memory-engine-mcp/       # MCP server: `recall`, `remember`, `forget`, `set_level` (ADR-0020 §8)
   me-test-support/         # dev-only cross-crate test doubles
 tests/     # workspace integration tests    benches/  # Criterion benchmarks
 examples/  # runnable examples               fuzz/     # cargo-fuzz (detached, nightly-only)
@@ -107,8 +107,8 @@ Full module map + the strict L0→L4 layer DAG: `docs/reference/crate-layout.md`
 3. **Conventional Commits** — `feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`, imperative mood
 4. **Atomic commits** — one logical change per commit
 5. **`unsafe_code = "forbid"`** — no unsafe code. The crate forbids it via Cargo.toml lints.
-6. **Soft deletion only** — facts are expired (`t_expired` set), never hard-deleted. Full audit trail.
-7. **Event-sourced** — the append-only event log is the source of truth. Facts are consumer-derived via `add_fact`.
+6. **Soft deletion only** — facts are expired (`t_expired` set), never hard-deleted, except `memory-engine-cli erase` (#1023), the one hard delete, and archival into a `.pak`. Full audit trail. A forget's reason lives only in its tombstone and is not rebuilt from the log.
+7. **Event-sourced** — the append-only event log is the source of truth, except that `erase` removes the events it erases. Facts are consumer-derived via `add_fact`.
 8. **Trait boundary** — never add LLM or network dependencies to the core crate. All intelligence comes through consumer traits.
 9. **Error handling** — `thiserror` for all error types, `Result<T, MemoryError>` everywhere. No `unwrap()` in library code.
 10. **Document public items** — rustdoc with `# Errors` and `# Examples` sections on all public API items.

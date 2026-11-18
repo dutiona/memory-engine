@@ -23,6 +23,7 @@ pub mod inspect;
 mod memory_query;
 mod provenance;
 mod relation;
+mod retraction;
 mod scope;
 /// Search/query result vocabulary (`SearchResult`/`SearchQuery`/`QueryResponse`…).
 pub mod search;
@@ -38,4 +39,5 @@ pub use events::*;
 pub use facts::*;
 pub use provenance::*;
 pub use relation::*;
+pub use retraction::*;
 pub use scope::*;

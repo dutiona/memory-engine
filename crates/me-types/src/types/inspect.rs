@@ -160,5 +160,10 @@ pub struct EngineSnapshot {
     /// `facts[].embedding`, so an old snapshot loses nothing).
     #[serde(default)]
     pub fact_vectors: Vec<FactVectorSnapshot>,
+    /// The forget retraction's tombstones (#1023). Absent in pre-v16 snapshots — defaults
+    /// to empty. Without them a restored store would let forgotten content back in and could
+    /// not unforget.
+    #[serde(default)]
+    pub tombstones: Vec<super::Tombstone>,
     pub config: BTreeMap<String, String>,
 }

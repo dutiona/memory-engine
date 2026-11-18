@@ -29,7 +29,7 @@ System time is managed by the engine. Valid time is set by the consumer via `Add
 
 ## System Time: Engine-Managed
 
-`t_created` is set automatically when a fact is inserted. `t_expired` is set by internal operations -- consolidation dedup, forgetting prune, or conflict resolution. The consumer never sets these directly.
+`t_created` is set automatically when a fact is inserted. `t_expired` is set by internal operations -- consolidation dedup, forgetting prune, conflict resolution, or the model's `forget` retraction. The consumer never sets these directly.
 
 Facts are **soft-deleted**: the engine sets `t_expired` rather than removing the row. This preserves the full audit trail. A fact with `t_expired = Some(...)` is invisible to active queries but still exists in the database.
 
@@ -104,6 +104,10 @@ When conflict resolution produces an `Update` or `Delete` decision, the engine s
 ```
 
 This distinguishes conflict-driven invalidation (both timestamps set) from forgetting-driven expiry (only `t_expired` set).
+
+The model's `forget` retraction (#1023) sets both too, `t_expired` to `coalesce(t_expired, now)` and `t_invalid` to
+`min(coalesce(t_invalid, now), now)`, and is told apart by its tombstone, which keeps the two prior values:
+`memory-engine-cli unforget` writes them back exactly, so a fact pruned before it was forgotten stays expired.
 
 ## Use Cases
 

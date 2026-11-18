@@ -53,14 +53,20 @@ pub enum FactState {
     },
 }
 
-/// Best-effort reason why a fact is expired.
+/// Why a fact is expired.
 ///
-/// Forgetting, conflict resolution, and deduplication do not currently emit
-/// `MemoryOp` events, so most expired facts will return [`ExpiredReason::Unknown`]
-/// until an event-based audit trail is added.
+/// A forget is reported exactly, from its tombstone. The other reasons are best-effort:
+/// decay pruning, conflict resolution and deduplication do not emit `MemoryOp` events, so
+/// most such facts return [`ExpiredReason::Unknown`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExpiredReason {
-    Forgotten,
+    /// Retracted by a forget (#1023): when, why, and the forget's call record. The reason
+    /// and the record are `None` once erased.
+    Forgotten {
+        at: DateTime<Utc>,
+        reason: Option<String>,
+        record_event_id: Option<i64>,
+    },
     ConflictResolved {
         superseded_by: Option<i64>,
     },
@@ -314,7 +320,11 @@ mod tests {
                 reason: ExpiredReason::Unknown,
             },
             FactState::Expired {
-                reason: ExpiredReason::Forgotten,
+                reason: ExpiredReason::Forgotten {
+                    at: ts(2_000),
+                    reason: Some("wrong".into()),
+                    record_event_id: Some(4),
+                },
             },
             FactState::Expired {
                 reason: ExpiredReason::ConflictResolved {
@@ -343,7 +353,11 @@ mod tests {
     #[test]
     fn expired_reason_variants_roundtrip() {
         for reason in [
-            ExpiredReason::Forgotten,
+            ExpiredReason::Forgotten {
+                at: ts(2_000),
+                reason: None,
+                record_event_id: None,
+            },
             ExpiredReason::ConflictResolved {
                 superseded_by: Some(5),
             },
@@ -584,6 +598,7 @@ mod tests {
             lineage: vec![sample_lineage()],
             embedding_spaces: vec![],
             fact_vectors: vec![],
+            tombstones: vec![],
             config,
         };
         // EngineSnapshot does not derive `PartialEq` (it nests `serde_json::Value`
@@ -611,5 +626,10 @@ mod tests {
         let snapshot: EngineSnapshot =
             serde_json::from_value(json).expect("pre-v8 snapshot must deserialize");
         assert_eq!(snapshot.lineage, []);
+        assert_eq!(
+            snapshot.tombstones,
+            [],
+            "pre-v16 snapshots have no tombstones"
+        );
     }
 }

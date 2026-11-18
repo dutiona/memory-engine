@@ -31,9 +31,7 @@ me-types = { path = "../me-types", features = ["archive"] }
 # `archive` gates the `ColdStorage` port trait this crate's orchestration layer
 # (manage.rs) consumes.
 me-storage = { path = "../me-storage", features = ["archive"] }
-# `archive` gates `MemoryGraph::remove_node` (the post-commit graph prune,
-# manage.rs's `archive()`); `remove_edges_by_fact` is unconditional.
-me-index = { path = "../me-index", features = ["archive"] }
+me-index = { path = "../me-index" }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

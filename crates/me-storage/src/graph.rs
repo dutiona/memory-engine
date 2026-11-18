@@ -31,9 +31,19 @@ pub enum BootstrapIngestOutcome {
     /// The `skip_if_present` filter matched an existing event **under the write lock**,
     /// so nothing was written and the savepoint was released empty.
     Skipped,
-    /// The batch committed. `(fact_id, reinforced)` per input fact, in `facts` order;
-    /// `reinforced == false` ⟹ a new row was created.
-    Ingested(Vec<(i64, bool)>),
+    /// The batch committed. One [`ImportOutcome`] per input fact, in `facts` order.
+    Ingested(Vec<ImportOutcome>),
+}
+
+/// What an idempotent import did with one fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// A new row, with this id.
+    Created(i64),
+    /// An active fact with the same content in the same scope, reinforced.
+    Reinforced(i64),
+    /// A forget's tombstone blocks the content and no active twin exists: nothing written.
+    Blocked,
 }
 
 /// What a write that names scope paths returns.
@@ -83,8 +93,9 @@ pub struct ScopedWrite {
 #[async_trait]
 pub trait FactGraph: Send + Sync {
     // --- facts: write ---
+    /// Insert a fact. Gated (#1023): content a forget's tombstone blocks is refused with
+    /// `Conflict(Forgotten)`.
     async fn insert_fact(&self, fact: &NewFact) -> Result<i64>;
-    async fn insert_or_reinforce_fact(&self, fact: &NewFact) -> Result<(i64, bool)>;
     async fn expire_fact(&self, id: i64, now: DateTime<Utc>) -> Result<()>;
     /// Bi-temporally expire **and** invalidate a fact (set both `t_expired` and
     /// `t_invalid`) — conflict resolution's `Update`/`Delete` semantics. Fires the
@@ -106,7 +117,6 @@ pub trait FactGraph: Send + Sync {
         fact_ids: &[i64],
         now: DateTime<Utc>,
     ) -> Result<Vec<(i64, DateTime<Utc>)>>;
-    async fn hard_delete_facts(&self, ids: &[i64]) -> Result<usize>;
 
     // --- facts: read (single / batch / full scan) ---
     async fn get_fact(&self, id: i64) -> Result<Fact>;
@@ -251,7 +261,6 @@ pub trait FactGraph: Send + Sync {
         fact_ids: &[i64],
         relation_type: &str,
     ) -> Result<HashSet<(i64, i64)>>;
-    async fn hard_delete_edges_by_facts(&self, fact_ids: &[i64]) -> Result<usize>;
 
     // --- scopes ---
     async fn get_scope(&self, id: i64) -> Result<ScopeNode>;
@@ -271,6 +280,9 @@ pub trait FactGraph: Send + Sync {
 
     /// Atomically stamp the embedding identity (fingerprint) and insert one fact,
     /// in a single `rusqlite` transaction.
+    ///
+    /// The one ungated insert (#1023): it serves the single explicit assertion (`remember`,
+    /// `add-fact`), which a forget's tombstone never blocks.
     ///
     /// The caller (`insert_fact_with_embedding`) is responsible for:
     /// - scope resolution (done before the call, autocommit-separate by design)
@@ -310,6 +322,9 @@ pub trait FactGraph: Send + Sync {
     /// run inside the savepoint and are returned as `scope_ids_to_cache` so the
     /// engine can update `scope_tree.write()` **after** the successful commit,
     /// preventing cache desync on rollback.
+    ///
+    /// Gated (#1023): one entry whose content a forget's tombstone blocks refuses the
+    /// whole batch with `Conflict(Forgotten)`.
     ///
     /// # Contract
     ///
@@ -491,8 +506,8 @@ pub trait FactGraph: Send + Sync {
     /// value the caller set on [`NewFact::source_event_id`](me_types::types::NewFact) is
     /// overwritten). When `None` (the `--memory-dir` path — one file per call, no
     /// event), each fact keeps its own `source_event_id`. Each fact is then
-    /// dedup-with-reinforced ([`insert_or_reinforce_fact`](Self::insert_or_reinforce_fact)
-    /// semantics). If **any** fact is newly created, the embedding identity
+    /// dedup-with-reinforced (same content in the same scope reinforces the existing
+    /// active fact). If **any** fact is newly created, the embedding identity
     /// `fingerprint` is recorded-if-absent at the tail of the savepoint (#643: the
     /// identity commits atomically with the vectors it describes; a batch that only
     /// reinforces writes no new vector and leaves the store unstamped, so a later real
@@ -510,9 +525,8 @@ pub trait FactGraph: Send + Sync {
     /// `Ok(Ingested) ⟹ all sub-ops committed; Ok(Skipped) ⟹ nothing written (savepoint
     /// released empty); Err ⟹ store byte-identical (savepoint rolled back)`. Bootstrap
     /// deliberately does **not** touch the HNSW sidecar (the vector
-    /// index is rebuilt from the DB at open), so — unlike
-    /// [`insert_or_reinforce_fact`](Self::insert_or_reinforce_fact) — no post-commit
-    /// index notification fires, and the `IndexInconsistent` post-commit exception the
+    /// index is rebuilt from the DB at open), so no post-commit index
+    /// notification fires, and the `IndexInconsistent` post-commit exception the
     /// other atomic methods carry does not apply here. This keeps both bootstrap paths
     /// consistent (neither populates the live index mid-run).
     ///

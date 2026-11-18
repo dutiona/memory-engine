@@ -435,7 +435,8 @@ pub trait DreamCtx: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error if the promotion fails (dimension mismatch, DB error, etc.).
+    /// Returns an error if the promotion fails (dimension mismatch, DB error, etc.), and
+    /// `Conflict(Forgotten)` when a forget's tombstone blocks the content (#1023).
     async fn promote(&self, req: &PromoteRequest) -> Result<PromotionResult>;
 
     /// List active facts in `window` that have not yet been dream-cycled.

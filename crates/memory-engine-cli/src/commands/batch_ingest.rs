@@ -642,6 +642,80 @@ mod tests {
         assert_eq!(summary.failed_batches, 0);
     }
 
+    /// A forgotten line is skipped on its own (#1023); the rest of its chunk lands.
+    #[tokio::test]
+    async fn batch_ingest_skips_a_forgotten_line_and_lands_its_chunk() {
+        struct FakeEmbed;
+        impl EmbeddingProvider for FakeEmbed {
+            fn embed(&self, _text: &str) -> memory_engine::Result<Vec<f32>> {
+                Ok(vec![0.1, 0.2, 0.3, 0.4])
+            }
+            fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+                memory_engine::EmbeddingFingerprint::new("mock", "test", 4)
+            }
+        }
+
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let embedder = std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>;
+        let input = r#"{"content":"kept line","fact_type":"semantic"}
+{"content":"forgotten line","fact_type":"semantic"}
+"#;
+        ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            embedder.clone(),
+            100,
+            None,
+            OutputFormat::Json,
+        )
+        .await
+        .unwrap();
+        let forgotten = engine
+            .list_active_facts(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|f| f.content == "forgotten line")
+            .unwrap();
+        let record = memory_engine::types::NewEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: memory_engine::types::EventType::MemoryOp,
+            payload: serde_json::json!({}),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "test".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        engine
+            .forget_fact(
+                forgotten.id,
+                &["/".into()],
+                "wrong",
+                "unscoped:test",
+                &record,
+            )
+            .await
+            .unwrap();
+        let input = r#"{"content":"forgotten line","fact_type":"semantic"}
+{"content":"new line","fact_type":"semantic"}
+"#;
+        let summary = ingest_from_reader(
+            &engine,
+            input.as_bytes(),
+            embedder,
+            100,
+            None,
+            OutputFormat::Json,
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.total_ingested, 1);
+        assert_eq!(summary.total_skipped, 1);
+        assert_eq!(summary.failed_batches, 0, "the chunk landed");
+    }
+
     #[tokio::test]
     async fn ingest_skips_malformed_lines() {
         struct FakeEmbed;

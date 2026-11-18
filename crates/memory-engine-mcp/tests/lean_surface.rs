@@ -46,6 +46,9 @@ async fn every_answer_starts_with_its_call_id() {
         ("set_level", json!({ "level": "user" }), true),
         ("set_level", json!({ "id": 1, "level": "global" }), true),
         ("set_level", json!({ "id": 999_999, "level": "user" }), true),
+        ("forget", json!({ "id": 999_999, "reason": "wrong" }), false),
+        ("forget", json!({ "id": 1 }), true),
+        ("forget", json!({ "id": 1, "reason": " " }), true),
     ] {
         let reply = server.tool("laptop", name, args.clone()).await;
         assert_eq!(reply.is_error, failed, "{name} {args}: {reply:?}");
@@ -76,12 +79,19 @@ async fn unknown_arguments_are_refused() {
         ("set_level", "scope"),
         ("set_level", "project"),
         ("set_level", "content"),
+        ("forget", "level"),
+        ("forget", "scope"),
     ] {
         let mut args = json!({ "query": "lock", "content": "c" });
         let args = args.as_object_mut().unwrap();
         match name {
             "recall" => drop(args.remove("content")),
             "remember" => drop(args.remove("query")),
+            "forget" => {
+                args.clear();
+                args.insert("id".to_owned(), json!(1));
+                args.insert("reason".to_owned(), json!("r"));
+            }
             _ => {
                 args.clear();
                 args.insert("id".to_owned(), json!(1));
@@ -749,12 +759,13 @@ async fn tools_list_is_exactly_the_model_tools() {
         .unwrap();
     let tools = response["result"]["tools"].as_array().unwrap();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["recall", "remember", "set_level"]);
-    for (tool, required) in
-        tools
-            .iter()
-            .zip([json!(["query"]), json!(["content"]), json!(["id", "level"])])
-    {
+    assert_eq!(names, ["recall", "remember", "forget", "set_level"]);
+    for (tool, required) in tools.iter().zip([
+        json!(["query"]),
+        json!(["content"]),
+        json!(["id", "reason"]),
+        json!(["id", "level"]),
+    ]) {
         assert_eq!(tool["inputSchema"]["additionalProperties"], false, "{tool}");
         assert_eq!(tool["inputSchema"]["required"], required, "{tool}");
     }
@@ -769,7 +780,11 @@ async fn every_other_name_is_refused_and_changes_nothing() {
         .await;
     let dump = server.dir.path().join("dump.json");
     let before = server.engine.statistics().await.unwrap();
-    for name in REMOVED.iter().copied().chain(["forget", "memory_unknown"]) {
+    for name in REMOVED
+        .iter()
+        .copied()
+        .chain(["unforget", "erase", "memory_unknown"])
+    {
         let args = json!({
             "min_importance": 1,
             "fact_id": fact,
@@ -812,7 +827,7 @@ async fn the_instructions_name_exactly_the_listed_tools() {
         .unwrap();
     let instructions = response["result"]["instructions"].as_str().unwrap();
     assert!(
-        instructions.contains("Tools: recall, remember, set_level."),
+        instructions.contains("Tools: recall, remember, forget, set_level."),
         "{instructions}"
     );
     assert!(!instructions.contains("memory_"), "{instructions}");

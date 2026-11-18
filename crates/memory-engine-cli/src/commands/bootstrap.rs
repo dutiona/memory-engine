@@ -80,12 +80,14 @@ fn print_report(report: &BootstrapReport, format: OutputFormat) -> anyhow::Resul
             println!("  memory skipped:     {}", report.memory_files_skipped);
             println!("  facts created:      {}", report.facts_created);
             println!("  facts reinforced:   {}", report.facts_reinforced);
+            println!("  facts blocked:      {}", report.facts_blocked);
             println!("  secrets redacted:   {}", report.secrets_redacted);
         }
         OutputFormat::Plain => {
             println!(
                 "sessions_processed={} sessions_skipped={} memory_files_parsed={} \
-                 memory_files_skipped={} facts_created={} facts_reinforced={} secrets_redacted={}",
+                 memory_files_skipped={} facts_created={} facts_reinforced={} secrets_redacted={} \
+                 facts_blocked={}",
                 report.sessions_processed,
                 report.sessions_skipped,
                 report.memory_files_parsed,
@@ -93,6 +95,7 @@ fn print_report(report: &BootstrapReport, format: OutputFormat) -> anyhow::Resul
                 report.facts_created,
                 report.facts_reinforced,
                 report.secrets_redacted,
+                report.facts_blocked,
             );
         }
     }
@@ -287,6 +290,40 @@ mod tests {
             "---\nmetadata:\n  type: user\n---\nThe user prefers Conventional Commits.\n",
         )
         .unwrap();
+    }
+
+    /// A forget keeps its memory out of a rerun, and the report counts it (#1023).
+    #[tokio::test]
+    async fn a_rerun_over_a_forgotten_memory_reports_it_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_memory(tmp.path());
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let config = BootstrapConfig::default();
+        let embedder: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(FakeEmbed);
+        run_bootstrap(&engine, None, Some(tmp.path()), embedder.clone(), &config)
+            .await
+            .unwrap();
+        let id = engine.list_active_facts(None).await.unwrap()[0].id;
+        let record = memory_engine::types::NewEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: memory_engine::types::EventType::MemoryOp,
+            payload: serde_json::json!({}),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "test".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        engine
+            .forget_fact(id, &["/".into()], "wrong", "unscoped:test", &record)
+            .await
+            .unwrap();
+        let report = run_bootstrap(&engine, None, Some(tmp.path()), embedder, &config)
+            .await
+            .unwrap();
+        assert_eq!((report.facts_created, report.facts_blocked), (0, 1));
+        assert_eq!(engine.list_active_facts(None).await.unwrap().len(), 0);
     }
 
     #[tokio::test]

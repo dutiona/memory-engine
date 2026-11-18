@@ -152,6 +152,7 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
 
     // Config is always small — materialize directly.
     let config = list_config(conn)?;
+    let tombstones = crate::store::tombstones::list_all(conn)?;
 
     // Serialize the whole snapshot object through serde's `SerializeMap` rather
     // than hand-assembling JSON braces and field names. Each `serialize_entry`
@@ -251,6 +252,8 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
                 )
             }),
         )?;
+
+        map.serialize_entry("tombstones", &tombstones)?;
 
         map.serialize_entry("config", &config)?;
 

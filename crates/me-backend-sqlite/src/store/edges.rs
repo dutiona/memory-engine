@@ -300,9 +300,8 @@ impl<'a> EdgeStore<'a> {
     /// List edges (including expired) where BOTH endpoints are in the given
     /// fact ID set, ordered by id ascending.
     ///
-    /// This is the read counterpart of [`Self::hard_delete_by_facts`] — it
-    /// selects exactly the set of edges that archival will remove, pushing the
-    /// "both endpoints internal" predicate into SQL so the engine never loads
+    /// It selects exactly the internal edges archival writes to the `.pak`,
+    /// pushing the "both endpoints internal" predicate into SQL so the engine never loads
     /// every edge just to discard the ones that straddle the live/archived
     /// boundary. Equivalent to the prior Rust-side filter
     /// `candidate_ids.contains(&e.source_fact_id) && candidate_ids.contains(&e.target_fact_id)`
@@ -338,51 +337,11 @@ impl<'a> EdgeStore<'a> {
             .map_err(|e| StorageError::backend(e).into())
     }
 
-    /// Hard-delete edges where BOTH endpoints are in the given fact ID set.
-    ///
-    /// Used after successful archival to remove edges whose facts have been
-    /// moved to a `.pak` file. Edges where only one endpoint is archived are
-    /// left intact (they may reference facts still in the live DB).
-    ///
-    /// The id set is bound as a single serialized JSON array param and parsed
-    /// via `json_each(?1)`, so the bound-variable count is O(1) regardless of
-    /// `fact_ids.len()` — `SQLite`'s max-parameter limit is never hit even for
-    /// large archive sets (mirrors [`Self::list_internal_by_facts`] and the
-    /// `json_each` idiom used throughout [`crate::store::facts`]).
-    ///
-    /// Returns the number of rows deleted.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `fact_ids` cannot be serialized to JSON — infallible in
-    /// practice for `&[i64]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `MemoryError::Storage` on SQL failure.
-    pub fn hard_delete_by_facts(&self, fact_ids: &[i64]) -> Result<usize> {
-        if fact_ids.is_empty() {
-            return Ok(0);
-        }
-        let ids_json = serde_json::to_string(fact_ids).expect("serialize fact_ids");
-        let deleted = self
-            .conn
-            .execute(
-                "DELETE FROM edges
-             WHERE source_fact_id IN (SELECT value FROM json_each(?1))
-               AND target_fact_id IN (SELECT value FROM json_each(?1))",
-                params![ids_json],
-            )
-            .map_err(StorageError::backend)?;
-        Ok(deleted)
-    }
-
     /// Hard-delete every edge incident to any fact in the given set — i.e. with
     /// EITHER endpoint (source or target) in `fact_ids`.
     ///
-    /// Unlike [`Self::hard_delete_by_facts`] (both endpoints internal), this also
-    /// removes *boundary* edges that straddle the set: `archived → survivor` and
-    /// `survivor → archived`. Used by the archive commit (#847): when an archived
+    /// Beside the internal edges, this also removes *boundary* edges that straddle
+    /// the set: `archived → survivor` and `survivor → archived`. Used by the archive commit (#847): when an archived
     /// fact is hard-deleted from the live DB, any live edge still referencing it
     /// would trip the `edges.source_fact_id/target_fact_id REFERENCES facts(id)`
     /// FK. The archived fact moves to cold storage and the boundary edge is not
@@ -682,56 +641,6 @@ mod tests {
             store.list_internal_by_facts(&[]).unwrap().is_empty(),
             "empty fact-id set selects no edges (no query issued)"
         );
-    }
-
-    // --- hard_delete_by_facts tests ---
-
-    #[test]
-    fn hard_delete_by_facts_only_deletes_internal_edges() {
-        // facts: 1, 2, 3
-        // edges: f1→f2 (both in archive set), f2→f3 (f3 not in set)
-        // delete by [f1, f2] — only f1→f2 should be deleted
-        let conn = setup();
-        let store = EdgeStore::new(&conn);
-
-        store.insert(&make_edge(1, 2, "internal")).unwrap();
-        store.insert(&make_edge(2, 3, "cross_boundary")).unwrap();
-
-        let deleted = store.hard_delete_by_facts(&[1, 2]).unwrap();
-        assert_eq!(deleted, 1, "only the fully-internal edge should be deleted");
-
-        let remaining = store.list_all().unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].relation_type, "cross_boundary");
-    }
-
-    #[test]
-    fn hard_delete_by_facts_empty_slice_is_noop() {
-        let conn = setup();
-        let store = EdgeStore::new(&conn);
-        store.insert(&make_edge(1, 2, "a")).unwrap();
-
-        let deleted = store.hard_delete_by_facts(&[]).unwrap();
-        assert_eq!(deleted, 0);
-        assert_eq!(store.list_all().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn hard_delete_by_facts_removes_both_directions() {
-        // Both f1→f2 and f2→f1 are internal when set is [f1, f2]
-        let conn = setup();
-        let store = EdgeStore::new(&conn);
-
-        store.insert(&make_edge(1, 2, "forward")).unwrap();
-        store.insert(&make_edge(2, 1, "backward")).unwrap();
-        store.insert(&make_edge(1, 3, "external")).unwrap(); // f3 not in set
-
-        let deleted = store.hard_delete_by_facts(&[1, 2]).unwrap();
-        assert_eq!(deleted, 2);
-
-        let remaining = store.list_all().unwrap();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].relation_type, "external");
     }
 
     // --- hard_delete_incident_to_facts tests (#847) ---

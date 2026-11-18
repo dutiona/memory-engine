@@ -31,6 +31,7 @@ const CONFLICT_EDGE_WEIGHT: f64 = 1.0;
 ///   size check and the `old_id` lookup below, both of which are skipped on a read-only engine).
 /// - Conflict/PayloadTooLarge — the candidate exceeds the size bound (`check_new_fact`).
 /// - `NotFound` — `old_id` missing or already expired (re-validated inside the atomic op; #335 TOCTOU guard).
+/// - Conflict/Forgotten — a forget's tombstone blocks the candidate's content (#1023).
 /// - Propagates arbiter / storage errors.
 // One match dispatches the 4 CRUD decisions; splitting per-arm helpers would
 // scatter the persist→graph-mirror ordering invariant across functions.

@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub(crate) use memory_engine::types::is_dns_label;
+
 /// The machine a valid token belongs to: a DNS label from the token-hash file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Machine(String);
@@ -127,20 +129,6 @@ fn is_token_shaped(token: &[u8]) -> bool {
     token.len() == 35
         && token.starts_with(b"me_")
         && token[3..].iter().all(u8::is_ascii_alphanumeric)
-}
-
-/// `[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?`
-pub(crate) fn is_dns_label(name: &[u8]) -> bool {
-    let edge = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-    match (name.first(), name.last()) {
-        (Some(first), Some(last)) => {
-            name.len() <= 63
-                && edge(first)
-                && edge(last)
-                && name.iter().all(|b| edge(b) || *b == b'-')
-        }
-        _ => false,
-    }
 }
 
 /// 64 lowercase hex digits; the lowercase-only nibble map is the validation.

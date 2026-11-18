@@ -1,7 +1,8 @@
 //! The persistence **port**, now carved into the [`me_storage`] crate (Wave 2 #816, L1).
 //!
-//! The port trait family — the six bounded-context traits ([`FactGraph`], [`EventLog`],
-//! [`SearchIndex`], [`ConsolidationStore`], [`SessionStore`], [`SchemaManager`])
+//! The port trait family — the seven bounded-context traits ([`FactGraph`], [`EventLog`],
+//! [`SearchIndex`], [`ConsolidationStore`], [`SessionStore`], [`SchemaManager`],
+//! [`Retraction`])
 //! aggregated by the [`StorageBackend`] umbrella, the feature-gated `ColdStorage`
 //! trait, the closed [`FactFilter`]/[`TemporalFilter`] query vocabulary, and
 //! [`MemoryCtx`] — lives in `me-storage`. This module **re-exports** it (both the
@@ -37,16 +38,16 @@ pub use me_storage::cold_storage;
 // probe: neither `memory_engine::storage::spawn_join_err` nor
 // `memory_engine::storage::offload::spawn_join_err` resolves for a consumer.
 pub use me_storage::{
-    backend, capabilities, consolidation, ctx, event_log, filter, graph, schema, search_index,
-    session,
+    backend, capabilities, consolidation, ctx, event_log, filter, graph, retraction, schema,
+    search_index, session,
 };
 // Flat trait/type re-exports so `crate::storage::Trait` paths still resolve.
 #[cfg(feature = "archive")]
 pub use me_storage::ColdStorage;
 pub use me_storage::{
     BackendCapabilities, BootstrapIngestOutcome, ConsolidationStore, EventLog, FactFilter,
-    FactGraph, LexicalRanker, MemoryCtx, MetadataPredicate, SchemaManager, SearchIndex,
-    SessionStore, StorageBackend, TemporalFilter,
+    FactGraph, ImportOutcome, LexicalRanker, MemoryCtx, MetadataPredicate, Retraction,
+    SchemaManager, SearchIndex, SessionStore, StorageBackend, TemporalFilter,
 };
 
 // --- The concrete backend impls. ---

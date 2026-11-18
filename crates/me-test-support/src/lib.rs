@@ -44,6 +44,8 @@ mod graph;
 #[cfg(all(test, feature = "test-util"))]
 mod read_only;
 #[cfg(all(test, feature = "test-util"))]
+mod retraction;
+#[cfg(all(test, feature = "test-util"))]
 mod schema;
 #[cfg(all(test, feature = "test-util"))]
 mod search;
@@ -125,6 +127,23 @@ macro_rules! all_behaviors_into {
             search_lexical_count_expired_only_expired => search::lexical_count_expired_counts_only_expired,
             search_lexical_returns_matching_fact => search::lexical_returns_matching_fact,
             search_vector_returns_seeded_fact => search::vector_returns_seeded_fact,
+            forget_is_not_found_outside_its_homes => retraction::forget_is_not_found_outside_its_homes,
+            forget_ends_validity_and_writes_the_tombstone => retraction::forget_ends_validity_and_writes_the_tombstone,
+            forget_retracts_active_copies_in_its_homes_only => retraction::forget_retracts_active_copies_in_its_homes_only,
+            forget_twice_is_already_forgotten => retraction::forget_twice_is_already_forgotten,
+            forget_of_an_expired_fact_keeps_its_history => retraction::forget_of_an_expired_fact_keeps_its_history,
+            a_forgotten_fact_leaves_lexical_and_vector_search => retraction::a_forgotten_fact_leaves_lexical_and_vector_search,
+            unforget_restores_the_prior_state_and_records_it => retraction::unforget_restores_the_prior_state_and_records_it,
+            unforget_reverses_the_whole_forget => retraction::unforget_reverses_the_whole_forget,
+            unforget_reports_active_only_when_recall_would_show_it => retraction::unforget_reports_active_only_when_recall_would_show_it,
+            unforget_of_a_live_or_missing_fact => retraction::unforget_of_a_live_or_missing_fact,
+            is_forgotten_matches_content_in_any_scope => retraction::is_forgotten_matches_content_in_any_scope,
+            erase_fact_clears_every_reference => retraction::erase_fact_clears_every_reference,
+            erase_fact_keeps_its_source_event_and_links_it => retraction::erase_fact_keeps_its_source_event_and_links_it,
+            erase_reports_orphans_and_copies => retraction::erase_reports_orphans_and_copies,
+            erase_machine_takes_what_names_it_or_sits_in_its_bucket => retraction::erase_machine_takes_what_names_it_or_sits_in_its_bucket,
+            a_second_machine_erasure_deletes_nothing => retraction::a_second_machine_erasure_deletes_nothing,
+            erase_of_a_missing_fact_deletes_nothing => retraction::erase_of_a_missing_fact_deletes_nothing,
         );
     };
 }

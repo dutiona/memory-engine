@@ -213,6 +213,27 @@ impl<'a> ActivityStore<'a> {
         Ok(())
     }
 
+    /// Clear `promoted_fact_id` on every activity that names one of `fact_ids`, so those
+    /// facts can be hard-deleted: the column has no `ON DELETE` action. Returns the number
+    /// of activities unlinked.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on SQL failure.
+    pub fn unlink_promoted_facts(&self, fact_ids: &[i64]) -> Result<usize> {
+        if fact_ids.is_empty() {
+            return Ok(0);
+        }
+        let ids_json = serde_json::to_string(fact_ids).map_err(StorageError::backend)?;
+        self.conn
+            .execute(
+                "UPDATE activities SET promoted_fact_id = NULL
+                 WHERE promoted_fact_id IN (SELECT value FROM json_each(?1))",
+                params![ids_json],
+            )
+            .map_err(|e| StorageError::backend(e).into())
+    }
+
     /// Count activities in a session.
     ///
     /// Made unconditional (removed `#[cfg(test)]`) so the [`SessionStore`](me_storage::SessionStore) trait

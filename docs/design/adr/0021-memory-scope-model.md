@@ -94,11 +94,12 @@ This section amends ADR-0007 for the memory service.
   keyed by a machine, and it is a leaf. Sessions, machines and agents are never parents of a Home: they are
   restrictions (§4).
 - **Root is never a Home and is never read** *(settled here)*: not by recall, the context block, a derived job or a
-  by-ID operation. Rows left at root by `DEFAULT 1` are legacy and unfiled, never user-level. Two writers use root on
+  by-ID operation. Rows left at root by `DEFAULT 1` are legacy and unfiled, never user-level. Three writers use root on
   purpose and their `scope_id` is inert: co-session edges (`CO_SESSION_SCOPE_ID` in
   `crates/memory-engine/src/engine/graph.rs`), visible only through their ends (§5); outcome signals
-  (`crates/memory-engine/src/engine/outcome.rs`), never recalled. Both are left out of the legacy review list (§12)
-  and of the root-write counter.
+  (`crates/memory-engine/src/engine/outcome.rs`), never recalled; and the `unforget` and `erase` maintenance records
+  (`crates/me-backend-sqlite/src/store/tombstones.rs`, #1023), events attributed to no machine, never recalled. All
+  three are left out of the legacy review list (§12) and of the root-write counter.
 - **A project's ID is its node's label** *(settled here)*: opaque, never parsed, never resolved as a Locator.
   First-release labels (ADR-0020's percent-encoded keys) are adopted as IDs as they are. A project created after the
   registry exists gets a minted random ID within the 256-byte segment limit. A stored path string

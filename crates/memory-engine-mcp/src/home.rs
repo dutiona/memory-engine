@@ -74,7 +74,7 @@ impl Home {
         match self {
             Self::User => format!("user:{user}"),
             Self::Project(key) => format!("user:{user}/project:{}", key.label()),
-            Self::Bucket(machine) => format!("unscoped:{}", machine.as_str()),
+            Self::Bucket(machine) => memory_engine::types::machine_bucket(machine.as_str()),
         }
     }
 }

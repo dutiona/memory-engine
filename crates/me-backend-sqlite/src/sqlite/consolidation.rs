@@ -16,6 +16,7 @@ use me_types::error::StorageError;
 use super::{SqliteBackend, stream_consumer_dropped};
 use crate::store::lineage::LineageStore;
 use crate::store::summaries::SummaryStore;
+use crate::store::tombstones;
 use me_storage::consolidation::ConsolidationStore;
 use me_types::error::Result;
 use me_types::types::{
@@ -363,6 +364,16 @@ impl ConsolidationStore for SqliteBackend {
 
                 for delta in &report.deltas {
                     match delta {
+                        // A forget's tombstone keeps its content out of every derived write
+                        // (#1023): skip and count, so one forgotten item never fails a cycle.
+                        CycleDelta::AddFact(nf) if tombstones::blocks(&tx, &nf.content)? => {
+                            result.blocked += 1;
+                        }
+                        CycleDelta::Synthesize { new_fact, .. }
+                            if tombstones::blocks(&tx, &new_fact.content)? =>
+                        {
+                            result.blocked += 1;
+                        }
                         CycleDelta::AddFact(nf) => {
                             let id = FactStore::new(&tx, embed_dim).insert(nf)?;
                             result.new_fact_ids.push(id);
@@ -404,6 +415,10 @@ impl ConsolidationStore for SqliteBackend {
                             // unconditionally, matching the current cycle apply path exactly
                             // (Promote in apply_cycle_report always passes scope: None → 1).
                             let source = FactStore::new(&tx, embed_dim).get(*fact_id)?;
+                            if tombstones::blocks(&tx, &source.content)? {
+                                result.blocked += 1;
+                                continue;
+                            }
 
                             // Embedding dimension guard, as `promote_in_conn` applies it.
                             // Defends against a pre-existing data integrity violation producing a
@@ -1138,6 +1153,146 @@ mod tests {
         assert!(
             facts[0].t_expired.is_none(),
             "rollback must leave t_expired = None; Quarantine must not have committed"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // #1023 — a forget's tombstone keeps its content out of promotion
+    // -------------------------------------------------------------------------
+
+    fn semantic(content: &str) -> NewFact {
+        NewFact {
+            content: content.into(),
+            content_hash: String::new(),
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            fact_type: FactType::Semantic,
+            t_created: Utc::now(),
+            t_expired: None,
+            t_valid: None,
+            t_invalid: None,
+            source_event_id: None,
+            scope_id: 1,
+            base_importance: 0.5,
+            access_count: 0,
+            last_accessed: Utc::now(),
+            metadata: serde_json::json!({}),
+            is_pinned: false,
+        }
+    }
+
+    /// A stamped store holding active `twin` and `other`, with `twin`'s content blocked by
+    /// a tombstone; returns the backend, the pool and both ids.
+    #[allow(clippy::significant_drop_tightening)]
+    fn forgotten_twin_store() -> (SqliteBackend, Arc<ConnectionPool>, i64, i64) {
+        use me_types::types::EmbeddingFingerprint;
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let (twin, other) = {
+            let conn = pool.write();
+            let tx = conn.unchecked_transaction().unwrap();
+            crate::store::embedding_meta::record_if_absent(
+                &tx,
+                &EmbeddingFingerprint::new("test-model", "tei", DIM),
+                DIM,
+            )
+            .unwrap();
+            let store = FactStore::new(&tx, DIM);
+            let ids = (
+                store.insert(&semantic("twin")).unwrap(),
+                store.insert(&semantic("other")).unwrap(),
+            );
+            tx.execute(
+                "INSERT INTO fact_tombstones (content_hash, forgotten_at) VALUES (?1, 't')",
+                [crate::store::facts::content_hash("twin")],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+            ids
+        };
+        let be = SqliteBackend::from_pool(Arc::clone(&pool), Arc::new(UpcasterRegistry::new()));
+        (be, pool, twin, other)
+    }
+
+    fn report(
+        deltas: Vec<me_types::types::cycle_report::CycleDelta>,
+    ) -> me_types::types::cycle_report::CycleReport {
+        use me_types::types::cycle_report::{
+            CycleMetadata, CycleReport, IdentityOutput, TimeWindow,
+        };
+        let start: chrono::DateTime<Utc> = "2026-06-16T00:00:00Z".parse().unwrap();
+        CycleReport {
+            deltas,
+            identity: IdentityOutput::empty(),
+            metadata: CycleMetadata {
+                cycle_id: 1,
+                ran_at: start,
+                time_window: TimeWindow {
+                    start,
+                    end: "2026-06-16T01:00:00Z".parse().unwrap(),
+                },
+                facts_selected: 1,
+                method_version: "forgotten-test".into(),
+                processed_ids: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_cycle_deltas_skip_forgotten_content() {
+        use me_storage::graph::FactGraph as _;
+        use me_types::types::cycle_report::CycleDelta;
+        let (be, _pool, twin, other) = forgotten_twin_store();
+        let (result, ..) = be
+            .apply_cycle_deltas_atomic(
+                &report(vec![
+                    CycleDelta::Promote {
+                        fact_id: twin,
+                        provenance: test_provenance(),
+                    },
+                    CycleDelta::AddFact(semantic("twin")),
+                    CycleDelta::Synthesize {
+                        sources: vec![other],
+                        new_fact: semantic("twin"),
+                    },
+                    CycleDelta::AddFact(semantic("fresh")),
+                ]),
+                DIM,
+                &UpcasterRegistry::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.blocked, 3);
+        assert_eq!(result.facts_added, 1, "the other delta applied");
+        let facts = be.list_all_facts().await.unwrap();
+        assert_eq!(
+            facts.iter().filter(|f| f.content == "twin").count(),
+            1,
+            "no new fact holds the forgotten content"
+        );
+        assert!(
+            facts.iter().all(|f| f.t_expired.is_none()),
+            "the synthesize's source stays active"
+        );
+    }
+
+    #[tokio::test]
+    async fn promote_atomic_refuses_forgotten_content() {
+        use me_storage::graph::FactGraph as _;
+        let (be, _pool, twin, _) = forgotten_twin_store();
+        let err = be
+            .promote_atomic(&semantic("twin"), None, &[twin], &test_provenance())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::Conflict(me_types::error::ConflictError::Forgotten)
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            be.list_all_facts().await.unwrap().len(),
+            2,
+            "nothing written"
         );
     }
 }

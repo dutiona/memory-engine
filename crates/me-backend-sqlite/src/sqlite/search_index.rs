@@ -821,6 +821,49 @@ mod hnsw_tests {
     // B4 — index maintenance: insert/expire reflected in HNSW results
     // -------------------------------------------------------------------------
 
+    /// A forget drops the fact from the live HNSW index and an unforget puts it back. The
+    /// query sits nearest the fact and asks for one hit, so the brute-force fallback (which
+    /// runs only when fewer than `limit` candidates survive) cannot mask a stale index.
+    #[tokio::test]
+    async fn forget_and_unforget_keep_the_hnsw_index_in_step() {
+        use me_storage::retraction::Retraction;
+        async fn top(be: &SqliteBackend) -> Option<i64> {
+            be.vector_search(&[1.0, 0.0, 0.0, 0.0], &FactFilter::default(), 1)
+                .await
+                .unwrap()
+                .first()
+                .map(|(id, _)| *id)
+        }
+        let pool = seeded(&[
+            fact("target", [1.0, 0.0, 0.0, 0.0]),
+            fact("runner-up", [0.8, 0.2, 0.0, 0.0]),
+            fact("far", [0.0, 1.0, 0.0, 0.0]),
+        ]);
+        let be = backend_with_ann(Arc::clone(&pool), 0);
+        let target = top(&be).await.unwrap();
+        let record = me_types::types::NewEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: me_types::types::EventType::MemoryOp,
+            payload: serde_json::json!({}),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "test".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        be.forget_fact(target, &[1], "r", chrono::Utc::now(), "rec", &record)
+            .await
+            .unwrap();
+        assert_ne!(top(&be).await, Some(target), "a forgotten fact leaves HNSW");
+        be.unforget_fact(target, chrono::Utc::now()).await.unwrap();
+        assert_eq!(
+            top(&be).await,
+            Some(target),
+            "an unforgotten fact is back in HNSW"
+        );
+    }
+
     /// After `insert_fact` the newly inserted fact must appear in HNSW results.
     #[tokio::test]
     async fn notify_insert_via_insert_fact_makes_fact_findable() {

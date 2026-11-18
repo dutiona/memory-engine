@@ -36,6 +36,18 @@ pub async fn write_rejected_reads_succeed<F: ConformanceBackend>(f: &F) {
         "SessionStore::upsert_checkpoint"
     );
     assert_ro!(be.set_config("k", "v"), "SchemaManager::set_config");
+    assert_ro!(
+        be.forget_fact(1, &[1], "r", chrono::Utc::now(), "rec", &new_event("ro")),
+        "Retraction::forget_fact"
+    );
+    assert_ro!(
+        be.unforget_fact(1, chrono::Utc::now()),
+        "Retraction::unforget_fact"
+    );
+    assert_ro!(
+        be.erase(&me_types::types::EraseTarget::Fact(1), chrono::Utc::now()),
+        "Retraction::erase"
+    );
 
     // A representative read still works on a read-only backend.
     be.list_active_facts(None)
