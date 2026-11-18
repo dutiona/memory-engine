@@ -294,7 +294,7 @@ pub use me_types::types::{
 // The six bounded traits (FactGraph, EventLog, …) are the internal port surface
 // backends implement and tests mock; they stay reachable as
 // `memory_engine::storage::FactGraph`, not flat-re-exported, to keep the crate-root
-// namespace honest. (StorageError flat-exports via `pub use error::*` above.)
+// namespace honest. (StorageError flat-exports with the error surface above.)
 pub use storage::{
     BackendCapabilities, FactFilter, LexicalRanker, MetadataPredicate, StorageBackend,
     TemporalFilter,
