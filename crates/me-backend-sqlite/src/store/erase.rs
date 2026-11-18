@@ -153,6 +153,7 @@ fn delete(conn: &Connection, dim: usize, sel: &Selection) -> Result<BTreeMap<Str
         )?,
         None => 0,
     };
+    super::embed_queue::forget_errors_of(conn, &sel.taken)?;
     let facts = FactStore::new(conn, dim).hard_delete_ids(&sel.taken)?;
     let events = exec(
         conn,

@@ -1,7 +1,7 @@
 //! The deferred-embedding queue (#1021): a fact stored before its vector exists holds
 //! `embedding = X''` and one `embed_queue` row until the drain fills the vector.
 //!
-//! Queue-wide state lives in five `config` keys, named here once.
+//! Queue-wide state lives in `config` keys, named here once.
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
@@ -21,12 +21,16 @@ use me_types::types::{
 pub const PAUSED_SINCE: &str = "embed_queue_paused_since";
 /// The latest rejected-key error while paused.
 pub const PAUSE_ERROR: &str = "embed_queue_pause_error";
+/// The fact whose attempt left [`PAUSE_ERROR`]; erasing it drops that text.
+pub const PAUSE_ERROR_FACT: &str = "embed_queue_pause_error_fact_id";
 /// When an embed last succeeded.
 pub const LAST_SUCCESS_AT: &str = "embed_last_success_at";
 /// When an embed last failed, whatever the failure.
 pub const LAST_ERROR_AT: &str = "embed_last_error_at";
 /// The last embed failure's error.
 pub const LAST_ERROR: &str = "embed_last_error";
+/// The fact whose attempt left [`LAST_ERROR`]; erasing it drops that text.
+pub const LAST_ERROR_FACT: &str = "embed_last_error_fact_id";
 
 /// Insert `fact` without a vector and queue it, due at `now`, in one transaction; a store
 /// with no identity yet records `embed_dim` as its dimension.
@@ -143,7 +147,7 @@ pub fn complete(
 ///
 /// `Retry` and `Fail` count the attempt and keep `error` on the row; an answer came back,
 /// so they clear the pause. `Hold` changes no queue row; paused, it keeps the first pause
-/// time and the latest `error`. Every failure records its time and `error`.
+/// time and the latest `error`. Every failure records its time, `error` and `fact_id`.
 ///
 /// # Errors
 ///
@@ -186,12 +190,39 @@ pub fn record_failure(
             )
             .map_err(StorageError::backend)?;
             set_config(&tx, PAUSE_ERROR, error)?;
+            set_config(&tx, PAUSE_ERROR_FACT, &fact_id.to_string())?;
         }
         EmbeddingFailure::Hold { paused: false } => {}
     }
     set_config(&tx, LAST_ERROR_AT, &now)?;
     set_config(&tx, LAST_ERROR, error)?;
+    set_config(&tx, LAST_ERROR_FACT, &fact_id.to_string())?;
     tx.commit().map_err(StorageError::backend)?;
+    Ok(())
+}
+
+/// Drop the queue-wide error texts an attempt on an `erased` fact left (#1023).
+///
+/// An embedder may echo its input in its error body. The times stay: the failure happened,
+/// and a pause still holds, since a rejected key is no fact's doing.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Storage` on a query or write failure.
+pub fn forget_errors_of(conn: &Connection, erased: &[i64]) -> Result<()> {
+    for (text, fact) in [
+        (LAST_ERROR, LAST_ERROR_FACT),
+        (PAUSE_ERROR, PAUSE_ERROR_FACT),
+    ] {
+        let left_by = get_config(conn, fact)?.and_then(|id| id.parse::<i64>().ok());
+        if left_by.is_some_and(|id| erased.contains(&id)) {
+            conn.execute(
+                "DELETE FROM config WHERE key IN (?1, ?2)",
+                params![text, fact],
+            )
+            .map_err(StorageError::backend)?;
+        }
+    }
     Ok(())
 }
 
@@ -231,8 +262,8 @@ pub fn read_status(conn: &Connection) -> Result<EmbedQueueStatus> {
 
 fn clear_pause(tx: &Transaction) -> Result<()> {
     tx.execute(
-        "DELETE FROM config WHERE key IN (?1, ?2)",
-        params![PAUSED_SINCE, PAUSE_ERROR],
+        "DELETE FROM config WHERE key IN (?1, ?2, ?3)",
+        params![PAUSED_SINCE, PAUSE_ERROR, PAUSE_ERROR_FACT],
     )
     .map_err(StorageError::backend)?;
     Ok(())

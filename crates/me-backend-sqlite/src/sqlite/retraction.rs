@@ -396,6 +396,56 @@ mod tests {
         assert_eq!(queued, vec![kept]);
     }
 
+    /// An embedder may echo its input in its error body (#1021): erasing the fact whose
+    /// attempt left the queue's last error or pause error drops that text, by fact or by
+    /// machine, and keeps the times and another fact's error.
+    #[tokio::test]
+    async fn erase_drops_the_queue_errors_its_fact_left() {
+        use crate::store::embed_queue::{
+            LAST_ERROR, LAST_ERROR_AT, PAUSE_ERROR, PAUSED_SINCE, record_failure,
+        };
+        use crate::store::schema::get_config;
+        use me_types::types::EmbeddingFailure;
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let paused_by = crate::test_util::seed_without_vector(&pool.write(), "alpha");
+        let laptop = crate::test_util::seed_without_vector(&pool.write(), "beta");
+        let kept = crate::test_util::seed_without_vector(&pool.write(), "gamma");
+        pool.write()
+            .execute(
+                "UPDATE facts SET metadata = '{\"machine\":\"laptop\"}' WHERE id = ?1",
+                [laptop],
+            )
+            .unwrap();
+        let fail = |id, error: &str, paused| {
+            record_failure(
+                &pool.write(),
+                id,
+                error,
+                EmbeddingFailure::Hold { paused },
+                Utc::now(),
+            )
+            .unwrap();
+        };
+        let config = |key| get_config(&pool.write(), key).unwrap();
+        let be = backend(&pool);
+
+        fail(paused_by, "401: alpha", true);
+        fail(kept, "refused: gamma", false);
+        be.erase(&EraseTarget::Fact(paused_by), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(config(PAUSE_ERROR), None);
+        assert!(config(PAUSED_SINCE).is_some(), "the key is still rejected");
+        assert_eq!(config(LAST_ERROR).as_deref(), Some("refused: gamma"));
+
+        fail(laptop, "refused: beta", false);
+        be.erase(&EraseTarget::Machine("laptop".into()), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(config(LAST_ERROR), None);
+        assert!(config(LAST_ERROR_AT).is_some());
+    }
+
     /// A read-only handle refuses an erasure before it touches the store's sidecar.
     #[tokio::test]
     async fn a_read_only_erase_keeps_the_sidecar() {
