@@ -148,13 +148,25 @@ async fn status_runs_beside_a_writer_and_changes_nothing() {
     let _held = StoreLock::acquire(&db).unwrap();
     let writer = rusqlite::Connection::open(&db).unwrap();
     writer.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let before = std::fs::read(&db).unwrap();
+    // The store, its WAL and its shared-memory index: a write to any of them shows.
+    let files = || {
+        ["", "-wal", "-shm"].map(|suffix| {
+            let mut path = db.clone().into_os_string();
+            path.push(suffix);
+            std::fs::read(path).ok()
+        })
+    };
+    let before = files();
+    assert!(
+        before.iter().all(Option::is_some),
+        "the WAL and its index exist"
+    );
     cli(&db)
         .arg("status")
         .assert()
         .success()
         .stdout(predicate::str::contains("1 waiting"));
-    assert_eq!(std::fs::read(&db).unwrap(), before);
+    assert_eq!(files(), before);
     writer.execute_batch("ROLLBACK").unwrap();
 }
 
