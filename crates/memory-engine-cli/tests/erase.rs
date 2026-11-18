@@ -197,6 +197,49 @@ async fn erase_of_a_waiting_fact_leaves_no_byte_of_an_error_that_echoed_it() {
     assert!(status["last_error"].is_null(), "{status}");
 }
 
+/// The drain takes an item, the fact is erased while its embed call runs, and then the
+/// embedder's rejection echoing it is settled (#1021): nothing of it comes back.
+#[tokio::test]
+async fn a_settle_after_the_erase_writes_no_byte_of_the_fact() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("memory.db");
+    let mut engine = memory_engine::MemoryEngine::builder(4)
+        .path(db.clone())
+        .build()
+        .unwrap();
+    let id = engine
+        .add_fact_deferred(&AddFactRequest {
+            content: SENTINEL.into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        })
+        .await
+        .unwrap();
+    let memory_engine::NextEmbedding::Due(item) = engine.next_embedding().await.unwrap() else {
+        panic!("the fact waits for its vector");
+    };
+    let report = engine
+        .erase(&memory_engine::types::EraseTarget::Fact(id))
+        .await
+        .unwrap();
+    assert_eq!(report.erased_facts, [id]);
+
+    let echo = memory_engine::EmbedderError::InputRejected(format!("400: cannot embed {SENTINEL}"));
+    engine
+        .settle_embedding(
+            &item,
+            Err(echo.into()),
+            &memory_engine::EmbeddingFingerprint::new("mock", "test", 4),
+            memory_engine::Backoff::DEFAULT,
+        )
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(holds_sentinel(dir.path()), Vec::<String>::new());
+}
+
 #[tokio::test]
 async fn erase_fact_keeps_a_remember_record_linkable() {
     let (_dir, db) = store().await;

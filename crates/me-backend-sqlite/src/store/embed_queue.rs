@@ -148,7 +148,9 @@ pub fn complete(
 /// `Retry` and `Fail` count the attempt and keep `error` on the row; `Fail`, and `Retry` when
 /// the embedder answered, clear the pause. `Hold` changes no queue row; paused, it keeps the
 /// first pause time and the latest `error`. Every failure records its time, `error` and
-/// `fact_id`.
+/// `fact_id`. An item that left the queue meanwhile (its fact erased, or given a vector
+/// another way) records nothing, times and pause included: its outcome is moot, and its
+/// `error` may echo erased content.
 ///
 /// # Errors
 ///
@@ -164,6 +166,16 @@ pub fn record_failure(
     let tx = conn
         .unchecked_transaction()
         .map_err(StorageError::backend)?;
+    let queued: bool = tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM embed_queue WHERE fact_id = ?1)",
+            [fact_id],
+            |r| r.get(0),
+        )
+        .map_err(StorageError::backend)?;
+    if !queued {
+        return Ok(());
+    }
     match failure {
         EmbeddingFailure::Retry { at, answered } => {
             tx.execute(
@@ -324,5 +336,41 @@ mod tests {
         conn.execute("DELETE FROM embed_queue WHERE fact_id <> ?1", [failed])
             .unwrap();
         assert_eq!(next(&conn, at("9")).unwrap(), NextEmbedding::Idle);
+    }
+
+    /// A settle that lands after its item left the queue (its fact erased, #1023) writes
+    /// nothing: the embedder may have echoed the erased content in its error.
+    #[test]
+    fn a_late_failure_for_an_item_gone_from_the_queue_writes_nothing() {
+        use crate::store::schema::list_config;
+        let conn = setup_memory_db();
+        let live = seed_without_vector(&conn, "live");
+        let gone = seed_without_vector(&conn, "gone");
+        let at = parse_timestamp("2026-01-01T00:00:00+00:00").unwrap();
+        record_failure(
+            &conn,
+            live,
+            "401",
+            EmbeddingFailure::Hold { paused: true },
+            at,
+        )
+        .unwrap();
+        conn.execute("DELETE FROM facts WHERE id = ?1", [gone])
+            .unwrap();
+        let before = list_config(&conn).unwrap();
+
+        for failure in [
+            EmbeddingFailure::Retry { at, answered: true },
+            EmbeddingFailure::Retry {
+                at,
+                answered: false,
+            },
+            EmbeddingFailure::Fail,
+            EmbeddingFailure::Hold { paused: true },
+            EmbeddingFailure::Hold { paused: false },
+        ] {
+            record_failure(&conn, gone, "echo: gone", failure, at).unwrap();
+            assert_eq!(list_config(&conn).unwrap(), before, "{failure:?}");
+        }
     }
 }
