@@ -235,8 +235,8 @@ same content are listed as `copies`. Output: `erased: activities=0 checkpoints=0
 
 After the commit, `VACUUM` and a truncating WAL checkpoint remove the deleted rows' earlier copies from the store's
 files (a forget or any later update leaves them in free pages), and the store's snapshot sidecar (`<db>.snapshot`: the
-graph, and the vector index when it is built) is removed before the erasure and rebuilt from the store at the next
-close or open. `VACUUM` takes time and up to about twice the store's size in free disk. When the
+graph, and the vector index when it is built) is removed before an erasure that takes a fact commits, and rebuilt
+from the store at the next close or open. `VACUUM` takes time and up to about twice the store's size in free disk. When the
 purge does not complete (a full disk, a reader holding the WAL), the rows are gone, the command exits 1 with
 `erased, not purged: <cause>` and the exact command to run again: an erasure whose target is already gone deletes
 nothing, records nothing and still purges. An `erase --fact` that finds nothing exits 1 with `fact N not found; purged`.

@@ -417,6 +417,27 @@ async fn a_read_only_engine_refuses_erase_and_keeps_the_sidecar() {
 }
 
 #[tokio::test]
+async fn an_erasure_that_takes_nothing_keeps_the_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let mut engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    remember(&engine, "kestrel nests", "unscoped:laptop").await;
+    engine.close().await.unwrap();
+    let engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    let report = engine
+        .erase(&memory_engine::types::EraseTarget::Machine(
+            "desktop".into(),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        report.erased_facts.is_empty() && report.purged,
+        "{report:?}"
+    );
+    assert_eq!(sidecars(dir.path()), 1, "nothing erased, nothing to drop");
+}
+
+#[tokio::test]
 async fn an_invalid_machine_is_refused_before_the_sidecar_is_touched() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");

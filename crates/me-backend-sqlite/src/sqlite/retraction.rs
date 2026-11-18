@@ -132,11 +132,13 @@ impl Retraction for SqliteBackend {
         let dim = self.embed_dim;
         let mut report = self
             .block_write(move |c| {
-                // The sidecar holds the erased facts' graph nodes (and vectors, under `ann`).
-                // Remove it once the write is granted and before the transaction, so a crash
-                // before the next clean close cannot leave them behind; the next open
-                // rebuilds it from the store.
-                if let Some(sidecar) = sidecar {
+                let tx = c.unchecked_transaction().map_err(StorageError::backend)?;
+                let report = erase::erase(&tx, &registry, &target, dim, now)?;
+                // The sidecar holds the erased facts' graph nodes (and vectors, under `ann`),
+                // and its fingerprint need not notice an erasure. Remove it before the commit,
+                // so a crash before the next clean close cannot leave them behind; the next
+                // open rebuilds it from the store. An erasure that took no fact keeps it.
+                if let (Some(sidecar), false) = (sidecar, report.erased_facts.is_empty()) {
                     match std::fs::remove_file(sidecar) {
                         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                             return Err(StorageError::backend(e).into());
@@ -144,8 +146,6 @@ impl Retraction for SqliteBackend {
                         _ => {}
                     }
                 }
-                let tx = c.unchecked_transaction().map_err(StorageError::backend)?;
-                let report = erase::erase(&tx, &registry, &target, dim, now)?;
                 tx.commit().map_err(StorageError::backend)?;
                 Ok(report)
             })
