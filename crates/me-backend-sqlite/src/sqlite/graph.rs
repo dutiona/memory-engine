@@ -26,8 +26,8 @@ use crate::store::scopes::ScopeStore;
 use me_storage::graph::{BootstrapIngestOutcome, FactGraph, ImportOutcome, ScopedWrite};
 use me_types::error::Result;
 use me_types::types::{
-    Edge, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
-    NewFact, RelationType, ScopeNode, SessionFact,
+    Edge, EmbeddingFailure, EmbeddingFingerprint, EventFilter, Fact, FactScoringRow, FactType,
+    NewEdge, NewEvent, NewFact, NextEmbedding, RelationType, ScopeNode, SessionFact,
 };
 
 /// `(fact_ids, scope_ids_to_cache, embeddings)` — the result of the batch-insert
@@ -715,7 +715,8 @@ impl FactGraph for SqliteBackend {
                     .map_err(StorageError::backend)?;
                 // stamp_identity equivalent: record-if-absent or compare-and-reject
                 crate::store::embedding_meta::record_if_absent(&tx, &fingerprint, expected_dim)?;
-                // The single explicit assertion (`remember`, `add-fact`): never gated (#1023).
+                // The single explicit assertion with its vector (`add-fact`): never gated
+                // (#1023).
                 let id = FactStore::new(&tx, dim).insert_asserted(&fact)?;
                 tx.commit().map_err(StorageError::backend)?;
                 Ok(id)
@@ -1154,6 +1155,75 @@ impl FactGraph for SqliteBackend {
                     Err(e)
                 }
             }
+        })
+        .await
+    }
+
+    // -------------------------------------------------------------------------
+    // deferred embedding (#1021)
+    // -------------------------------------------------------------------------
+
+    // ATOMIC WRITE — the X'' row and its queue entry in one transaction; no vector, so no
+    // identity stamp and no HNSW notify.
+    async fn insert_fact_deferred(&self, fact: &NewFact, now: DateTime<Utc>) -> Result<i64> {
+        let fact = fact.clone();
+        let dim = self.embed_dim;
+        self.block_write(move |c| crate::store::embed_queue::insert_deferred(c, &fact, dim, now))
+            .await
+    }
+
+    // READ
+    async fn next_embedding(&self, now: DateTime<Utc>) -> Result<NextEmbedding> {
+        self.block_read(move |c| crate::store::embed_queue::next(c, now))
+            .await
+    }
+
+    // ATOMIC WRITE — fill the vector, drop the queue row, then index it post-commit.
+    async fn complete_embedding(
+        &self,
+        fact_id: i64,
+        embedding: &[f32],
+        fingerprint: &EmbeddingFingerprint,
+        expected_dim: usize,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let embedding = embedding.to_vec();
+        let fingerprint = fingerprint.clone();
+        let (written_active, embedding) = self
+            .block_write(move |c| {
+                let written_active = crate::store::embed_queue::complete(
+                    c,
+                    fact_id,
+                    &embedding,
+                    &fingerprint,
+                    expected_dim,
+                    now,
+                )?;
+                Ok((written_active, embedding))
+            })
+            .await?;
+        // The vector is durably committed, so this `?` can only surface the post-commit
+        // `IndexInconsistent` carve-out (rebuild the index, never retry the write).
+        #[cfg(feature = "ann")]
+        if written_active {
+            self.hnsw_notify_insert(fact_id, &embedding)?;
+        }
+        #[cfg(not(feature = "ann"))]
+        let _ = (written_active, embedding);
+        Ok(())
+    }
+
+    // WRITE
+    async fn record_embedding_failure(
+        &self,
+        fact_id: i64,
+        error: &str,
+        failure: EmbeddingFailure,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let error = error.to_owned();
+        self.block_write(move |c| {
+            crate::store::embed_queue::record_failure(c, fact_id, &error, failure, now)
         })
         .await
     }
@@ -2353,5 +2423,185 @@ mod tests {
         be.insert_fact_atomic(&fact("asserted again", [0.1; DIM]), &fp, DIM)
             .await
             .unwrap();
+    }
+
+    // -------------------------------------------------------------------------
+    // deferred embedding (#1021)
+    // -------------------------------------------------------------------------
+
+    fn without_vector(content: &str) -> NewFact {
+        NewFact {
+            embedding: Vec::new(),
+            ..fact(content, [0.0; DIM])
+        }
+    }
+
+    fn count(pool: &ConnectionPool, sql: &str) -> i64 {
+        pool.write().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_deferred_insert_writes_the_row_and_its_queue_entry_together() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let be = backend(Arc::clone(&pool));
+        let now = Utc::now();
+        let id = be
+            .insert_fact_deferred(&without_vector("later"), now)
+            .await
+            .unwrap();
+
+        let row: (i64, String, String, i64, Option<String>) = pool
+            .write()
+            .query_row(
+                "SELECT length(f.embedding), q.enqueued_at, q.next_attempt_at, q.attempts, q.failed_at
+                   FROM facts f JOIN embed_queue q ON q.fact_id = f.id WHERE f.id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (0, now.to_rfc3339(), now.to_rfc3339(), 0, None),
+            "an X'' row, due at once"
+        );
+
+        assert!(matches!(
+            be.insert_fact_deferred(&fact("has one", [0.1; DIM]), now)
+                .await,
+            Err(MemoryError::EmbeddingDimension {
+                expected: 0,
+                actual: DIM
+            })
+        ));
+        assert!(matches!(
+            be.insert_fact(&without_vector("no vector")).await,
+            Err(MemoryError::EmbeddingDimension {
+                expected: DIM,
+                actual: 0
+            })
+        ));
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM facts"), 1);
+    }
+
+    /// A store whose facts all wait has no identity, so its first deferred insert records the
+    /// dimension the CLI opens it at; the first vector's identity then replaces it.
+    #[tokio::test]
+    async fn the_store_dimension_is_written_once_and_never_beside_an_identity() {
+        use me_storage::SchemaManager;
+        use me_types::types::EmbeddingFingerprint;
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let be = backend(Arc::clone(&pool));
+        let dim = || crate::store::schema::get_config(&pool.write(), "embed_dim").unwrap();
+        let now = Utc::now();
+
+        let first = be
+            .insert_fact_deferred(&without_vector("first"), now)
+            .await
+            .unwrap();
+        assert_eq!(dim(), Some(DIM.to_string()));
+        pool.write()
+            .execute("UPDATE config SET value = '7' WHERE key = 'embed_dim'", [])
+            .unwrap();
+        be.insert_fact_deferred(&without_vector("second"), now)
+            .await
+            .unwrap();
+        assert_eq!(dim(), Some("7".into()), "written once");
+
+        be.complete_embedding(
+            first,
+            &[0.1; DIM],
+            &EmbeddingFingerprint::new("mock", "test", DIM),
+            DIM,
+            now,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            be.load_embedding_fingerprint()
+                .await
+                .unwrap()
+                .map(|fp| fp.dim),
+            Some(DIM)
+        );
+        assert_eq!(dim(), None, "the identity is the store's one dimension");
+        be.insert_fact_deferred(&without_vector("third"), now)
+            .await
+            .unwrap();
+        assert_eq!(dim(), None);
+    }
+
+    #[tokio::test]
+    async fn a_deferred_insert_that_fails_leaves_nothing() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        pool.write()
+            .execute_batch(
+                "CREATE TRIGGER refuse_queue BEFORE INSERT ON embed_queue
+                 BEGIN SELECT RAISE(ABORT, 'queue refused'); END;",
+            )
+            .unwrap();
+        let be = backend(Arc::clone(&pool));
+        be.insert_fact_deferred(&without_vector("later"), Utc::now())
+            .await
+            .unwrap_err();
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM facts"), 0);
+    }
+
+    #[cfg(feature = "ann")]
+    #[tokio::test]
+    async fn reinforcing_a_deferred_fact_leaves_it_queued_and_unindexed() {
+        use crate::search::strategy::SearchConfig;
+        use me_storage::{BootstrapIngestOutcome, ImportOutcome, SchemaManager};
+        use me_types::types::EmbeddingFingerprint;
+
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let be = SqliteBackend::from_pool(Arc::clone(&pool), Arc::new(UpcasterRegistry::new()))
+            .with_search_config(SearchConfig { ann_threshold: 0 })
+            .unwrap();
+        let now = Utc::now();
+        let a = be
+            .insert_fact_deferred(&without_vector("convention a"), now)
+            .await
+            .unwrap();
+        let b = be
+            .insert_fact_deferred(&without_vector("convention b"), now)
+            .await
+            .unwrap();
+
+        let outcome = be
+            .ingest_bootstrap_batch_atomic(
+                None,
+                None,
+                vec![
+                    fact("convention a", [1.0, 0.0, 0.0, 0.0]),
+                    fact("convention b", [0.0, 1.0, 0.0, 0.0]),
+                ],
+                &EmbeddingFingerprint::new("mock", "test", DIM),
+                DIM,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            BootstrapIngestOutcome::Ingested(ref out)
+                if out == &[ImportOutcome::Reinforced(a), ImportOutcome::Reinforced(b)]
+        ));
+        assert_eq!(
+            be.hnsw.as_ref().unwrap().active_count(),
+            0,
+            "the index never gets a vector its row lacks"
+        );
+        assert!(
+            be.load_embedding_fingerprint().await.unwrap().is_none(),
+            "no vector written, so no identity recorded"
+        );
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM embed_queue q JOIN facts f ON f.id = q.fact_id
+                  WHERE length(f.embedding) = 0"
+            ),
+            2,
+            "every row still waits for the drain"
+        );
     }
 }

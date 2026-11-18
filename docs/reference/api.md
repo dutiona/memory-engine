@@ -31,7 +31,26 @@ This page summarizes the public API surface of the `memory-engine` crate.
 | Method     | Signature                                                                                        | Description                                                                                                                                                  |
 | ---------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `ingest`   | `(&self, event: &NewEvent) -> Result<i64>`                                                       | Append an event to the log. Returns the event ID.                                                                                                            |
-| `add_fact` | `(&self, content, fact_type, source_event_id, embedder, scope, opts, classifier) -> Result<i64>` | Compute embedding, blake3 hash, resolve scope, optionally auto-pin via classifier, and insert a fact. Embedding is computed before acquiring the write lock. |
+| `add_fact` | `(&self, req: &AddFactRequest, embedder: Arc<dyn EmbeddingProvider>, classifier: Option<Arc<dyn PersistenceClassifier>>) -> Result<i64>` | Compute embedding, blake3 hash, resolve scope, optionally auto-pin via classifier, and insert a fact. Embedding is computed before acquiring the write lock. |
+
+The deferred path (#1021) stores a fact without waiting for an embedder; the [embedding queue](#embedding-queue) gives it its vector later:
+
+| Method               | Signature                                      | Description                                                                                                                                                                                                                                                                           |
+| -------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `add_fact_deferred`  | `(&self, req: &AddFactRequest) -> Result<i64>` | Insert the fact with no vector and queue it, in one transaction, then wake the drain. Same gates and validation as `add_fact`; no classifier (`opts.pinned`, else unpinned), no identity recorded. Full-text search finds it at once; no vector reader sees it until it is embedded. |
+| `embed_work_arrived` | `(&self)` (async)                              | Resolves once a deferred write has committed since the last wake; one stored wake covers every write made while no drain waited.                                                                                                                                                     |
+
+### Embedding queue
+
+The two steps of a deferred-embedding drain (#1021); the drain loop is the consumer's (`memory-engine-mcp`'s `drain::run`).
+
+| Item                      | Signature                                                                                                                             | Description |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `next_embedding`          | `(&self) -> Result<NextEmbedding>`                                                                                                    | The item to embed next: `Due(PendingEmbedding)`, `NotBefore(time)` of the earliest waiting item, or `Idle`. Failed items are never offered. |
+| `settle_embedding`        | `(&self, item: &PendingEmbedding, result: Result<Vec<f32>>, fingerprint: &EmbeddingFingerprint, backoff: Backoff) -> Result<Settled>` | Record the embedder's answer. A vector fills the fact (never over another vector) and leaves the queue: `Embedded`; one the store refuses (width, identity) backs the item off: `Retrying`. `Embedder(Unreachable)`: no item changes, `Unreachable`. `Embedder(KeyRejected)`: the queue pauses, `KeyRejected`. `Embedder(InputRejected)`: the item fails, `Rejected`. Any other error backs only the item off by `backoff.delay(attempts + 1)`: `Retrying`. An answered request clears the pause. Refused on a read-only engine. |
+| `read_embed_queue_status` | `(db: &Path) -> Result<EmbedQueueStatus>` (free function)                                                                             | The queue's depth, oldest waiting item, failed count, pause and its error, last success and last error, through one read-only SQLite connection: builds no engine, takes no lock, never migrates. A store at another schema version is a `Migration` error. |
+| `Backoff`                 | `{ base: Duration, cap: Duration }`; `Backoff::DEFAULT` (1 s, 60 s); `delay(self, n: u32) -> Duration`                                | The per-item retry schedule: `delay(0)` is zero, else `min(cap, base·2^(n−1))`, saturating at `cap`. |
+| `Settled`                 | `Embedded`, `Rejected`, `Retrying`, `Unreachable`, `KeyRejected`                                                                      | What `settle_embedding` did; the drain paces itself by it. |
 
 ### Facts
 
@@ -121,7 +140,8 @@ The model's `forget` tool and the maintenance commands `unforget` and `erase` (#
 A tombstone blocks its content from every gated insert: `insert_or_reinforce` (`BootstrapReport::facts_blocked`),
 `add_facts_batch` (refused whole, `Conflict(Forgotten)`), `add_facts_batch_partial` (that entry only), conflict
 resolution, promotion (`promote_atomic` refuses; `apply_cycle_report` skips and counts `ApplyResult::blocked`) and
-activity promotion. Only `add_fact`/`add_fact_precomputed`, the single explicit assertion, are never blocked.
+activity promotion. Only `add_fact`, `add_fact_precomputed` and `add_fact_deferred`, the single explicit assertion, are
+never blocked.
 
 `ForgetPolicy` fields:
 
@@ -230,6 +250,7 @@ The crate root (`lib.rs`) re-exports these items for convenience:
 - **Error**: `MemoryError`, `Result`, and the typed causes `ArchiveError`, `ConflictError`, `CycleError`, `MigrationError`, `RerankerError`, `StorageError`
 - **Traits**: `ConflictArbiter`, `ConflictResolution`, `ConsolidationConfig`, `ConsolidationStats`, `CrudDecision`, `CycleCtx`, `DeltaProposer`, `DreamCtx`, `DreamCycle`, `EmbeddingProvider`, `InsightStream`, `PersistenceClassifier`, `Reranker`, `SummarizableContent`, `SummaryGenerator`
 - **Types**: all public types from the `types` module (`Event`, `Fact`, `Edge`, `Summary`, `NewEvent`, `NewFact`, `NewEdge`, `NewSummary`, `EventType`, `FactType`, `ConsolidationLevel`, `ScopeQuery`, `ScopeNode`, `AddFactOptions`)
+- **Embedding queue** (#1021): `Backoff`, `Settled`, `read_embed_queue_status`, and the queue types `PendingEmbedding`, `NextEmbedding`, `EmbedQueueStatus`; `EmbedderError` beside `MemoryError`
 
 ## Feature Flags
 
@@ -250,7 +271,7 @@ All fallible methods return `Result<T>`, which is `std::result::Result<T, Memory
 | `EmbeddingDimension { expected: usize, actual: usize }`                                                                         | An embedding's length differs from the engine's configured dimension.                              |
 | `EmbeddingModelMismatch { expected: Box<crate::types::EmbeddingFingerprint>, actual: Box<crate::types::EmbeddingFingerprint> }` | The provider's embedding identity differs from the one the store was created with (ADR 0015).      |
 | `EmbeddingReopenRequired { new_dim: usize }`                                                                                    | A reconstruction promoted a new embedding dimension; reopen the engine at `new_dim`.               |
-| `Conflict(ConflictError)`                                                                                                       | A precondition or input-validation conflict; `ConflictError` names the cause.                      |
+| `Conflict(ConflictError)`                                                                                                       | A precondition or input-validation conflict, or content a forget's tombstone blocks (`Forgotten`, #1023); `ConflictError` names the cause. |
 | `Migration(MigrationError)`                                                                                                     | A schema migration or compatibility check failed; `MigrationError` names the cause.                |
 | `NotImplemented(String)`                                                                                                        | The operation is recognized but not yet implemented.                                               |
 | `Pool(String)`                                                                                                                  | The connection pool could not hand out or manage a connection.                                     |
@@ -265,3 +286,4 @@ All fallible methods return `Result<T>`, which is `std::result::Result<T, Memory
 | `Lineage(String)`                                                                                                               | A wisdom-fact lineage or provenance record is missing or inconsistent.                             |
 | `Cycle(CycleError)`                                                                                                             | A dream-cycle report failed validation or application; `CycleError` names the cause.               |
 | `Storage(StorageError)`                                                                                                         | A failure at the storage seam: an opaque backend error or a missing capability.                    |
+| `Embedder(EmbedderError)`                                                                                                       | The embedding provider got no vector. `EmbedderError` says what a retry can do: `Unreachable` (the request never reached the server), `KeyRejected` (401, 403), `InputRejected` (400, 413, 422: this input will not be embedded as sent), `NoAnswer` (a timeout, a reset, a broken body: no answer came back), `Failed` (any other non-2xx answer). |

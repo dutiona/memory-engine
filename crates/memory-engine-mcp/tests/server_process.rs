@@ -3,9 +3,10 @@
 
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{ServerProcess, token_file_line};
+use serde_json::{Value, json};
 
 #[test]
 fn a_bad_token_file_stops_startup_before_the_store_opens() {
@@ -205,6 +206,54 @@ fn starts_with_an_embedder() {
     );
     assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
     assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
+}
+
+/// The text of a model tool's answer, its call line removed.
+fn answer(response: &Value) -> String {
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no tool result in {response}"));
+    text.split_once('\n').unwrap().1.to_owned()
+}
+
+#[test]
+fn starts_serves_and_exits_beside_a_silent_embedder() {
+    // Bound and never accepted: the kernel takes each connection and nothing ever answers.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    common::write_config(
+        dir.path(),
+        &format!(
+            "[embedding]\nendpoint = 'http://{}/v1/embeddings'\nmodel = 'm'\nprovider = 'tei'\n\
+             dimensions = {}\ntimeout_secs = 30\n",
+            silent.local_addr().unwrap(),
+            common::DIM
+        ),
+    );
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
+
+    let stored = answer(&server.tool(
+        "laptop",
+        "remember",
+        &json!({ "content": "the kestrel nests on the cliff" }),
+    ));
+    assert!(stored.starts_with("stored "), "{stored}");
+
+    let started = Instant::now();
+    let recalled = answer(&server.tool("laptop", "recall", &json!({ "query": "kestrel" })));
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        started.elapsed()
+    );
+    let recalled: Value = serde_json::from_str(&recalled).unwrap();
+    assert_eq!(recalled["degraded"], "embedder slow", "{recalled}");
+
+    // The drain's embed call and the recall's abandoned one both still wait on the embedder.
+    let status = server.terminate();
+    assert!(status.success(), "{status}; stderr:\n{}", server.stderr());
+    drop(silent);
 }
 
 #[test]

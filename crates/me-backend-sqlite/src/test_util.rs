@@ -24,3 +24,22 @@ pub fn setup_memory_db() -> Connection {
     init_schema(&conn).expect("init schema");
     conn
 }
+
+/// Insert a fact as a deferred write leaves it (#1021): `embedding = X''` plus its
+/// `embed_queue` row. Returns the fact id.
+pub fn seed_without_vector(conn: &Connection, content: &str) -> i64 {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO facts (content, content_hash, embedding, fact_type, t_created, last_accessed)
+         VALUES (?1, ?2, X'', 'semantic', ?3, ?3)",
+        rusqlite::params![content, crate::store::facts::content_hash(content), now],
+    )
+    .expect("insert a fact without a vector");
+    let id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO embed_queue (fact_id, enqueued_at, next_attempt_at) VALUES (?1, ?2, ?2)",
+        rusqlite::params![id, now],
+    )
+    .expect("queue the fact");
+    id
+}

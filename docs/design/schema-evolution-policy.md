@@ -147,6 +147,26 @@ erasure by machine does not scan `facts` once per deleted event. The oracles are
 the goldens and `all_nine_indexes_created` = **33**. A v15 binary refuses a v16 store; rolling
 an image back means restoring the `memory.db.v15.bak` the first open writes.
 
+**v16→v17** (#1021, the deferred-embedding queue) is the additive-table shape again: the
+`embed_queue` table (one row per fact waiting for its vector, `fact_id … REFERENCES facts(id)
+ON DELETE CASCADE`, with its attempts, next attempt, last error and failed time) plus the
+partial index `idx_embed_queue_due ON embed_queue(next_attempt_at) WHERE failed_at IS NULL`,
+and no data move. `migrate_v16_to_v17` uses `IF NOT EXISTS` for both, so the step re-runs on
+the rolled-back fixtures; `all_nine_indexes_created` = **34**. It also brings a **data
+convention** with no DDL: `facts.embedding = X''` (the zero-length BLOB) means "no vector
+yet". It satisfies `NOT NULL` without rebuilding `facts`, and it never decodes as a vector
+(`deserialize_embedding` stays strict, so a reader that misses its guard fails with
+`EmbeddingDimension` rather than scoring a placeholder). Every vector reader filters with one
+predicate, `HAS_VECTOR` (`length(embedding) > 0`): brute-force vector search, the HNSW build,
+its sidecar and its re-rank fetch, the dedup/cluster/global snapshot, the dream cycle's
+selection and dormant resonance; archival never selects a fact without a vector (it hard-deletes
+what it archives); an unforget re-indexes only a restored fact that has a vector;
+reconstruction retains only real vectors and empties the queue; the sidecar fingerprint counts
+the vectorless facts (`vectorless_fact_count`); restore re-queues a fact dumped with an empty
+embedding. Only the generic hydration maps `X''` to an empty `Fact::embedding`. Postgres does
+not mirror the queue yet (#634). A v16 binary refuses a v17 store; rolling an image back means
+restoring the `memory.db.v16.bak` the first open writes.
+
 ## Event Envelope Versioning
 
 Events in the append-only log carry a per-event-type revision via the `event_revision` column.

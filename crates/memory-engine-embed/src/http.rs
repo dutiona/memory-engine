@@ -1,8 +1,10 @@
 use std::io::Read;
 
-use memory_engine::error::MemoryError;
+use memory_engine::error::{EmbedderError, MemoryError};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::{EmbeddingFingerprint, ServedArtifact};
+
+use crate::chunk;
 
 /// Maximum embedding-response body the provider will buffer, in bytes (32 MiB).
 ///
@@ -43,6 +45,57 @@ enum EmbeddingResponse {
     Ollama { embeddings: Vec<serde_json::Value> },
     /// Direct / legacy single: `{ "embedding": [...] }`.
     Direct { embedding: serde_json::Value },
+}
+
+/// A request that brought back no usable answer: the error to report and, when the server
+/// answered a non-2xx, that status with its body parsed as JSON (`None` when it is not JSON).
+struct SendError {
+    error: MemoryError,
+    refusal: Option<(reqwest::StatusCode, Option<serde_json::Value>)>,
+}
+
+impl SendError {
+    /// The most tokens the server takes, when this is llama-server's over-length answer
+    /// (dutiona/infra#77), recognised by its shape whatever the provider: a 400 whose
+    /// `error.type` is `exceed_context_size_error`, with integers `n_prompt_tokens` and
+    /// `n_ctx`. No other answer is read as a length signal.
+    fn recorded_limit(&self) -> Option<usize> {
+        let (status, Some(body)) = self.refusal.as_ref()? else {
+            return None;
+        };
+        let error = body.get("error")?;
+        if *status != reqwest::StatusCode::BAD_REQUEST
+            || error.get("type")? != "exceed_context_size_error"
+            || !error.get("n_prompt_tokens")?.is_u64()
+        {
+            return None;
+        }
+        usize::try_from(error.get("n_ctx")?.as_u64()?)
+            .ok()?
+            .checked_sub(1)
+            .filter(|&limit| limit > 0)
+    }
+
+    /// What a server without llama-server's `/tokenize` answers there, or one whose body
+    /// limit refuses to count this text (413).
+    const fn no_tokenizer(&self) -> bool {
+        matches!(&self.refusal, Some((status, _)) if matches!(status.as_u16(), 400 | 404 | 405 | 413 | 422))
+    }
+}
+
+impl From<MemoryError> for SendError {
+    fn from(error: MemoryError) -> Self {
+        Self {
+            error,
+            refusal: None,
+        }
+    }
+}
+
+/// A conservative count of `text`'s tokens: a token covers at least one byte, and 2 for the
+/// special tokens a BERT-style model adds.
+const fn byte_bound(text: &str) -> usize {
+    text.len() + 2
 }
 
 /// HTTP-based embedding provider calling an OpenAI-compatible `/v1/embeddings` endpoint.
@@ -395,43 +448,183 @@ impl HttpEmbeddingProvider {
         Ok(())
     }
 
-    /// POST `payload` to the configured endpoint and return the parsed JSON body.
+    /// POST `payload` to `url` and return the 2xx body's bytes.
     ///
-    /// Centralises the transport layer shared by every embed path — auth header,
-    /// send, status check, the [`MAX_BODY`] response cap, and JSON parse — so a
-    /// change to any of them (a new error class, a retry, a header) lives in one
-    /// place. Callers supply the request `payload` and interpret the returned
-    /// [`serde_json::Value`] for their response format.
+    /// Centralises the transport layer shared by every request — auth header,
+    /// send, status check, the [`MAX_BODY`] response cap — so a change to any of
+    /// them (a new error class, a retry, a header) lives in one place. Callers
+    /// parse the body for their response format.
     ///
     /// # Errors
     ///
-    /// [`MemoryError::Internal`] if the request cannot be sent, the server
-    /// returns a non-2xx status (body included, capped), the body exceeds the
-    /// size cap, or the body is not valid JSON.
-    fn send_request(&self, payload: &serde_json::Value) -> Result<serde_json::Value, MemoryError> {
-        let mut req = self.client.post(&self.endpoint).json(payload);
+    /// [`MemoryError::Embedder`], by what a retry can do:
+    /// [`Unreachable`](EmbedderError::Unreachable) when the request never reached the
+    /// server, [`KeyRejected`](EmbedderError::KeyRejected) on 401 or 403,
+    /// [`InputRejected`](EmbedderError::InputRejected) on 400, 413 or 422,
+    /// [`NoAnswer`](EmbedderError::NoAnswer) on a timeout, a reset or a broken body, and
+    /// [`Failed`](EmbedderError::Failed) on any other non-2xx (status and capped body
+    /// included); a non-2xx also carries its status and its body parsed as JSON.
+    /// [`MemoryError::Internal`] when a 2xx body exceeds the size cap.
+    fn send_request(&self, url: &str, payload: &serde_json::Value) -> Result<Vec<u8>, SendError> {
+        let mut req = self.client.post(url).json(payload);
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
 
-        let resp = req
-            .send()
-            .map_err(|e| MemoryError::Internal(format!("embedding HTTP request failed: {e}")))?;
+        let resp = req.send().map_err(|e| {
+            let message = format!("embedding HTTP request failed: {e}");
+            // Only a request that never left can be no input's fault.
+            MemoryError::from(if e.is_connect() && !e.is_timeout() {
+                EmbedderError::Unreachable(message)
+            } else {
+                EmbedderError::NoAnswer(message)
+            })
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = read_body_capped(resp).map_or_else(
-                |_| String::new(),
-                |b| truncate_on_char_boundary(&String::from_utf8_lossy(&b), 1000),
-            );
-            return Err(MemoryError::Internal(format!(
-                "embedding endpoint returned {status}: {body}"
-            )));
+            let bytes = read_body_capped(resp).unwrap_or_default();
+            let body = truncate_on_char_boundary(&String::from_utf8_lossy(&bytes), 1000);
+            let message = format!("embedding endpoint returned {status}: {body}");
+            let error = match status.as_u16() {
+                401 | 403 => EmbedderError::KeyRejected(message),
+                400 | 413 | 422 => EmbedderError::InputRejected(message),
+                _ => EmbedderError::Failed(message),
+            };
+            return Err(SendError {
+                error: error.into(),
+                refusal: Some((status, serde_json::from_slice(&bytes).ok())),
+            });
         }
 
-        let bytes = read_body_capped(resp)?;
-        serde_json::from_slice(&bytes)
-            .map_err(|e| MemoryError::Internal(format!("embedding response parse error: {e}")))
+        Ok(read_body_capped(resp)?)
+    }
+
+    /// POST one embed request for `input` (a string or an array of them) and parse its body.
+    fn post_embed(
+        &self,
+        input: &(impl serde::Serialize + ?Sized),
+    ) -> Result<serde_json::Value, SendError> {
+        let payload = serde_json::json!({ "model": &self.model, "input": input });
+        let bytes = self.send_request(&self.endpoint, &payload)?;
+        serde_json::from_slice(&bytes).map_err(|e| {
+            MemoryError::Internal(format!("embedding response parse error: {e}")).into()
+        })
+    }
+
+    /// The served `max_input_tokens` (ADR-0015 §1), when declared.
+    fn declared_limit(&self) -> Option<usize> {
+        self.served.as_ref().map(|s| s.max_input_tokens)
+    }
+
+    /// Embed `text` within `limit` tokens: in one request when it fits, else piece by piece,
+    /// pooled. `tokenize` counts at llama-server's `/tokenize`.
+    fn embed_within(
+        &self,
+        text: &str,
+        limit: usize,
+        tokenize: bool,
+    ) -> Result<Vec<f32>, SendError> {
+        match self.split(text, limit, tokenize)?.as_slice() {
+            [(whole, _)] => self.embed_one(whole),
+            pieces => self.pool(pieces),
+        }
+    }
+
+    /// After `refused` for `text` counted within the declared `limit`: when it is llama-server's
+    /// over-length answer with a smaller context, embed `text` again, once, within the
+    /// server's own limit; any other refusal is the error.
+    fn within_served(
+        &self,
+        text: &str,
+        limit: usize,
+        refused: SendError,
+    ) -> Result<Vec<f32>, MemoryError> {
+        match refused.recorded_limit() {
+            Some(served) if served < limit => {
+                self.embed_within(text, served, true).map_err(|e| e.error)
+            }
+            _ => Err(refused.error),
+        }
+    }
+
+    /// `text` split within `limit` tokens. Nothing is counted when its byte bound fits, so a
+    /// short text costs no extra request.
+    fn split<'t>(
+        &self,
+        text: &'t str,
+        limit: usize,
+        mut tokenize: bool,
+    ) -> Result<Vec<(&'t str, usize)>, MemoryError> {
+        if byte_bound(text) <= limit {
+            return Ok(vec![(text, byte_bound(text))]);
+        }
+        let base = self.endpoint.trim_end_matches('/');
+        let url = format!(
+            "{}/tokenize",
+            base.strip_suffix("/v1/embeddings").unwrap_or(base)
+        );
+        chunk::split_to_limit(text, limit, &mut |piece| {
+            if tokenize {
+                if let Some(n) = self.count_tokens(&url, piece)? {
+                    return Ok(n);
+                }
+                tracing::warn!(
+                    "the embedder has no llama-server /tokenize; counting this input by its \
+                     UTF-8 bytes instead, in finer pieces"
+                );
+                tokenize = false;
+            }
+            Ok(byte_bound(piece))
+        })
+    }
+
+    /// `text`'s tokens as llama-server counts an embedding input, its end-of-sequence token
+    /// included; `None` when the server has no `/tokenize` (a 400, 404, 405 or 422 there, or a
+    /// body without a `tokens` list) or will not count this text there (413).
+    ///
+    /// # Errors
+    ///
+    /// Any other failure, classified as an embed request's.
+    fn count_tokens(&self, url: &str, text: &str) -> Result<Option<usize>, MemoryError> {
+        let payload =
+            serde_json::json!({ "content": text, "add_special": true, "parse_special": true });
+        match self.send_request(url, &payload) {
+            Ok(bytes) => Ok(serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|body| body.get("tokens")?.as_array().map(Vec::len))),
+            Err(refused) if refused.no_tokenizer() => Ok(None),
+            Err(refused) => Err(refused.error),
+        }
+    }
+
+    /// Embed each piece in order, one request at a time, and pool them into the fact's one
+    /// vector (decision D1, option B; per-chunk vectors: #1084): their mean weighted by each
+    /// piece's count, L2-normalised.
+    ///
+    /// # Errors
+    ///
+    /// Any piece's embed error; [`MemoryError::Internal`] when the pooled vector has a zero or
+    /// non-finite L2 norm.
+    // A count is far below 2^52; the sum accumulates in f64 and is stored as f32.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    fn pool(&self, pieces: &[(&str, usize)]) -> Result<Vec<f32>, SendError> {
+        let mut sum: Vec<f64> = Vec::new();
+        for &(piece, weight) in pieces {
+            let vector = self.embed_one(piece)?;
+            sum.resize(vector.len(), 0.0);
+            for (s, x) in sum.iter_mut().zip(&vector) {
+                *s = (weight as f64).mul_add(f64::from(*x), *s);
+            }
+        }
+        let norm = sum.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if !norm.is_finite() || norm == 0.0 {
+            return Err(MemoryError::Internal(
+                "pooled embedding has a zero or non-finite L2 norm; cannot normalise".into(),
+            )
+            .into());
+        }
+        Ok(sum.iter().map(|x| (x / norm) as f32).collect())
     }
 
     /// Classify a parsed response body into one of the known [`EmbeddingResponse`]
@@ -443,38 +636,11 @@ impl HttpEmbeddingProvider {
         use serde::Deserialize as _;
         EmbeddingResponse::deserialize(body).ok()
     }
-}
 
-impl EmbeddingProvider for HttpEmbeddingProvider {
-    /// Embed a single text via one HTTP POST to the configured endpoint.
-    ///
-    /// Auto-detects the response format:
-    /// - `OpenAI`: `{ "data": [{ "embedding": [...] }] }` (first item used)
-    /// - Ollama: `{ "embeddings": [[...]] }` (first row used)
-    /// - Direct: `{ "embedding": [...] }`
-    ///
-    /// When [`with_mrl_dim`](Self::with_mrl_dim) is configured, the returned
-    /// vector is the L2-renormalized `mrl_dim`-length prefix of the validated
-    /// native response.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::Internal`] if:
-    /// - the HTTP request cannot be sent;
-    /// - the server returns a non-2xx status (status and capped body included);
-    /// - the response body exceeds the 32 MiB size cap;
-    /// - the body is not valid JSON, or matches no recognised format;
-    /// - the returned vector contains `NaN` or infinite values;
-    /// - MRL truncation is configured and the truncated prefix has a zero or
-    ///   non-finite L2 norm.
-    ///
-    /// Returns [`MemoryError::EmbeddingDimension`] if the (pre-truncation) vector
-    /// length does not match the native `expected_dim` supplied at construction.
-    fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
-        let body = self.send_request(&serde_json::json!({
-            "model": &self.model,
-            "input": text,
-        }))?;
+    /// Embed `text` in one request, as sent: [`embed`](EmbeddingProvider::embed) without the
+    /// limit.
+    fn embed_one(&self, text: &str) -> Result<Vec<f32>, SendError> {
+        let body = self.post_embed(text)?;
 
         let no_format = || {
             MemoryError::Internal(format!(
@@ -507,49 +673,17 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 
         // Validate the raw response against the native dim, THEN truncate (MRL): the
         // stored vector is the renormalized prefix when mrl_dim is set.
-        self.maybe_truncate(embedding)
+        Ok(self.maybe_truncate(embedding)?)
     }
 
-    /// Embed multiple texts in a single HTTP POST to the configured endpoint.
-    ///
-    /// Overrides the trait default (which loops [`embed`](Self::embed)) to make
-    /// **one round-trip** for the whole batch — materially cheaper for providers
-    /// with native batch APIs. An empty slice short-circuits to `Ok(vec![])`
-    /// without any HTTP call.
-    ///
-    /// Supports the `OpenAI` batch format (`data[]` with `index` fields, so
-    /// out-of-order responses are reordered by index) and the Ollama batch format
-    /// (`embeddings[]`). The Direct single-embedding format (`embedding`) is
-    /// accepted only when exactly one text was requested. As with
-    /// [`embed`](Self::embed), MRL truncation (if configured) is applied to each
-    /// returned vector after native-dimension validation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MemoryError::Internal`] if:
-    /// - the HTTP request cannot be sent;
-    /// - the server returns a non-2xx status (status and capped body included);
-    /// - the response body exceeds the 32 MiB size cap;
-    /// - the body is not valid JSON, or matches no recognised batch format;
-    /// - the server returns a different number of embeddings than `texts.len()`,
-    ///   or a `Direct` single embedding when more than one text was requested;
-    /// - an `OpenAI` `data` item is missing/duplicates an `index`, leaves a gap,
-    ///   or carries an unparseable `embedding`;
-    /// - any returned vector contains `NaN` or infinite values;
-    /// - MRL truncation is configured and a truncated prefix has a zero or
-    ///   non-finite L2 norm.
-    ///
-    /// Returns [`MemoryError::EmbeddingDimension`] if any (pre-truncation) vector
-    /// length does not match the native `expected_dim` supplied at construction.
-    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, MemoryError> {
+    /// Embed `texts` in one request, as sent: [`embed_batch`](EmbeddingProvider::embed_batch)
+    /// without the limit.
+    fn embed_many(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, SendError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        let body = self.send_request(&serde_json::json!({
-            "model": &self.model,
-            "input": texts,
-        }))?;
+        let body = self.post_embed(texts)?;
 
         // Dispatch on the typed response shape and extract all embeddings:
         // OpenAI: { "data": [{ "index": 0, "embedding": [...] }, ...] }
@@ -570,7 +704,8 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
                     return Err(MemoryError::Internal(format!(
                         "batch embedding: server returned a single 'embedding' but {} texts were requested",
                         texts.len()
-                    )));
+                    ))
+                    .into());
                 }
                 let emb = serde_json::from_value::<Vec<f32>>(embedding).map_err(|_| {
                     MemoryError::Internal("batch embedding: cannot parse single 'embedding'".into())
@@ -582,7 +717,8 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
                 let truncated = truncate_on_char_boundary(&body_str, 1000);
                 return Err(MemoryError::Internal(format!(
                     "cannot extract embeddings from batch response: {truncated}"
-                )));
+                ))
+                .into());
             }
         };
 
@@ -591,10 +727,152 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             self.validate_embedding(emb, Some(i))?;
         }
 
-        embeddings
+        Ok(embeddings
             .into_iter()
             .map(|emb| self.maybe_truncate(emb))
-            .collect()
+            .collect::<Result<_, _>>()?)
+    }
+}
+
+impl EmbeddingProvider for HttpEmbeddingProvider {
+    /// Embed a single text: one HTTP POST to the configured endpoint, or one per piece when
+    /// the text is longer than the embedder takes (#1021).
+    ///
+    /// The limit is the served `max_input_tokens` ([`with_served_artifact`](Self::with_served_artifact),
+    /// ADR-0015 §1). With none declared, it is llama-server's own: when the server answers its
+    /// over-length 400 (`exceed_context_size_error` with an integer `n_ctx`), the text is
+    /// split within `n_ctx − 1` tokens. That answer to a text or piece counted within a
+    /// declared limit larger than `n_ctx − 1` splits the text again, once, within
+    /// `n_ctx − 1`. An over-length text is split into consecutive pieces that rejoin exactly,
+    /// each within the limit as the server counts it: provider
+    /// `llama.cpp`, or a server that answered that 400, counts at its `/tokenize`; any other
+    /// counts the conservative bound of its UTF-8 bytes + 2, as does a server with no
+    /// `/tokenize` (a `warn` per text that falls back). A text whose bytes + 2 fit is never
+    /// counted. Each piece is embedded in order, one request at a time, and the text's one
+    /// vector is their mean weighted by each piece's count, L2-normalised (decision D1;
+    /// per-chunk vectors: #1084).
+    ///
+    /// Auto-detects the response format:
+    /// - `OpenAI`: `{ "data": [{ "embedding": [...] }] }` (first item used)
+    /// - Ollama: `{ "embeddings": [[...]] }` (first row used)
+    /// - Direct: `{ "embedding": [...] }`
+    ///
+    /// When [`with_mrl_dim`](Self::with_mrl_dim) is configured, each returned
+    /// vector is the L2-renormalized `mrl_dim`-length prefix of the validated
+    /// native response, before any pooling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::Embedder`] if a request (an embed or a count) gets no answer
+    /// or a non-2xx one (status and capped body included), classified as in
+    /// [`EmbedderError`]; an over-length answer for a piece counted to fit the server's own
+    /// limit is [`InputRejected`](EmbedderError::InputRejected), as is a limit in which not
+    /// even one character fits.
+    ///
+    /// Returns [`MemoryError::Internal`] if:
+    /// - the response body exceeds the 32 MiB size cap;
+    /// - the body is not valid JSON, or matches no recognised format;
+    /// - the returned vector contains `NaN` or infinite values;
+    /// - MRL truncation is configured and the truncated prefix has a zero or
+    ///   non-finite L2 norm;
+    /// - the pooled vector has a zero or non-finite L2 norm.
+    ///
+    /// Returns [`MemoryError::EmbeddingDimension`] if the (pre-truncation) vector
+    /// length does not match the native `expected_dim` supplied at construction.
+    fn embed(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
+        if let Some(limit) = self.declared_limit() {
+            return self
+                .embed_within(text, limit, self.provider == "llama.cpp")
+                .or_else(|refused| self.within_served(text, limit, refused));
+        }
+        self.embed_one(text)
+            .or_else(|refused| match refused.recorded_limit() {
+                Some(limit) => self.embed_within(text, limit, true).map_err(|e| e.error),
+                None => Err(refused.error),
+            })
+    }
+
+    /// Embed multiple texts in a single HTTP POST to the configured endpoint.
+    ///
+    /// Overrides the trait default (which loops [`embed`](Self::embed)) to make
+    /// **one round-trip** for the whole batch — materially cheaper for providers
+    /// with native batch APIs. An empty slice short-circuits to `Ok(vec![])`
+    /// without any HTTP call.
+    ///
+    /// A text longer than the declared limit is embedded alone, as [`embed`](Self::embed)
+    /// splits and pools it; the rest stay one request. llama-server's over-length answer to
+    /// that request sends each of its texts alone, as the answer does not say which is long:
+    /// through [`embed`](Self::embed) with no declared limit, or within the server's own limit
+    /// when it is smaller than the declared one.
+    ///
+    /// Supports the `OpenAI` batch format (`data[]` with `index` fields, so
+    /// out-of-order responses are reordered by index) and the Ollama batch format
+    /// (`embeddings[]`). The Direct single-embedding format (`embedding`) is
+    /// accepted only when exactly one text was requested. As with
+    /// [`embed`](Self::embed), MRL truncation (if configured) is applied to each
+    /// returned vector after native-dimension validation.
+    ///
+    /// # Errors
+    ///
+    /// As [`embed`](Self::embed) for each text, and [`MemoryError::Internal`] if:
+    /// - the response body exceeds the 32 MiB size cap;
+    /// - the body is not valid JSON, or matches no recognised batch format;
+    /// - the server returns a different number of embeddings than `texts.len()`,
+    ///   or a `Direct` single embedding when more than one text was requested;
+    /// - an `OpenAI` `data` item is missing/duplicates an `index`, leaves a gap,
+    ///   or carries an unparseable `embedding`;
+    /// - any returned vector contains `NaN` or infinite values;
+    /// - MRL truncation is configured and a truncated prefix has a zero or
+    ///   non-finite L2 norm.
+    ///
+    /// Returns [`MemoryError::EmbeddingDimension`] if any (pre-truncation) vector
+    /// length does not match the native `expected_dim` supplied at construction.
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, MemoryError> {
+        let Some(limit) = self.declared_limit() else {
+            return self.embed_many(texts).or_else(|refused| {
+                if refused.recorded_limit().is_some() {
+                    // The answer does not say which input is long.
+                    texts.iter().map(|t| self.embed(t)).collect()
+                } else {
+                    Err(refused.error)
+                }
+            });
+        };
+        let tokenize = self.provider == "llama.cpp";
+        let mut pooled = Vec::with_capacity(texts.len());
+        for text in texts {
+            let pieces = self.split(text, limit, tokenize)?;
+            pooled.push(if pieces.len() > 1 {
+                Some(
+                    self.pool(&pieces)
+                        .or_else(|refused| self.within_served(text, limit, refused))?,
+                )
+            } else {
+                None
+            });
+        }
+        let whole: Vec<&str> = texts
+            .iter()
+            .zip(&pooled)
+            .filter_map(|(text, vector)| vector.is_none().then_some(*text))
+            .collect();
+        let mut whole = match self.embed_many(&whole) {
+            Ok(vectors) => vectors,
+            // The answer does not say which input is long.
+            Err(refused) => match refused.recorded_limit() {
+                Some(served) if served < limit => whole
+                    .iter()
+                    .map(|t| self.embed_within(t, served, true).map_err(|e| e.error))
+                    .collect::<Result<_, _>>()?,
+                _ => return Err(refused.error),
+            },
+        }
+        .into_iter();
+        pooled
+            .into_iter()
+            .map(|vector| vector.or_else(|| whole.next()))
+            .collect::<Option<_>>()
+            .ok_or_else(|| MemoryError::Internal("batch embedding: a text got no vector".into()))
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>, MemoryError> {
@@ -655,7 +933,7 @@ fn read_body_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>, Memory
     let read = resp
         .take(MAX_BODY + 1)
         .read_to_end(&mut buf)
-        .map_err(|e| MemoryError::Internal(format!("embedding response read failed: {e}")))?;
+        .map_err(|e| EmbedderError::NoAnswer(format!("embedding response read failed: {e}")))?;
     if read as u64 > MAX_BODY {
         return Err(MemoryError::Internal(format!(
             "embedding response too large: exceeds {MAX_BODY}-byte cap"

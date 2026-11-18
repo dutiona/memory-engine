@@ -6,9 +6,10 @@ use memory_engine::{MemoryEngine, StoreLock, StoreLockError};
 ///
 /// Reads the persisted identity's `dim` from the `embedding_spaces` registry's active
 /// row (#622, the v13+ home of the identity). Falls back to the legacy `embedding_meta`
-/// config row (#613) for an un-migrated v12 database, then to the bare `embed_dim` key for
-/// pre-#613 databases. Errors if none is present — a database that was created but never
-/// had an embedding written has no recorded dimension; write commands that know the
+/// config row (#613) for an un-migrated v12 database, then to the bare `embed_dim` key: the
+/// dimension of a store whose facts all wait for their vectors (#1021), as pre-#613
+/// databases carried it. Errors if none is present — a database that was created but never
+/// had a fact written has no recorded dimension; write commands that know the
 /// dimension from their input (e.g. `add-fact`'s `--embedding`) should use
 /// [`open_engine_writable_with_dim`] instead of peeking.
 ///
@@ -76,7 +77,8 @@ pub fn peek_embed_dim_from_db(path: &Path) -> anyhow::Result<usize> {
             .map_err(|_| anyhow::anyhow!("embedding_meta 'dim' out of range"));
     }
 
-    // Legacy fallback: a pre-#613 database carried a bare `embed_dim` key.
+    // No identity before the first vector: a store whose facts all wait records its
+    // dimension in the bare `embed_dim` key (#1021), as a pre-#613 database did.
     let legacy: Option<String> = conn
         .query_row(
             "SELECT value FROM config WHERE key = 'embed_dim'",
@@ -176,7 +178,7 @@ pub fn lock_store(path: &Path) -> anyhow::Result<StoreLock> {
     })
 }
 
-fn ensure_store_exists(path: &Path) -> anyhow::Result<()> {
+pub fn ensure_store_exists(path: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(
         path.is_file(),
         "database not found (or is a directory): {}",
@@ -308,6 +310,29 @@ mod tests {
             msg.contains("no embedding identity") || msg.contains("embed_dim"),
             "expected 'no embedding identity' or 'embed_dim' in error, got: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_store_whose_facts_all_wait_has_its_dimension() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("waiting.db");
+        let mut engine = memory_engine::MemoryEngine::builder(4)
+            .path(db_path.clone())
+            .build()
+            .unwrap();
+        engine
+            .add_fact_deferred(&memory_engine::AddFactRequest {
+                content: "waits for its vector".into(),
+                fact_type: memory_engine::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            })
+            .await
+            .unwrap();
+        engine.close().await.unwrap();
+
+        assert_eq!(peek_embed_dim_from_db(&db_path).unwrap(), 4);
     }
 
     // --- peek_schema_version_from_db ---

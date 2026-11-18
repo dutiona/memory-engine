@@ -11,6 +11,7 @@ use rusqlite::{OptionalExtension, params};
 use super::SqliteBackend;
 use crate::store::erase;
 use crate::store::events::EventStore;
+use crate::store::facts::HAS_VECTOR;
 use crate::store::scopes::ScopeStore;
 use crate::store::tombstones;
 use me_storage::ScopedWrite;
@@ -91,9 +92,13 @@ impl Retraction for SqliteBackend {
                 let mut embeddings = Vec::new();
                 for &(fact, active) in &restored {
                     if active {
+                        // A fact still waiting for its vector (#1021) has none to index: the
+                        // drain's fill indexes it, now that it is active again.
                         let blob: Option<Vec<u8>> = tx
                             .query_row(
-                                "SELECT embedding FROM facts WHERE id = ?1",
+                                &format!(
+                                    "SELECT embedding FROM facts WHERE id = ?1 AND {HAS_VECTOR}"
+                                ),
                                 params![fact],
                                 |r| r.get(0),
                             )
@@ -315,6 +320,130 @@ mod tests {
         let retry = be.erase(&EraseTarget::Fact(id), Utc::now()).await.unwrap();
         assert_eq!(retry.erased_facts, Vec::<i64>::new());
         assert!(retry.purged, "{:?}", retry.purge_error);
+    }
+
+    /// A fact forgotten while it waits for its vector (#1021) unforgets like any other and
+    /// keeps its queue row: it has no vector to index yet, so the drain's fill indexes it.
+    #[tokio::test]
+    async fn unforget_restores_a_fact_still_waiting_for_its_vector() {
+        use me_types::types::{EventType, NewEvent, UnforgetOutcome};
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let id = crate::test_util::seed_without_vector(&pool.write(), "waiting");
+        let be = backend(&pool);
+        let record = NewEvent {
+            timestamp: Utc::now(),
+            event_type: EventType::MemoryOp,
+            payload: serde_json::json!({}),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "test".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        be.forget_fact(id, &[1], "wrong", Utc::now(), "rec", &record)
+            .await
+            .unwrap();
+        assert_eq!(
+            be.unforget_fact(id, Utc::now()).await.unwrap(),
+            UnforgetOutcome::Restored {
+                facts: vec![(id, true)]
+            }
+        );
+        let queued: i64 = pool
+            .write()
+            .query_row(
+                "SELECT COUNT(*) FROM embed_queue WHERE fact_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 1, "it still waits for the drain");
+    }
+
+    /// Erasing a fact that waits for its vector (#1021), by fact or by machine, takes its
+    /// queue row with it: nothing is left for the drain to embed.
+    #[tokio::test]
+    async fn erase_leaves_no_queue_row_behind() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let by_fact = crate::test_util::seed_without_vector(&pool.write(), "erase me");
+        let by_machine = crate::test_util::seed_without_vector(&pool.write(), "laptop's");
+        let kept = crate::test_util::seed_without_vector(&pool.write(), "kept");
+        pool.write()
+            .execute(
+                "UPDATE facts SET metadata = '{\"machine\":\"laptop\"}' WHERE id = ?1",
+                [by_machine],
+            )
+            .unwrap();
+        let be = backend(&pool);
+        for (target, id) in [
+            (EraseTarget::Fact(by_fact), by_fact),
+            (EraseTarget::Machine("laptop".into()), by_machine),
+        ] {
+            assert_eq!(
+                be.erase(&target, Utc::now()).await.unwrap().erased_facts,
+                vec![id]
+            );
+        }
+        let queued: Vec<i64> = pool
+            .write()
+            .prepare("SELECT fact_id FROM embed_queue")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(queued, vec![kept]);
+    }
+
+    /// An embedder may echo its input in its error body (#1021): erasing the fact whose
+    /// attempt left the queue's last error or pause error drops that text, by fact or by
+    /// machine, and keeps the times and another fact's error.
+    #[tokio::test]
+    async fn erase_drops_the_queue_errors_its_fact_left() {
+        use crate::store::embed_queue::{
+            LAST_ERROR, LAST_ERROR_AT, PAUSE_ERROR, PAUSED_SINCE, record_failure,
+        };
+        use crate::store::schema::get_config;
+        use me_types::types::EmbeddingFailure;
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let paused_by = crate::test_util::seed_without_vector(&pool.write(), "alpha");
+        let laptop = crate::test_util::seed_without_vector(&pool.write(), "beta");
+        let kept = crate::test_util::seed_without_vector(&pool.write(), "gamma");
+        pool.write()
+            .execute(
+                "UPDATE facts SET metadata = '{\"machine\":\"laptop\"}' WHERE id = ?1",
+                [laptop],
+            )
+            .unwrap();
+        let fail = |id, error: &str, paused| {
+            record_failure(
+                &pool.write(),
+                id,
+                error,
+                EmbeddingFailure::Hold { paused },
+                Utc::now(),
+            )
+            .unwrap();
+        };
+        let config = |key| get_config(&pool.write(), key).unwrap();
+        let be = backend(&pool);
+
+        fail(paused_by, "401: alpha", true);
+        fail(kept, "refused: gamma", false);
+        be.erase(&EraseTarget::Fact(paused_by), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(config(PAUSE_ERROR), None);
+        assert!(config(PAUSED_SINCE).is_some(), "the key is still rejected");
+        assert_eq!(config(LAST_ERROR).as_deref(), Some("refused: gamma"));
+
+        fail(laptop, "refused: beta", false);
+        be.erase(&EraseTarget::Machine("laptop".into()), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(config(LAST_ERROR), None);
+        assert!(config(LAST_ERROR_AT).is_some());
     }
 
     /// A read-only handle refuses an erasure before it touches the store's sidecar.

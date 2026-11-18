@@ -31,6 +31,7 @@
 // unit tests are exempt: a panic there is the intended failure signal.
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
+mod chunk;
 mod http;
 mod proposer;
 

@@ -26,6 +26,11 @@ const FACT_COLUMNS: &str = "id, content, content_hash, embedding, fact_type, \
      source_event_id, importance, access_count, last_accessed, metadata, scope_id, \
      is_pinned, importance_score, surfaced_at";
 
+/// The predicate every vector reader filters with (#1021): a fact waiting in the
+/// deferred-embedding queue stores `embedding = X''`, which no reader may score, index or
+/// merge. Bare column name: callers use it only on a single-table `FROM facts`.
+pub(crate) const HAS_VECTOR: &str = "length(embedding) > 0";
+
 /// The minimal column set needed to score a fact's importance during a prune
 /// pass — identity, decay inputs, and the pin flag. Deliberately excludes the
 /// heavy `content`, `embedding`, and `metadata` columns. Kept in lockstep with
@@ -147,9 +152,10 @@ impl<'a> FactStore<'a> {
 
     /// Insert a new fact unless a forget's tombstone blocks its content (#1023): the gate
     /// fails closed, so every insert path is gated unless it deliberately calls
-    /// [`insert_asserted`](Self::insert_asserted). Validates embedding dimension, computes
-    /// `content_hash` via blake3 (hex, first 32 chars / 128 bits), serializes embedding as
-    /// BLOB. Returns the auto-assigned id.
+    /// [`insert_asserted`](Self::insert_asserted) or
+    /// [`insert_without_vector`](Self::insert_without_vector). Validates embedding
+    /// dimension, computes `content_hash` via blake3 (hex, first 32 chars / 128 bits),
+    /// serializes embedding as BLOB. Returns the auto-assigned id.
     ///
     /// # Errors
     ///
@@ -160,24 +166,36 @@ impl<'a> FactStore<'a> {
         if tombstones::blocks(self.conn, &fact.content)? {
             return Err(MemoryError::Conflict(ConflictError::Forgotten));
         }
-        self.insert_row(fact)
+        self.insert_row(fact, self.embed_dim)
     }
 
-    /// Insert a new fact with no tombstone check: the one ungated insert, for an explicit
-    /// single assertion (`remember`, `add-fact`). A fresh assertion is not a forgotten fact
-    /// coming back, and `remember` never refuses (ADR-0020 §8).
+    /// Insert a new fact with no tombstone check, for an explicit single assertion with its
+    /// vector (`add-fact`). A fresh assertion is not a forgotten fact coming back.
     ///
     /// # Errors
     ///
     /// As [`insert`](Self::insert), without the `Forgotten` conflict.
     pub fn insert_asserted(&self, fact: &NewFact) -> Result<i64> {
-        self.insert_row(fact)
+        self.insert_row(fact, self.embed_dim)
     }
 
-    fn insert_row(&self, fact: &NewFact) -> Result<i64> {
-        if fact.embedding.len() != self.embed_dim {
+    /// Insert a fact that has no vector yet: its `embedding` must be empty and is stored
+    /// as `X''` (#1021). The caller queues it in the same transaction. Like
+    /// [`insert_asserted`](Self::insert_asserted) it has no tombstone check: it is the same
+    /// explicit single assertion (`remember`), stored before its vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::EmbeddingDimension` (`expected: 0`) if `fact.embedding` is
+    /// not empty, or `MemoryError::Storage` on insert failure.
+    pub fn insert_without_vector(&self, fact: &NewFact) -> Result<i64> {
+        self.insert_row(fact, 0)
+    }
+
+    fn insert_row(&self, fact: &NewFact, width: usize) -> Result<i64> {
+        if fact.embedding.len() != width {
             return Err(MemoryError::EmbeddingDimension {
-                expected: self.embed_dim,
+                expected: width,
                 actual: fact.embedding.len(),
             });
         }
@@ -238,6 +256,9 @@ impl<'a> FactStore<'a> {
     /// and `base_importance` move to the max across occurrences (a fact later judged
     /// pinned or more important stays so). Frequency does not inflate `base_importance`
     /// — only the independent per-occurrence score does.
+    ///
+    /// A matched fact still waiting for its vector (#1021) keeps `X''` and its queue row:
+    /// the drain embeds it, so the identity stamp and the vector index see its vector.
     ///
     /// This instantiates "memory decays unless reinforced": a re-mention strengthens
     /// the recency/frequency signal rather than spawning a duplicate. It is
@@ -309,7 +330,9 @@ impl<'a> FactStore<'a> {
                 Ok(ImportOutcome::Reinforced(id))
             }
             None if tombstones::blocks(self.conn, &fact.content)? => Ok(ImportOutcome::Blocked),
-            None => Ok(ImportOutcome::Created(self.insert_row(fact)?)),
+            None => Ok(ImportOutcome::Created(
+                self.insert_row(fact, self.embed_dim)?,
+            )),
         }
     }
 
@@ -402,13 +425,68 @@ impl<'a> FactStore<'a> {
         Ok(facts)
     }
 
-    /// Count active facts (`t_expired IS NULL`) without materializing any rows.
+    /// List the active facts that have a vector, in ascending `id` order (#1021).
     ///
-    /// A `COUNT(*)` companion to [`list_active`](Self::list_active): consolidation
-    /// uses it to test its O(N·M) / O(N²) safety caps **before** the expensive
-    /// `list_active` load — which would otherwise deserialize every embedding BLOB
-    /// (~147 MB for 50k×768-dim) only to discover the corpus is over the cap and
-    /// skip both passes (#659).
+    /// Consolidation's input: dedup, clustering and the global pass never compare a fact
+    /// still waiting for its vector.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query failure.
+    pub fn list_active_with_vector(&self) -> Result<Vec<Fact>> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {FACT_COLUMNS} FROM facts WHERE t_expired IS NULL AND {HAS_VECTOR} ORDER BY id"
+            ))
+            .map_err(StorageError::backend)?;
+        let dim = self.embed_dim;
+        let rows = stmt
+            .query_map([], |row| row_to_fact(row, dim))
+            .map_err(StorageError::backend)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| StorageError::backend(e).into())
+    }
+
+    /// Count the active facts that have a vector without materializing any rows: the
+    /// `COUNT(*)` companion of [`list_active_with_vector`](Self::list_active_with_vector),
+    /// for consolidation's safety caps.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query failure.
+    pub fn count_active_with_vector(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM facts WHERE t_expired IS NULL AND {HAS_VECTOR}"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::backend)?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Whether any fact, active or not, has no vector (#1021). Consolidation's watermark
+    /// holds while one does: an expired or forgotten fact can come back active, and it must
+    /// then sit above the watermark to be compared as new.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query failure.
+    pub fn any_without_vector(&self) -> Result<bool> {
+        self.conn
+            .query_row(
+                &format!("SELECT EXISTS (SELECT 1 FROM facts WHERE NOT ({HAS_VECTOR}))"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| StorageError::backend(e).into())
+    }
+
+    /// Count active facts (`t_expired IS NULL`) without materializing any rows: the
+    /// `COUNT(*)` companion of [`list_active`](Self::list_active). Consolidation's safety
+    /// caps count with [`count_active_with_vector`](Self::count_active_with_vector).
     ///
     /// # Errors
     ///
@@ -549,6 +627,7 @@ impl<'a> FactStore<'a> {
              WHERE t_expired IS NULL
                AND is_pinned = 0
                AND importance_score < ?1
+               AND {HAS_VECTOR}
                AND (t_valid IS NULL OR t_valid <= ?2)
                AND (t_invalid IS NULL OR t_invalid > ?2){scope_clause}"
         );
@@ -1206,12 +1285,14 @@ impl<'a> FactStore<'a> {
         // serde's `get().is_none()` is true only for an *absent* key. `json_type`
         // returns the text `'null'` for a present-null value (so `IS NULL` is false)
         // and SQL NULL only when the key is absent or the path doesn't resolve.
+        // A fact without a vector (#1021) stays unmarked, so the first cycle after its
+        // embedding takes it.
         self.list_active_in_period_inner(
             start,
             end,
             scope_ids,
             fact_type,
-            &["json_type(metadata, '$.dream_cycle') IS NULL"],
+            &["json_type(metadata, '$.dream_cycle') IS NULL", HAS_VECTOR],
         )
     }
 
@@ -1619,7 +1700,8 @@ impl<'a> FactStore<'a> {
     /// expired_before`), ordered by id ascending.
     ///
     /// A forgotten fact is never a candidate (#1023): the forget keeps its row so an
-    /// unforget can restore it, and archival hard-deletes what it archives.
+    /// unforget can restore it, and archival hard-deletes what it archives. Nor is a fact
+    /// without a vector (#1021): archival would take it out of the embedding queue for good.
     ///
     /// This pushes the archive selection predicate into SQL so the engine never
     /// materializes every fact (and every embedding BLOB) just to discard the
@@ -1654,6 +1736,7 @@ impl<'a> FactStore<'a> {
                AND t_expired IS NOT NULL
                AND t_expired < ?1
                AND id NOT IN (SELECT fact_id FROM fact_tombstones WHERE fact_id IS NOT NULL)
+               AND {HAS_VECTOR}
              ORDER BY id ASC"
             ))
             .map_err(StorageError::backend)?;
@@ -1688,9 +1771,15 @@ fn row_to_fact(row: &rusqlite::Row<'_>, embed_dim: usize) -> rusqlite::Result<Fa
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })?;
 
-    let embedding = deserialize_embedding(&embedding_blob, embed_dim).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e))
-    })?;
+    // `X''` is a fact still waiting for its vector (#1021); every vector reader filters
+    // it out in SQL, so only this generic hydration sees it.
+    let embedding = if embedding_blob.is_empty() {
+        Vec::new()
+    } else {
+        deserialize_embedding(&embedding_blob, embed_dim).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e))
+        })?
+    };
 
     let metadata: serde_json::Value = serde_json::from_str(&metadata_str).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
@@ -1975,6 +2064,28 @@ mod tests {
     }
 
     #[test]
+    fn a_fact_without_a_vector_reads_back_empty() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let id = crate::test_util::seed_without_vector(&conn, "waiting for its vector");
+
+        let none = Vec::<f32>::new();
+        assert_eq!(store.get(id).unwrap().embedding, none);
+        assert_eq!(store.get_many(&[id]).unwrap()[&id].embedding, none);
+        let active = store.list_active(None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].embedding, none);
+        let mut widths = Vec::new();
+        store
+            .for_each(|f| {
+                widths.push(f.embedding.len());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(widths, [0]);
+    }
+
+    #[test]
     fn insert_and_get_round_trip() {
         let conn = setup();
         let store = FactStore::new(&conn, DIM);
@@ -2066,6 +2177,29 @@ mod tests {
             vec![qualifies, qualifies2],
             "only non-pinned facts expired strictly before the cutoff, id-ascending"
         );
+    }
+
+    /// Archival hard-deletes, so it must never take a fact that waits for its vector
+    /// (#1021): the fact would leave the queue, and recovery, for good.
+    #[test]
+    fn list_archive_candidates_skips_a_fact_without_a_vector() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let cutoff = Utc::now();
+        let candidates = || -> Vec<i64> {
+            let facts = store.list_archive_candidates(cutoff).unwrap();
+            facts.iter().map(|f| f.id).collect()
+        };
+        let waiting = crate::test_util::seed_without_vector(&conn, "expired while waiting");
+        store.expire(waiting, cutoff - TimeDelta::hours(1)).unwrap();
+        assert_eq!(candidates(), Vec::<i64>::new());
+
+        conn.execute(
+            "UPDATE facts SET embedding = ?1 WHERE id = ?2",
+            params![serialize_embedding(&[0.1; DIM]), waiting],
+        )
+        .unwrap();
+        assert_eq!(candidates(), [waiting], "once embedded, it may be archived");
     }
 
     #[test]
@@ -3895,6 +4029,48 @@ mod tests {
         let mut expected = vec![low_id, other_id];
         expected.sort_unstable();
         assert_eq!(all, expected, "None scope spans every scope");
+    }
+
+    #[test]
+    fn list_dormant_skips_a_fact_without_a_vector() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let mut low = make_fact("low", vec![0.1; DIM]);
+        low.base_importance = 0.2;
+        let embedded = store.insert(&low).unwrap();
+        let waiting = crate::test_util::seed_without_vector(&conn, "waiting");
+        store.update_importance_score(waiting, 0.2).unwrap();
+
+        let as_of: DateTime<Utc> = "2100-01-01T00:00:00Z".parse().unwrap();
+        let dormant = store.list_dormant(0.5, None, as_of).unwrap();
+        assert_eq!(dormant.iter().map(|f| f.id).collect::<Vec<_>>(), [embedded]);
+    }
+
+    #[test]
+    fn list_undreamt_in_period_skips_a_fact_without_a_vector() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let embedded = store.insert(&make_fact("a", vec![0.1; DIM])).unwrap();
+        let waiting = crate::test_util::seed_without_vector(&conn, "waiting");
+
+        let start = "2000-01-01T00:00:00Z".parse().unwrap();
+        let end = "2100-01-01T00:00:00Z".parse().unwrap();
+        let undreamt = store
+            .list_undreamt_in_period(start, end, &[], None)
+            .unwrap();
+        assert_eq!(
+            undreamt.iter().map(|f| f.id).collect::<Vec<_>>(),
+            [embedded]
+        );
+        // Left unmarked, so the first cycle after its embedding takes it.
+        assert!(
+            store
+                .get(waiting)
+                .unwrap()
+                .metadata
+                .get("dream_cycle")
+                .is_none()
+        );
     }
 
     // -------------------------------------------------------------------------

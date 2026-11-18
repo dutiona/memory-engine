@@ -95,11 +95,13 @@ normalization = "l2"
 max_input_tokens = 2048
 ```
 
-The four served-artifact keys (`artifact_sha256`, `pooling`, `normalization`, `max_input_tokens`) are all set or all absent; `artifact_sha256` is 64 lowercase hex digits. They are declared, never probed: the deployment checks the served file's SHA-256 at install.
+The four served-artifact keys (`artifact_sha256`, `pooling`, `normalization`, `max_input_tokens`) are all set or all absent; `artifact_sha256` is 64 lowercase hex digits. They are declared, never probed: the deployment checks the served file's SHA-256 at install. `max_input_tokens` is also
+the limit a longer memory is chunked by ([Embedding queue](#embedding-queue)).
 
 #### Asymmetric models (TEI / Qwen)
 
-Models like `Qwen/Qwen3-Embedding-0.6B` take a query-only instruction prefix and support Matryoshka (MRL) truncation. `recall` embeds its query with `embed_query` (prefix applied); `remember` embeds documents prefix-free.
+Models like `Qwen/Qwen3-Embedding-0.6B` take a query-only instruction prefix and support Matryoshka (MRL) truncation. `recall` embeds its query with `embed_query` (prefix applied); the embedding queue embeds what `remember` stored
+prefix-free.
 
 ```toml
 [engine]
@@ -160,7 +162,9 @@ printf 'Authorization: Bearer %s\n' "$(cat /path/to/token)" | curl -sS -H @- \
 ### Shutdown and health
 
 SIGTERM or SIGINT stops accepting connections, gives open connections 5 s to finish, waits for every tool call
-already started, flushes the `<db>.snapshot` sidecar and exits 0. A stop timeout shorter than the slowest call
+already started, stops the embedding drain, flushes the `<db>.snapshot` sidecar and exits 0. The drain stops at the
+same fence as the tool calls: a settle in progress commits first and none starts after it. An embed call still in
+flight is abandoned, its item untouched and retried at the next start; the process never waits for that call. A stop timeout shorter than the slowest call
 becomes a kill, and the next start rebuilds the projections from the database. There is no unauthenticated route, so
 a liveness probe expects 401:
 `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<port>/mcp` prints `401`.
@@ -287,11 +291,24 @@ document; the cap bounds one call's full-text cost). Full text searches the quer
 the embedding sees the query as written. The body is one JSON object:
 
 ```json
-{"search":"hybrid","results":[{"id":412,"kind":"remembered","scope":"github.com/example/project","date":"2026-11-17T09:12:03Z","machine":"laptop","content":"the lock file sits beside the store"}]}
+{"results":[{"id":412,"kind":"remembered","scope":"github.com/example/project","date":"2026-11-17T09:12:03Z","machine":"laptop","content":"the lock file sits beside the store"}],"search":"hybrid"}
 ```
 
-- `search`: `hybrid`; `full-text only` when no embedder is configured (the answer says so); `vector only` when the
-  query holds no word.
+When the query embed falls back, the answer names why:
+
+```json
+{"degraded":"embedder down","results":[{"id":412,"kind":"remembered","scope":"github.com/example/project","date":"2026-11-17T09:12:03Z","machine":"laptop","content":"the lock file sits beside the store"}],"search":"full-text only"}
+```
+
+- `search`: `hybrid`; `full-text only` when no embedder is configured (the answer says so) or the query embed fell
+  back; `vector only` when the query holds no word.
+- `degraded`: present only after a fallback (ADR-0020 §10). The query embed gets 500 ms; past that, or on a failure,
+  `recall` answers from full-text search with one of three causes: `embedder slow` (no answer within 500 ms),
+  `embedder key rejected` (401 or 403) or `embedder down` (anything else: no connection, a connection that broke off
+before its answer, another error answer). A
+  query with no word then has nothing to search and answers `"results":[]`. With no embedder configured there is no
+  `degraded`: that is configuration, not a fallback. An embed call left behind at 500 ms ends at the provider's own
+  timeout and its answer is dropped.
 - `scope`: the project key, `user`, or `unscoped` (the bucket).
 - `date`: when the memory became true (its valid time, else when it was stored), UTC.
 - `machine`: the machine that stored it, or `null`.
@@ -315,8 +332,10 @@ hint: this reads as true in every project; set_level(412, "user") files it at th
 hint: this reads as specific to one project; set_level(412, "project") files it in project github.com/example/project
 ```
 
-The hint is a deterministic phrase match, outside the contract. `remember` needs an embedder; without one it refuses
-(`error: no embedder is configured, so nothing can be remembered`).
+The hint is a deterministic phrase match, outside the contract. The memory is stored at once, whatever the
+embedder's state, and never waits for it: full-text search finds it at once, vector search once the
+[embedding queue](#embedding-queue) has embedded it. With no embedder configured it is stored and waits in the queue
+until a server with an embedder starts.
 
 **`forget`.** Retracts one memory, by its id, so it does not come up again (#1023). It never deletes: the row and every
 event stay. The memory and every active memory with the same content in the same Homes (the session's own Home and
@@ -351,6 +370,45 @@ A `set_level` record is a move only when it carries `from` and `to`, which is wh
 `remember`'s content is stored as the memory, as written: redacting it is #1024's.
 Records sit under the calling machine's bucket, except a valid `remember`'s, which sits under the Home it wrote to.
 
+### Embedding queue
+
+Each memory `remember` stores waits in the store's `embed_queue` table (schema v17) for its vector. One drain, started
+with the server when it has an embedder, embeds the queue one input at a time: one embed call in flight is its whole
+rate rule, shared with `recall`'s query embeds and with knowledge-base (ADR-0020 §6). Each write wakes it. What the
+embedder answers decides what happens to the item:
+
+| Answer | Item | Queue |
+|---|---|---|
+| A vector | gets it and leaves the queue | the pause, if any, clears |
+| No connection made (refused, DNS, TLS) | unchanged, still due | waits |
+| 401 or 403 | unchanged, still due | paused, with the error; re-probed on the backoff schedule, cleared by the next answer |
+| 400, 413 or 422 | failed, for good, with its error; it stays found by full-text search | the pause, if any, clears |
+| No answer: a timeout, a reset, a broken body | backs off alone, with its error | a pause holds: nothing answered, so nothing shows the key works |
+| A 5xx or any other answer | backs off alone, with its error | the pause, if any, clears |
+
+The backoff is 1 s doubling to 60 s, per item, and retries go on however long the outage lasts. After an answer that
+embedded nothing, the drain also sleeps by its streak of such answers on the same schedule, so an embedder that is
+down, or that fails every item, is probed ever less often, down to once a minute; a wake never shortens that sleep. A
+vector the store refuses (wrong width, or another embedding identity than the store's) backs its item off like any
+other unusable answer.
+
+A memory longer than the served `max_input_tokens` is chunked, never cut: split into consecutive pieces that rejoin
+exactly, each within the limit as the server counts it, embedded in order, one at a time, and stored as one vector,
+the pieces' mean weighted by their token counts, L2-normalised. The stored content stays whole. With provider
+`llama.cpp` the pieces are counted by the server's `/tokenize`; any other provider, or a server without `/tokenize`,
+counts the conservative bound of UTF-8 bytes + 2 (finer pieces, never a failure). A memory whose bytes + 2 fit is
+never counted. With no `max_input_tokens` declared, llama-server's own over-length 400 (`exceed_context_size_error`)
+gives the limit (its `n_ctx` − 1) and the text is counted by `/tokenize`; any other server is sent the whole text, and
+its rejection fails the item. A declared `max_input_tokens` above the server's real context gets that same answer for a
+piece counted to fit, and the memory is split again, once, by the server's limit.
+
+The queue is a table, so it survives a restart. Check it beside the running server, read-only and without the lock
+([`memory-engine-cli status`](cli-inspector.md)):
+
+```bash
+podman exec <container> memory-engine-cli --db <db> status
+```
+
 ### Derived jobs: off in the server
 
 Consolidation, the dream cycle, applying a cycle report and the insight flush are off (ADR-0020 §8): no tool, route or
@@ -369,7 +427,8 @@ Agent (Claude, etc.) → HTTP POST /mcp → auth layer → rmcp (stateless) → 
                                          ├── project.rs (project facts, key rules version 1)
                                          ├── home.rs (the user, Homes)
                                          ├── tools/ (recall, remember, forget, set_level, placement, call IDs, call records)
-                                         └── embedding.rs (HTTP embedding provider)
+                                         ├── drain.rs (the embedding drain, one input in flight)
+                                         └── embedding.rs (HTTP embedding provider, the bounded query embed)
 ```
 
 The engine is async-native (#631): tool calls are awaited directly, and the engine offloads its storage and blocking

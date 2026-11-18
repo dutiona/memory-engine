@@ -166,6 +166,82 @@ impl MemoryEngine {
         .await
     }
 
+    /// Add a fact now and queue its vector (#1021): the write never waits on an embedder.
+    ///
+    /// The fact is stored with no vector and one embedding-queue entry, in one
+    /// transaction, and gets its ID at once. Full-text search finds it at once; vector
+    /// search finds it once the embedding drain has given it a vector. After the commit
+    /// the engine wakes [`embed_work_arrived`](Self::embed_work_arrived). It runs
+    /// [`add_fact`](Self::add_fact)'s gates and validation, consults no classifier (the
+    /// fact is pinned only when `opts.pinned` says so), and records no embedding
+    /// identity: there is no vector yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::ReadOnly` if the engine was opened read-only,
+    /// `MemoryError::Conflict` if the request fails validation (importance out of
+    /// range, oversized content or metadata), or any write error. The fact and its queue
+    /// entry are written together or not at all.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use memory_engine::{AddFactRequest, FactType, MemoryEngine, MemoryQuery};
+    ///
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// let engine = MemoryEngine::builder(4).build()?;
+    /// let id = engine
+    ///     .add_fact_deferred(&AddFactRequest {
+    ///         content: "the deploy key rotates weekly".into(),
+    ///         fact_type: FactType::Semantic,
+    ///         source_event_id: None,
+    ///         scope: None,
+    ///         opts: None,
+    ///     })
+    ///     .await?;
+    ///
+    /// let found = engine
+    ///     .execute_query(&MemoryQuery::new().text("deploy key"))
+    ///     .await?;
+    /// assert_eq!(found.results[0].fact.id, id);
+    /// # Ok::<(), memory_engine::MemoryError>(())
+    /// # }).unwrap();
+    /// ```
+    pub async fn add_fact_deferred(&self, req: &AddFactRequest) -> Result<i64> {
+        let id = me_ingest::add_fact_deferred(self.mem_ctx(), &self.scope_tree, req).await?;
+        self.embed_work.notify_one();
+        Ok(id)
+    }
+
+    /// Wait until a deferred write ([`add_fact_deferred`](Self::add_fact_deferred)) has
+    /// committed since the last wake: a drain with nothing due awaits this.
+    ///
+    /// One stored wake covers every write made while no drain was waiting.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use memory_engine::{AddFactRequest, FactType, MemoryEngine};
+    ///
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// let engine = MemoryEngine::builder(4).build()?;
+    /// let request = AddFactRequest {
+    ///     content: "embed me later".into(),
+    ///     fact_type: FactType::Semantic,
+    ///     source_event_id: None,
+    ///     scope: None,
+    ///     opts: None,
+    /// };
+    /// engine.add_fact_deferred(&request).await?;
+    /// // The write was stored before anyone waited: the wake is not lost.
+    /// engine.embed_work_arrived().await;
+    /// # Ok::<(), memory_engine::MemoryError>(())
+    /// # }).unwrap();
+    /// ```
+    pub async fn embed_work_arrived(&self) {
+        self.embed_work.notified().await;
+    }
+
     /// Add multiple facts atomically: batch-embed all texts in a single call,
     /// classify outside the lock, then insert all facts in one transaction.
     ///
@@ -452,5 +528,102 @@ mod tests {
             0,
             "nothing persisted"
         );
+    }
+
+    fn request(content: &str) -> AddFactRequest {
+        AddFactRequest {
+            content: content.into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        }
+    }
+
+    /// Whether `embed_work_arrived` resolves at its first poll, i.e. a permit is stored.
+    fn work_is_signalled(engine: &MemoryEngine) -> bool {
+        use std::future::Future as _;
+        let mut arrived = std::pin::pin!(engine.embed_work_arrived());
+        arrived
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+            .is_ready()
+    }
+
+    #[tokio::test]
+    async fn add_fact_deferred_needs_no_embedder() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let id = engine
+            .add_fact_deferred(&request("the deploy key rotates weekly"))
+            .await
+            .unwrap();
+
+        assert_eq!(engine.get_fact(id).await.unwrap().embedding, [0.0_f32; 0]);
+        let by_text = engine
+            .execute_query(&crate::MemoryQuery::new().text("deploy key"))
+            .await
+            .unwrap();
+        let found: Vec<i64> = by_text.results.iter().map(|r| r.fact.id).collect();
+        assert_eq!(found, [id]);
+        let by_vector = engine
+            .execute_query(&crate::MemoryQuery::new().embedding(vec![1.0; DIM]))
+            .await
+            .unwrap();
+        assert!(by_vector.results.is_empty());
+        assert!(
+            engine
+                .storage()
+                .load_embedding_fingerprint()
+                .await
+                .unwrap()
+                .is_none(),
+            "no identity before the first vector"
+        );
+        assert!(work_is_signalled(&engine), "the write wakes the drain");
+    }
+
+    #[tokio::test]
+    async fn add_fact_deferred_validates_like_add_fact() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let oversized = request(&"x".repeat(MAX_PAYLOAD_BYTES + 1));
+        assert!(matches!(
+            engine.add_fact_deferred(&oversized).await,
+            Err(MemoryError::Conflict(ConflictError::PayloadTooLarge {
+                kind: "fact content",
+                ..
+            }))
+        ));
+        let out_of_range = AddFactRequest {
+            opts: Some(AddFactOptions {
+                base_importance: Some(1.5),
+                ..Default::default()
+            }),
+            ..request("fine words")
+        };
+        assert!(matches!(
+            engine.add_fact_deferred(&out_of_range).await,
+            Err(MemoryError::Conflict(ConflictError::PolicyParameter(_)))
+        ));
+        assert_eq!(engine.list_active_facts(None).await.unwrap().len(), 0);
+        assert!(!work_is_signalled(&engine), "a refused write wakes nothing");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ro.db");
+        MemoryEngine::builder(DIM)
+            .path(&path)
+            .build()
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+        let read_only = MemoryEngine::builder(DIM)
+            .path(&path)
+            .read_only(true)
+            .build()
+            .unwrap();
+        assert!(matches!(
+            read_only.add_fact_deferred(&request("fine words")).await,
+            Err(MemoryError::ReadOnly)
+        ));
     }
 }

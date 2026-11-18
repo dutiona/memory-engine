@@ -250,6 +250,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lexical_finds_a_fact_without_a_vector_and_vector_skips_it() {
+        let pool = seeded(&[fact("embedded memory", [1.0, 0.0, 0.0, 0.0], false)]);
+        let waiting = crate::test_util::seed_without_vector(&pool.write(), "waiting memory");
+        let be = backend(Arc::clone(&pool));
+
+        let lexical = be
+            .lexical_search("waiting", &FactFilter::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            lexical.iter().map(|&(id, _)| id).collect::<Vec<_>>(),
+            [waiting]
+        );
+        let vector = be
+            .vector_search(&[1.0, 0.0, 0.0, 0.0], &FactFilter::default(), 10)
+            .await
+            .unwrap();
+        assert_eq!(vector.len(), 1);
+        assert_ne!(vector[0].0, waiting);
+    }
+
+    #[tokio::test]
     async fn vector_parity_distinct_scores_value_and_order() {
         let pool = seeded(&[
             fact("a", [1.0, 0.0, 0.0, 0.0], false),
@@ -862,6 +884,59 @@ mod hnsw_tests {
             Some(target),
             "an unforgotten fact is back in HNSW"
         );
+    }
+
+    /// A fact forgotten while it waits for its vector (#1021, #1023) is still embedded, and
+    /// HNSW holds it exactly while it is active: unforgotten before its vector, the fill
+    /// indexes it; filled while forgotten, the unforget does.
+    #[tokio::test]
+    async fn a_waiting_fact_joins_hnsw_once_it_is_both_filled_and_unforgotten() {
+        use me_storage::retraction::Retraction;
+        async fn top(be: &SqliteBackend, query: [f32; DIM]) -> Option<i64> {
+            be.vector_search(&query, &FactFilter::default(), 1)
+                .await
+                .unwrap()
+                .first()
+                .map(|(id, _)| *id)
+        }
+        let pool = seeded(&[fact("far", [0.0, 0.0, 0.0, 1.0])]);
+        let early = crate::test_util::seed_without_vector(&pool.write(), "unforgotten first");
+        let late = crate::test_util::seed_without_vector(&pool.write(), "filled first");
+        let be = backend_with_ann(Arc::clone(&pool), 0);
+        let fp = EmbeddingFingerprint::new("test-model", "tei", DIM);
+        let record = me_types::types::NewEvent {
+            timestamp: Utc::now(),
+            event_type: me_types::types::EventType::MemoryOp,
+            payload: serde_json::json!({}),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "test".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        for id in [early, late] {
+            be.forget_fact(id, &[1], "r", Utc::now(), "rec", &record)
+                .await
+                .unwrap();
+        }
+
+        be.unforget_fact(early, Utc::now()).await.unwrap();
+        be.complete_embedding(early, &[1.0, 0.0, 0.0, 0.0], &fp, DIM, Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(top(&be, [1.0, 0.0, 0.0, 0.0]).await, Some(early));
+
+        be.complete_embedding(late, &[0.0, 1.0, 0.0, 0.0], &fp, DIM, Utc::now())
+            .await
+            .unwrap();
+        assert_ne!(
+            top(&be, [0.0, 1.0, 0.0, 0.0]).await,
+            Some(late),
+            "filled while forgotten, it stays out of HNSW"
+        );
+        be.unforget_fact(late, Utc::now()).await.unwrap();
+        assert_eq!(top(&be, [0.0, 1.0, 0.0, 0.0]).await, Some(late));
     }
 
     /// After `insert_fact` the newly inserted fact must appear in HNSW results.

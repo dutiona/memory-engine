@@ -1,8 +1,8 @@
 //! Ingest primitive: event-log append + fact derivation over `MemoryCtx`.
 //!
 //! Extracted from the facade in Wave 2 #816 / S4, sub-PR 1. The engine's
-//! `MemoryEngine::{ingest, add_fact, add_fact_precomputed, add_facts_batch,
-//! add_facts_batch_partial}` are one-line delegates over the free functions here.
+//! `MemoryEngine::{ingest, add_fact, add_fact_precomputed, add_fact_deferred,
+//! add_facts_batch, add_facts_batch_partial}` are delegates over the free functions here.
 
 use std::sync::Arc;
 
@@ -201,13 +201,39 @@ fn validate_add_fact_request(req: &AddFactRequest) -> Result<()> {
     Ok(())
 }
 
-/// Shared body of [`add_fact`] and [`add_fact_precomputed`]: classify, resolve
-/// scope, and insert the fact with its (already-obtained) `embedding` in a single
-/// write transaction. `stamp_identity` runs inside that transaction *before* the
-/// insert — recording-or-comparing the identity (from the live provider in
-/// `add_fact`, or the caller's declared fingerprint in `add_fact_precomputed`) — so a
-/// vector is never committed without an established, matching identity (the #614
-/// silent-corruption landmine).
+/// Add a fact now and queue its vector (#1021): the write never waits on an embedder.
+///
+/// The fact is stored with no vector and one queue entry, in one transaction; full-text
+/// search finds it at once, vector search once the drain has embedded it. Runs
+/// [`add_fact`]'s gates and validation; with no classifier, the fact is pinned only when
+/// `opts.pinned` says so. No identity is recorded, since no vector is written.
+///
+/// # Errors
+///
+/// Returns `MemoryError::ReadOnly` if the engine was opened read-only,
+/// `MemoryError::Conflict` if the request fails validation (importance out of range,
+/// oversized content or metadata), or any write error. The fact and its queue entry are
+/// written together or not at all.
+pub async fn add_fact_deferred(
+    ctx: MemoryCtx<'_>,
+    scope_tree: &RwLock<ScopeTree>,
+    req: &AddFactRequest,
+) -> Result<i64> {
+    ctx.ensure_open()?;
+    ctx.ensure_writable()?;
+    validate_add_fact_request(req)?;
+    let now = Utc::now();
+    let fact = prepare_new_fact(ctx, scope_tree, req, Vec::new(), None, now).await?;
+    ctx.storage.insert_fact_deferred(&fact, now).await
+}
+
+/// Shared body of [`add_fact`] and [`add_fact_precomputed`]: build the fact, then insert
+/// it with its (already-obtained) `embedding` in a single write transaction.
+/// `stamp_identity` runs inside that transaction *before* the insert —
+/// recording-or-comparing the identity (from the live provider in `add_fact`, or the
+/// caller's declared fingerprint in `add_fact_precomputed`) — so a vector is never
+/// committed without an established, matching identity (the #614 silent-corruption
+/// landmine).
 async fn insert_fact_with_embedding(
     ctx: MemoryCtx<'_>,
     scope_tree: &RwLock<ScopeTree>,
@@ -216,7 +242,28 @@ async fn insert_fact_with_embedding(
     classifier: Option<Arc<dyn PersistenceClassifier>>,
     fingerprint: EmbeddingFingerprint,
 ) -> Result<i64> {
-    let now = Utc::now();
+    let new_fact =
+        prepare_new_fact(ctx, scope_tree, req, embedding, classifier, Utc::now()).await?;
+
+    // Atomic first-write below the seam: record-or-verify the embedding identity
+    // (#613/#614) and insert the fact in one transaction; the backend fires the
+    // HNSW notify post-commit internally (Stage B). `Ok ⟹ committed`.
+    ctx.storage
+        .insert_fact_atomic(&new_fact, &fingerprint, ctx.embed_dim)
+        .await
+}
+
+/// The request-to-[`NewFact`] half every single-fact path shares ([`add_fact`],
+/// [`add_fact_precomputed`], [`add_fact_deferred`]): defaults, the pin decision, and the
+/// scope resolution.
+async fn prepare_new_fact(
+    ctx: MemoryCtx<'_>,
+    scope_tree: &RwLock<ScopeTree>,
+    req: &AddFactRequest,
+    embedding: Vec<f32>,
+    classifier: Option<Arc<dyn PersistenceClassifier>>,
+    now: chrono::DateTime<Utc>,
+) -> Result<NewFact> {
     let opts = req.opts.clone().unwrap_or_default();
 
     let base_importance = opts.base_importance.unwrap_or(0.5);
@@ -261,7 +308,7 @@ async fn insert_fact_with_embedding(
         None => 1, // root scope
     };
 
-    let new_fact = NewFact {
+    Ok(NewFact {
         content: req.content.clone(),
         content_hash: String::new(), // FactStore::insert computes this via blake3
         embedding,
@@ -277,14 +324,7 @@ async fn insert_fact_with_embedding(
         last_accessed: effective_last_accessed,
         metadata: opts.metadata.unwrap_or_else(|| serde_json::json!({})),
         is_pinned,
-    };
-
-    // Atomic first-write below the seam: record-or-verify the embedding identity
-    // (#613/#614) and insert the fact in one transaction; the backend fires the
-    // HNSW notify post-commit internally (Stage B). `Ok ⟹ committed`.
-    ctx.storage
-        .insert_fact_atomic(&new_fact, &fingerprint, ctx.embed_dim)
-        .await
+    })
 }
 
 /// Add multiple facts atomically: batch-embed all texts in a single call,

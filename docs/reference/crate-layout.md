@@ -184,6 +184,9 @@ and `pool/` — the S2 scope — are **no longer facade modules**; they physical
 `engine::reconstruct`
 : Background reconstruction orchestration (`MemoryEngine::reconstruct`, #623). Re-embeds stored fact content under a new **same-dimension** identity with no downtime: open (or resume) a `populating` space → backfill it off the write lock (embedding under `spawn_blocking`) → catch-up pass → atomic copy-swap promote. The embedder stays engine-side; the backend does pure DB ops. Returns a `PromoteOutcome`. Different-dim is the #742 follow-up (its read-fence is the `MemoryCtx::ensure_open` gate, now in `me-storage`); the live HNSW rebuild is #624. See `docs/advanced/reconstruction.md`.
 
+`engine::embed_queue`
+: The deferred-embedding queue's facade half (#1021): `Backoff` (the per-item retry schedule), `Settled`, `MemoryEngine::next_embedding` and `MemoryEngine::settle_embedding` (an embedder's answer → the queue write: fill the vector, fail the item, back it off, or hold the queue), and the engine-free `read_embed_queue_status` behind `memory-engine-cli status`. The deferred write itself, `MemoryEngine::add_fact_deferred` with its `embed_work_arrived` wake, sits in `engine::ingest` over `me-ingest`'s `add_fact_deferred`; the queue SQL is `me-backend-sqlite`'s `store::embed_queue`. The drain loop lives with its consumer, `memory-engine-mcp`.
+
 `archive/`
 : Cold-storage `.pak` snapshot subsystem (feature-gated) → **me-archive**.
 
@@ -260,7 +263,7 @@ siblings: no L3 crate depends on another.
 `memory-engine` (L4 — `crates/memory-engine/`)
 : The facade. Owns `MemoryEngine` + its builder/bootstrap/inspect/reconstruct/resume, selects the concrete backend, wires the L3 primitives together (`mem_ctx()`), and owns the re-export surface below. Depends on every crate above.
 
-Plus `me-test-support` (dev-only, `crates/me-test-support/`) — cross-crate test doubles + the `SqliteFactory` conformance harness — and the three consumers of the facade's public API: `memory-engine-cli` (`crates/memory-engine-cli/`), `memory-engine-mcp` (`crates/memory-engine-mcp/`), and `memory-engine-embed` (`crates/memory-engine-embed/`, the HTTP embedding provider).
+Plus `me-test-support` (dev-only, `crates/me-test-support/`) — cross-crate test doubles + the `SqliteFactory` conformance harness — and the three consumers of the facade's public API: `memory-engine-cli` (`crates/memory-engine-cli/`), `memory-engine-mcp` (`crates/memory-engine-mcp/`), and `memory-engine-embed` (`crates/memory-engine-embed/`, the HTTP embedding provider). In the server, `src/drain.rs` is the embedding drain (one input in flight, spawned by `http::serve`, stopped at its fence) and `src/embedding.rs` the bounded query embed `recall` falls back from; in the embed crate, `src/chunk.rs` is the pure `split_to_limit` that cuts an over-length input into pieces that rejoin exactly, which `src/http.rs` counts, embeds and pools.
 
 ## Re-exports from the facade `lib.rs`
 

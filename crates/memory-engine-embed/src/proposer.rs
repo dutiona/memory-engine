@@ -9,7 +9,7 @@
 //! this). Uses `reqwest::blocking::Client` because the `DeltaProposer` trait is sync.
 //!
 //! The parser is deliberately split into pure helpers ([`request_body`](HttpDeltaProposer::request_body),
-//! [`parse_response`](HttpDeltaProposer::parse_response)) so the wire contract is unit-
+//! [`parse_proposal`](HttpDeltaProposer::parse_proposal)) so the wire contract is unit-
 //! testable without a network, and so a future `OpenAI` `usage`-style endpoint is a
 //! drop-in parser swap. Token usage (`eval_count` / `prompt_eval_count`) and the call
 //! count are captured into interior atomics and read back via [`HttpDeltaProposer::stats`]
@@ -34,7 +34,7 @@ pub struct ProposerStats {
 
 /// HTTP `DeltaProposer` calling an Ollama `/api/generate` endpoint in JSON mode.
 ///
-/// See the [module docs](self) for the wire contract and determinism guarantees.
+/// It asks at temperature 0, so a fixed corpus yields a deterministic proposal.
 pub struct HttpDeltaProposer {
     client: reqwest::blocking::Client,
     endpoint: String,

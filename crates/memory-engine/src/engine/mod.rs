@@ -36,6 +36,7 @@ pub(crate) mod cognitive;
 mod conflict;
 mod consolidation;
 mod dormant;
+pub(crate) mod embed_queue;
 mod forgetting;
 mod graph;
 mod graph_load;
@@ -230,6 +231,10 @@ pub struct MemoryEngine {
     /// lock contention. Same-dimension reconstruction never sets it (the cached dim
     /// stays valid — #623 behavior preserved exactly).
     reopen_required: AtomicUsize,
+    /// Signalled after each deferred write commits (#1021): the drain awaits it through
+    /// [`embed_work_arrived`](Self::embed_work_arrived). `notify_one` stores a permit, so
+    /// a drain not yet waiting still wakes.
+    embed_work: tokio::sync::Notify,
 }
 
 impl std::fmt::Debug for MemoryEngine {
@@ -352,6 +357,7 @@ impl MemoryEngine {
             db_path,
             closed: AtomicBool::new(false),
             reopen_required: AtomicUsize::new(0),
+            embed_work: tokio::sync::Notify::new(),
         })
     }
 

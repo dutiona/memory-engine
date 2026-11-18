@@ -16,5 +16,6 @@ pub mod query;
 pub mod record_outcome;
 pub mod schema;
 pub mod stats;
+pub mod status;
 pub mod types;
 pub mod unforget;

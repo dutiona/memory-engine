@@ -84,6 +84,9 @@ enum Commands {
     Migrate(commands::migrate::MigrateArgs),
     /// Report the database schema version vs the binary's `CURRENT_SCHEMA_VERSION`
     Schema,
+    /// Report the embedding queue: waiting, failed, paused, last success and error.
+    /// Read-only, without the engine: safe beside a running server
+    Status,
 }
 
 #[tokio::main]
@@ -147,6 +150,7 @@ async fn main() -> ExitCode {
             .map(|()| ExitCode::SUCCESS),
         Commands::Migrate(ref args) => commands::migrate::run(&cli.db, args, cli.format),
         Commands::Schema => commands::schema::run(&cli.db, cli.format),
+        Commands::Status => commands::status::run(&cli.db, cli.format).map(|()| ExitCode::SUCCESS),
     };
 
     match result {

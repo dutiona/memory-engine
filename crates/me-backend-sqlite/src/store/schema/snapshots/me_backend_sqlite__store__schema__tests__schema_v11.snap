@@ -35,6 +35,9 @@ CREATE INDEX idx_edges_source ON edges(source_fact_id);
 -- index: idx_edges_target
 CREATE INDEX idx_edges_target ON edges(target_fact_id);
 
+-- index: idx_embed_queue_due
+CREATE INDEX idx_embed_queue_due ON embed_queue(next_attempt_at) WHERE failed_at IS NULL;
+
 -- index: idx_embedding_spaces_one_active
 CREATE UNIQUE INDEX idx_embedding_spaces_one_active ON embedding_spaces(status) WHERE status = 'active';
 
@@ -112,6 +115,9 @@ CREATE TABLE config ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
 
 -- table: edges
 CREATE TABLE edges ( id INTEGER PRIMARY KEY AUTOINCREMENT, source_fact_id INTEGER NOT NULL REFERENCES facts(id), target_fact_id INTEGER NOT NULL REFERENCES facts(id), relation_type TEXT NOT NULL, weight REAL NOT NULL DEFAULT 1.0, t_created TEXT NOT NULL, t_expired TEXT, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id) );
+
+-- table: embed_queue
+CREATE TABLE embed_queue ( fact_id INTEGER PRIMARY KEY REFERENCES facts(id) ON DELETE CASCADE, enqueued_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT NOT NULL, last_error TEXT, failed_at TEXT );
 
 -- table: embedding_spaces
 CREATE TABLE embedding_spaces ( name TEXT PRIMARY KEY, model TEXT NOT NULL, provider TEXT NOT NULL, dim INTEGER NOT NULL, matryoshka_base_dim INTEGER, element_type TEXT NOT NULL DEFAULT 'float32', status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'populating', 'deprecated')), created_at TEXT NOT NULL DEFAULT (datetime('now')), artifact_sha256 TEXT, pooling TEXT, normalization TEXT, max_input_tokens INTEGER );

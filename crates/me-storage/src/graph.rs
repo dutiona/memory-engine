@@ -16,8 +16,8 @@ use chrono::{DateTime, Utc};
 
 use me_types::error::Result;
 use me_types::types::{
-    Edge, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent, NewFact, ScopeNode,
-    SessionFact,
+    Edge, EmbeddingFailure, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
+    NewFact, NextEmbedding, ScopeNode, SessionFact,
 };
 
 /// Outcome of [`FactGraph::ingest_bootstrap_batch_atomic`].
@@ -281,8 +281,9 @@ pub trait FactGraph: Send + Sync {
     /// Atomically stamp the embedding identity (fingerprint) and insert one fact,
     /// in a single `rusqlite` transaction.
     ///
-    /// The one ungated insert (#1023): it serves the single explicit assertion (`remember`,
-    /// `add-fact`), which a forget's tombstone never blocks.
+    /// Ungated (#1023), as [`insert_fact_deferred`](Self::insert_fact_deferred) is: it
+    /// serves the single explicit assertion with its vector (`add-fact`), which a forget's
+    /// tombstone never blocks.
     ///
     /// The caller (`insert_fact_with_embedding`) is responsible for:
     /// - scope resolution (done before the call, autocommit-separate by design)
@@ -570,4 +571,69 @@ pub trait FactGraph: Send + Sync {
         record_at: &str,
         record: &NewEvent,
     ) -> Result<ScopedWrite>;
+
+    // -------------------------------------------------------------------------
+    // deferred embedding (#1021)
+    // -------------------------------------------------------------------------
+
+    /// Insert `fact` with no vector (its `embedding` must be empty) and queue it, in one
+    /// transaction.
+    ///
+    /// The queue entry is due at `now`. No identity is recorded and no vector index is
+    /// notified: the fact has no vector until the drain gives it one. Ungated (#1023), as
+    /// [`insert_fact_atomic`](Self::insert_fact_atomic) is: the same explicit single
+    /// assertion (`remember`), stored before its vector.
+    ///
+    /// # Errors
+    ///
+    /// [`MemoryError::EmbeddingDimension`](me_types::error::MemoryError::EmbeddingDimension)
+    /// (`expected: 0`) if `fact.embedding` is not empty, or any write error; on every
+    /// error nothing is written.
+    async fn insert_fact_deferred(&self, fact: &NewFact, now: DateTime<Utc>) -> Result<i64>;
+
+    /// The waiting item to embed next: among the items not failed, the smallest
+    /// `(next_attempt_at, fact_id)`, with its content. `Due` once its time is `now` or
+    /// earlier, else `NotBefore` that time; `Idle` when none waits.
+    async fn next_embedding(&self, now: DateTime<Utc>) -> Result<NextEmbedding>;
+
+    /// Fill fact `fact_id`'s vector and drop its queue row, in one transaction.
+    ///
+    /// Records `fingerprint` if absent (#613) when the vector is written; never writes
+    /// over a vector, so a fact that already has one, or is gone, only loses its queue
+    /// row. Sets the last-success time and clears the pause.
+    ///
+    /// # Contract
+    ///
+    /// `Ok ⟹ committed; Err ⟹ nothing written`, except
+    /// [`IndexInconsistent`](me_types::error::MemoryError::IndexInconsistent), returned
+    /// *after* the commit when the post-commit vector-index update trips its invariant:
+    /// the vector is stored, only the index must be rebuilt (do not retry).
+    ///
+    /// # Errors
+    ///
+    /// [`EmbeddingDimension`](me_types::error::MemoryError::EmbeddingDimension) for a
+    /// vector not `expected_dim` wide,
+    /// [`EmbeddingModelMismatch`](me_types::error::MemoryError::EmbeddingModelMismatch)
+    /// for a foreign identity (#614), or a write error.
+    async fn complete_embedding(
+        &self,
+        fact_id: i64,
+        embedding: &[f32],
+        fingerprint: &me_types::types::EmbeddingFingerprint,
+        expected_dim: usize,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
+
+    /// Record a failed attempt on fact `fact_id`, in one transaction: `Retry` reschedules
+    /// the item, `Fail` fails it (both count the attempt and keep `error`; `Fail`, and a
+    /// `Retry` the embedder answered, clear the pause), `Hold` changes no queue row (and,
+    /// paused, keeps the first pause time and the latest `error`). Every failure sets the
+    /// last-error time and text.
+    async fn record_embedding_failure(
+        &self,
+        fact_id: i64,
+        error: &str,
+        failure: EmbeddingFailure,
+        now: DateTime<Utc>,
+    ) -> Result<()>;
 }

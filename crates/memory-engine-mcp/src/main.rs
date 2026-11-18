@@ -56,8 +56,19 @@ struct Cli {
     embedding: config::EmbeddingOverrides,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), BoxError> {
+fn main() -> Result<(), BoxError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    // Dropping the runtime would wait for every blocking call, an embed the drain abandoned
+    // included, until the provider's timeout. The flush ran inside `serve` and no task can
+    // write past its fence, so nothing left is waited for.
+    runtime.shutdown_background();
+    result
+}
+
+async fn run() -> Result<(), BoxError> {
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr).with_ansi(false))
         .with(EnvFilter::from_default_env().add_directive(tracing::Level::WARN.into()))
@@ -113,7 +124,7 @@ async fn main() -> Result<(), BoxError> {
         }
         builder = builder.backup_dir(dir.clone());
     }
-    // The store lock (ADR-0020 §8), held until `main` returns: no maintenance command and no
+    // The store lock (ADR-0020 §8), held until `run` returns: no maintenance command and no
     // second server writes beside this one. Taken after every configuration check and before
     // the open, which migrates, so a refusal still writes nothing.
     let _store_lock =

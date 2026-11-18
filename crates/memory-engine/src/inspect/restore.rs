@@ -22,8 +22,15 @@ use super::types::EngineSnapshot;
 /// `embedding_meta` is the pre-#622 legacy identity key. It no longer exists as a live
 /// config row (the identity moved to the `embedding_spaces` table), so it must not be
 /// copied back into `config`; an old snapshot's value is handled explicitly when restoring
-/// the registry (see the embedding-space restore step).
-const MANAGED_CONFIG_KEYS: &[&str] = &["schema_version", "storage_epoch", "embedding_meta"];
+/// the registry (see the embedding-space restore step). The store's dimension
+/// ([`STORE_DIM`](crate::store::embedding_meta::STORE_DIM)) is recorded from the validated
+/// header instead, when restored facts wait for their vectors.
+const MANAGED_CONFIG_KEYS: &[&str] = &[
+    "schema_version",
+    "storage_epoch",
+    "embedding_meta",
+    crate::store::embedding_meta::STORE_DIM,
+];
 
 // ---------------------------------------------------------------------------
 // Compression detection
@@ -188,8 +195,9 @@ fn read_zstd(_reader: impl Read, _cap: u64) -> Result<EngineSnapshot> {
 /// - [`MemoryError::Migration`] if `schema_version` is from a newer schema.
 /// - [`MemoryError::UnsupportedEpoch`] if `storage_epoch` doesn't match.
 /// - [`MemoryError::Internal`] if `embed_dim` is zero or root scope is missing.
-/// - [`MemoryError::EmbeddingDimension`] if any fact, summary, or `fact_vectors`
-///   embedding length does not equal the snapshot's `embed_dim` (#413).
+/// - [`MemoryError::EmbeddingDimension`] if a fact embedding is neither empty (a fact
+///   waiting for its vector, #1021) nor the snapshot's `embed_dim` wide, or a summary or
+///   `fact_vectors` embedding length does not equal its expected dimension (#413).
 pub fn validate_snapshot(snapshot: &EngineSnapshot) -> Result<()> {
     if snapshot.schema_version > CURRENT_SCHEMA_VERSION {
         return Err(MigrationError::Incompatible(format!(
@@ -220,9 +228,10 @@ pub fn validate_snapshot(snapshot: &EngineSnapshot) -> Result<()> {
     //
     // The **active** vectors (`facts[].embedding` and `summaries[].embedding`)
     // belong to the active space, so they must match the snapshot's `embed_dim`.
+    // An empty fact embedding is a fact waiting for its vector (#1021); restore queues it.
     let expected = snapshot.embed_dim;
     for fact in &snapshot.facts {
-        if fact.embedding.len() != expected {
+        if !fact.embedding.is_empty() && fact.embedding.len() != expected {
             return Err(MemoryError::EmbeddingDimension {
                 expected,
                 actual: fact.embedding.len(),
@@ -385,7 +394,8 @@ fn restore_events(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
     Ok(())
 }
 
-/// Insert all snapshot facts, preserving explicit IDs. Helper for
+/// Insert all snapshot facts, preserving explicit IDs, and queue each one restored
+/// without a vector (#1021): a dump keeps no queue state. Helper for
 /// [`restore_snapshot_into`].
 fn restore_facts(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
     let mut stmt = conn
@@ -426,6 +436,17 @@ fn restore_facts(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
             fact.surfaced_at.map(|dt| dt.to_rfc3339()),
         ])
         .map_err(StorageError::backend)?;
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut queue = conn
+        .prepare(
+            "INSERT INTO embed_queue (fact_id, enqueued_at, next_attempt_at) VALUES (?1, ?2, ?2)",
+        )
+        .map_err(StorageError::backend)?;
+    for fact in snapshot.facts.iter().filter(|f| f.embedding.is_empty()) {
+        queue
+            .execute(rusqlite::params![fact.id, now])
+            .map_err(StorageError::backend)?;
     }
     Ok(())
 }
@@ -644,6 +665,9 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
 
     // 8b. Restore the embedding-space registry (#622).
     restore_embedding_spaces(&tx, snapshot)?;
+    // With no identity, the store's dimension is the validated header's, as a deferred
+    // insert records it (#1021): engine-opening commands need it even when no fact waits.
+    crate::store::embedding_meta::record_dim_if_unknown(&tx, snapshot.embed_dim)?;
 
     // 8c. Restore the non-active spaces' vectors (#623) — after facts (8b: spaces;
     //     3-5: facts) so both foreign keys resolve.
@@ -1560,6 +1584,108 @@ mod tests {
             matches!(err, MemoryError::Internal(ref m) if m.contains("unknown embedding space")),
             "expected unknown-space Internal error, got {err:?}"
         );
+    }
+
+    /// A restore whose facts all wait has no identity: the store records the validated
+    /// header's dimension, never a snapshot's own config value for it (#1021).
+    #[test]
+    fn a_restored_store_whose_facts_all_wait_records_the_header_dimension() {
+        let mut snapshot =
+            snapshot_with(vec![fact_with_embedding(1, vec![])], vec![], vec![], vec![]);
+        snapshot.config.insert("embed_dim".into(), "8".into());
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        restore_snapshot_into(&conn, &snapshot).unwrap();
+        assert_eq!(
+            get_config(&conn, "embed_dim").unwrap().as_deref(),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn a_restored_store_without_an_identity_keeps_the_header_dimension() {
+        // No waiting fact and no identity: an emptied store, or a pre-#613 dump whose only
+        // dimension record was `config.embed_dim`, which restore no longer imports.
+        let mut snapshot = snapshot_with(vec![], vec![], vec![], vec![]);
+        snapshot.config.insert("embed_dim".into(), "8".into());
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        restore_snapshot_into(&conn, &snapshot).unwrap();
+        assert_eq!(
+            get_config(&conn, "embed_dim").unwrap().as_deref(),
+            Some("4")
+        );
+    }
+
+    #[cfg(feature = "test-util")]
+    #[tokio::test]
+    async fn a_waiting_fact_round_trips_through_dump_and_restore() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+            .add_fact(
+                &AddFactRequest {
+                    content: "embedded fact".into(),
+                    fact_type: FactType::Semantic,
+                    source_event_id: None,
+                    scope: None,
+                    opts: None,
+                },
+                std::sync::Arc::new(crate::test_utils::MockEmbedder::fixed4())
+                    as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+        let waiting = crate::test_utils::seed_waiting_fact(&engine, "waiting fact", true).await;
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("dump.json");
+        engine
+            .dump_state(&DumpFormat::Json(json_path.clone()))
+            .await
+            .unwrap();
+
+        let snapshot = read_snapshot(&json_path).unwrap();
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        restore_snapshot_into(&conn, &snapshot).unwrap();
+
+        let (width, attempts, enqueued_at, next_attempt_at, failed_at): (
+            i64,
+            i64,
+            String,
+            String,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT length(f.embedding), q.attempts, q.enqueued_at, q.next_attempt_at, q.failed_at
+                   FROM facts f JOIN embed_queue q ON q.fact_id = f.id WHERE f.id = ?1",
+                [waiting],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!((width, attempts, failed_at), (0, 0, None), "queued again");
+        assert_eq!(enqueued_at, next_attempt_at);
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embed_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(queued, 1, "only the fact without a vector is queued");
+
+        let wrong_width = snapshot_with(
+            vec![fact_with_embedding(1, vec![0.1, 0.2, 0.3])],
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(matches!(
+            validate_snapshot(&wrong_width),
+            Err(MemoryError::EmbeddingDimension {
+                expected: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]

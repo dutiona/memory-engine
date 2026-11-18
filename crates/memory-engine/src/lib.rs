@@ -175,6 +175,7 @@ pub use archive::{ArchiveManifestEntry, ArchivePolicy, ArchiveStats, ArchiveVeri
 pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionExtractor};
 pub use engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, PromoteAction};
 pub use engine::builder::{File, InMemory, MemoryEngineBuilder};
+pub use engine::embed_queue::{Backoff, Settled, read_embed_queue_status};
 pub use engine::{EngineConfig, MemoryEngine};
 pub use store_lock::{StoreLock, StoreLockError};
 // Explicit re-export of the full `error` public surface (the umbrella
@@ -190,8 +191,8 @@ pub use me_traits::{
     PersistenceClassifier, Reranker, SummarizableContent, SummaryGenerator,
 };
 pub use me_types::error::{
-    ArchiveError, ConflictError, CycleError, MemoryError, MigrationError, RerankerError, Result,
-    StorageError,
+    ArchiveError, ConflictError, CycleError, EmbedderError, MemoryError, MigrationError,
+    RerankerError, Result, StorageError,
 };
 pub use resume::{ResumeConfig, ResumeContext};
 /// End-to-end example: build an engine, add a fact, and retrieve it with
@@ -281,13 +282,14 @@ pub use store::schema::CURRENT_SCHEMA_VERSION;
 // the whole list still satisfies every downstream consumer.
 pub use me_types::types::{
     Activity, ActivityStatus, AddFactOptions, AddFactRequest, ClassifierInput, ConsolidationLevel,
-    ConsolidationProposal, DreamCycleConfig, Edge, EmbeddingFingerprint, Event, EventFilter,
-    EventType, Fact, FactId, FactScoringRow, FactType, Insight, LineageId, LineageRecord,
-    LineageSnapshotEntry, MergeGroup, NewActivity, NewEdge, NewEvent, NewFact, NewFactBuilder,
-    NewLineageRecord, NewSummary, Outcome, OutcomeClass, OutcomeCounts, ParseActivityStatusError,
-    ProjectContext, PromoteOutcome, PromoteRequest, PromotionProvenance, PromotionResult,
-    RecordActivityRequest, RecordActivityResult, RelationType, ScopeNode, ScopeQuery,
-    ServedArtifact, SessionCheckpoint, SessionFact, Summary,
+    ConsolidationProposal, DreamCycleConfig, Edge, EmbedQueueStatus, EmbeddingFingerprint, Event,
+    EventFilter, EventType, Fact, FactId, FactScoringRow, FactType, Insight, LineageId,
+    LineageRecord, LineageSnapshotEntry, MergeGroup, NewActivity, NewEdge, NewEvent, NewFact,
+    NewFactBuilder, NewLineageRecord, NewSummary, NextEmbedding, Outcome, OutcomeClass,
+    OutcomeCounts, ParseActivityStatusError, PendingEmbedding, ProjectContext, PromoteOutcome,
+    PromoteRequest, PromotionProvenance, PromotionResult, RecordActivityRequest,
+    RecordActivityResult, RelationType, ScopeNode, ScopeQuery, ServedArtifact, SessionCheckpoint,
+    SessionFact, Summary,
 };
 
 // Storage port — tight flat re-export of the umbrella + cross-cutting types only.
@@ -417,6 +419,10 @@ mod tests {
         let _ = std::mem::size_of::<crate::Fact>();
         let _ = std::mem::size_of::<crate::EngineConfig>();
         let _ = std::mem::size_of::<crate::MemoryEngine>();
+        let _ = std::mem::size_of::<crate::Backoff>();
+        let _ = std::mem::size_of::<crate::Settled>();
+        let _ = std::mem::size_of::<crate::NextEmbedding>();
+        let _ = std::mem::size_of::<crate::PendingEmbedding>();
 
         // error surface — the typed sub-enums + umbrella + Result alias are now
         // hand-enumerated re-exports (no glob), so assert each is reachable at the
@@ -427,6 +433,7 @@ mod tests {
         let _ = std::mem::size_of::<crate::ArchiveError>();
         let _ = std::mem::size_of::<crate::MigrationError>();
         let _ = std::mem::size_of::<crate::CycleError>();
+        let _ = std::mem::size_of::<crate::EmbedderError>();
         // StorageError asserted in the storage-port block below; the `Result`
         // alias is asserted by `_accepts_result` above.
 

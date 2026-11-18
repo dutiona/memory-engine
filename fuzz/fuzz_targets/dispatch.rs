@@ -8,11 +8,10 @@
 //! tool result; any other name is a JSON-RPC error. The contract is total: any name and any
 //! argument object resolve to `Ok` or `Err`, never a panic.
 //!
-//! Each run uses a fresh in-memory engine and no embedder, so `remember` refuses after
-//! validating its arguments and `recall` runs full-text only: exactly the untrusted-parse
-//! surface. Each run also seeds one fact at the user level, so `set_level` reaches its move
-//! (a fuzzed key's project creation included) and `forget` its retraction for the fact's
-//! id 1. No tool writes outside
+//! Each run uses a fresh in-memory engine and no embedder, so `remember` stores its fact with
+//! no vector and `recall` runs full-text only: no network is ever reached. Each run also seeds
+//! one fact at the user level, so `set_level` reaches its move (a fuzzed key's project
+//! creation included) and `forget` its retraction for the fact's id 1. No tool writes outside
 //! the store (no tool takes a path).
 #![no_main]
 

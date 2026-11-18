@@ -27,6 +27,7 @@ use me_types::error::StorageError;
 use rusqlite::{Connection, params};
 
 use crate::store::embedding_spaces::{self, SpaceStatus};
+use crate::store::facts::HAS_VECTOR;
 use crate::store::serialize_embedding;
 use me_types::error::{MemoryError, Result};
 use me_types::types::PromoteOutcome;
@@ -167,7 +168,8 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
 /// 1. **Completeness gate INSIDE the tx** (no TOCTOU) — every fact must already
 ///    have a populating vector. A non-zero count aborts (a straggler arrived
 ///    after the engine's pre-tx catch-up).
-/// 2. **Retain** the old active vectors into `fact_vectors[old]` for rollback.
+/// 2. **Retain** the old active vectors into `fact_vectors[old]` for rollback; a fact
+///    waiting for its vector (#1021) has none to retain.
 /// 3. **Copy-swap** the populating vectors into `facts.embedding` (the active
 ///    serving store). The gate guarantees the subquery is never `NULL`
 ///    (`facts.embedding` is `NOT NULL`) and covers every fact → the active space
@@ -177,7 +179,9 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
 ///    This flip *is* the identity flip: `embedding_meta::load` reads the active
 ///    row's fingerprint.
 /// 5. **Cleanup** — delete `fact_vectors[populating]` (now redundant with
-///    `facts.embedding`; the active space's vectors never live in `fact_vectors`).
+///    `facts.embedding`; the active space's vectors never live in `fact_vectors`), and
+///    empty the deferred-embedding queue: the gate gave every fact a vector, a waiting
+///    or failed one included, backfilled from its content like any other (#1021).
 ///
 /// Returns a [`PromoteOutcome`] carrying the swapped-fact count, the deprecated
 /// old space's name, and the new active fingerprint. `stragglers_caught` is `0`
@@ -231,8 +235,10 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
     // not silently skip. (It also dodges the SQLite `INSERT … SELECT … ON CONFLICT`
     // parser ambiguity.)
     tx.execute(
-        "INSERT INTO fact_vectors (fact_id, space_id, embedding)
-         SELECT id, ?1, embedding FROM facts",
+        &format!(
+            "INSERT INTO fact_vectors (fact_id, space_id, embedding)
+         SELECT id, ?1, embedding FROM facts WHERE {HAS_VECTOR}"
+        ),
         params![active.name],
     )
     .map_err(StorageError::backend)?;
@@ -256,6 +262,8 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
         params![populating],
     )
     .map_err(StorageError::backend)?;
+    tx.execute("DELETE FROM embed_queue", [])
+        .map_err(StorageError::backend)?;
 
     tx.commit().map_err(StorageError::backend)?;
 
@@ -592,6 +600,32 @@ mod tests {
                 .status,
             SpaceStatus::Deprecated
         );
+    }
+
+    #[test]
+    fn promote_retains_no_fact_without_a_vector_and_empties_the_queue() {
+        let conn = fresh_conn();
+        set_active(&conn, "model-a");
+        add_populating_space(&conn);
+        let embedded = insert_fact(&conn, "embedded");
+        let waiting = crate::test_util::seed_without_vector(&conn, "waiting");
+        backfill_all(&conn, SPACE, &[embedded, waiting], 1.0);
+
+        promote_space(&conn, SPACE).expect("promote");
+
+        let retained: Vec<i64> = conn
+            .prepare("SELECT fact_id FROM fact_vectors WHERE space_id = 'default'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(retained, [embedded], "only a real vector is retained");
+        assert_eq!(read_embedding(&conn, waiting), vec![1.0_f32; DIM]);
+        let queued: i64 = conn
+            .query_row("SELECT COUNT(*) FROM embed_queue", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(queued, 0, "every fact has a vector after the swap");
     }
 
     #[test]

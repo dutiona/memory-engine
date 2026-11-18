@@ -94,12 +94,15 @@ pub fn load_snapshot_capped(
         .map(|dt| dt.with_timezone(&Utc));
     let now = Utc::now();
 
+    // Dedup, cluster and global read only the facts with a vector (#1021); one without,
+    // active or not, is recorded so the watermark holds until it has one.
     let fact_store = FactStore::new(conn, embed_dim);
-    let active_count = fact_store.count_active()?;
+    let active_count = fact_store.count_active_with_vector()?;
+    let skipped_vectorless = fact_store.any_without_vector()?;
 
     // #659: if the corpus is over BOTH caps, the dedup pass would skip AND the cluster
     // pass would skip — so neither needs the materialized active set. Short-circuit the
-    // expensive `list_active` load (which deserializes every embedding BLOB) and return
+    // expensive active-set load (which deserializes every embedding BLOB) and return
     // a no-op marker instead. A genuinely empty store (count 0) is NOT over the caps, so
     // it still loads (and consolidates to a watermark-advancing no-op).
     if active_count > max_dedup_facts && active_count > max_cluster_facts {
@@ -108,18 +111,20 @@ pub fn load_snapshot_capped(
             last,
             now,
             over_both_caps: true,
+            skipped_vectorless,
         });
     }
 
     // #389: load the active set ONCE and share it across the dedup and cluster passes,
     // instead of each pass re-querying the store (and re-deserializing every embedding
     // BLOB — ~147 MB for 50k×768-dim, previously paid twice).
-    let active_facts = fact_store.list_active(None)?;
+    let active_facts = fact_store.list_active_with_vector()?;
     Ok(Snapshot {
         active_facts,
         last,
         now,
         over_both_caps: false,
+        skipped_vectorless,
     })
 }
 
@@ -178,7 +183,15 @@ pub fn apply_plan(
     // ingested during the over-cap period must be retried on the next run. A survivor loss
     // is a divergence, not a skip: the dedup that *did* apply is committed, so the
     // watermark advances and the kept loser is reconsidered next run.
-    if !plan.dedup.skipped {
+    //
+    // Nor while any fact has no vector (#1021), at the load or now, whether active or
+    // not (a forgotten one can be unforgotten): it sits above the watermark and is compared
+    // as new at the first run after it gets one. The check here catches a deferred insert
+    // backdated between the load and this write.
+    if !plan.dedup.skipped
+        && !plan.skipped_vectorless
+        && !FactStore::new(&tx, embed_dim).any_without_vector()?
+    {
         set_config(&tx, "last_consolidated_at", &plan.now.to_rfc3339())?;
     }
 
@@ -194,4 +207,128 @@ pub fn apply_plan(
         global_summaries: usize::from(wrote_summaries && plan.global_summary.is_some()),
     };
     Ok((stats, applied.expired))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::{seed_without_vector, setup_memory_db};
+    use me_types::types::consolidation::DedupComputed;
+
+    const DIM: usize = 4;
+
+    fn insert_embedded(conn: &Connection, content: &str) -> i64 {
+        FactStore::new(conn, DIM)
+            .insert(&me_types::test_util::new_fact(
+                content,
+                vec![1.0, 0.0, 0.0, 0.0],
+            ))
+            .unwrap()
+    }
+
+    /// The plan `compute_plan` makes for a snapshot with nothing to merge or cluster.
+    fn idle_plan(snapshot: &Snapshot) -> ConsolidationPlan {
+        ConsolidationPlan {
+            dedup: DedupComputed {
+                skipped: false,
+                expirations: Vec::new(),
+                importance_updates: Vec::new(),
+                importance_score_updates: Vec::new(),
+            },
+            cluster_ran: false,
+            cluster_summaries: Vec::new(),
+            global_summary: None,
+            embedding_fingerprint: None,
+            now: snapshot.now,
+            skipped_vectorless: snapshot.skipped_vectorless,
+        }
+    }
+
+    fn watermark(conn: &Connection) -> Option<String> {
+        get_config(conn, "last_consolidated_at").unwrap()
+    }
+
+    fn run(conn: &Connection) {
+        let snapshot = load_snapshot(conn, DIM, &ConsolidationConfig::default()).unwrap();
+        apply_plan(conn, &idle_plan(&snapshot), DIM).unwrap();
+    }
+
+    fn fill(conn: &Connection, id: i64) {
+        conn.execute(
+            "UPDATE facts SET embedding = ?1 WHERE id = ?2",
+            rusqlite::params![crate::store::serialize_embedding(&[0.0, 1.0, 0.0, 0.0]), id],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM embed_queue WHERE fact_id = ?1", [id])
+            .unwrap();
+    }
+
+    #[test]
+    fn the_watermark_holds_while_a_fact_without_a_vector_waits() {
+        let conn = setup_memory_db();
+        insert_embedded(&conn, "embedded");
+        run(&conn);
+        let mark = watermark(&conn);
+        assert!(
+            mark.is_some(),
+            "no fact without a vector: the watermark advances"
+        );
+
+        let waiting = seed_without_vector(&conn, "waiting");
+        run(&conn);
+        assert_eq!(watermark(&conn), mark, "a waiting fact holds it");
+
+        conn.execute(
+            "UPDATE embed_queue SET attempts = 1, failed_at = enqueued_at, last_error = 'HTTP 400'
+              WHERE fact_id = ?1",
+            [waiting],
+        )
+        .unwrap();
+        run(&conn);
+        assert_eq!(watermark(&conn), mark, "a failed fact holds it");
+
+        let snapshot = load_snapshot(&conn, DIM, &ConsolidationConfig::default()).unwrap();
+        fill(&conn, waiting);
+        apply_plan(&conn, &idle_plan(&snapshot), DIM).unwrap();
+        assert_eq!(
+            watermark(&conn),
+            mark,
+            "one embedded between load and apply holds it"
+        );
+
+        let snapshot = load_snapshot(&conn, DIM, &ConsolidationConfig::default()).unwrap();
+        let late = seed_without_vector(&conn, "late");
+        apply_plan(&conn, &idle_plan(&snapshot), DIM).unwrap();
+        assert_eq!(
+            watermark(&conn),
+            mark,
+            "one inserted between load and apply holds it"
+        );
+
+        fill(&conn, late);
+        run(&conn);
+        assert_ne!(
+            watermark(&conn),
+            mark,
+            "every fact has a vector: it advances"
+        );
+    }
+
+    #[test]
+    fn load_snapshot_skips_a_fact_without_a_vector() {
+        let conn = setup_memory_db();
+        let embedded = insert_embedded(&conn, "embedded");
+        seed_without_vector(&conn, "waiting");
+        let config = ConsolidationConfig::default();
+
+        let snapshot = load_snapshot(&conn, DIM, &config).unwrap();
+        let ids: Vec<i64> = snapshot.active_facts.iter().map(|f| f.id).collect();
+        assert_eq!(ids, [embedded]);
+        assert!(snapshot.skipped_vectorless);
+
+        // The caps count only facts with a vector: one fits caps of one.
+        let capped = load_snapshot_capped(&conn, DIM, &config, 1, 1).unwrap();
+        assert!(!capped.over_both_caps);
+        assert_eq!(capped.active_facts.len(), 1);
+    }
 }

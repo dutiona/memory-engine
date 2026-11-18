@@ -2,7 +2,7 @@
 source: src/engine/inspect.rs
 expression: snapshot
 ---
-schema_version: 16
+schema_version: 17
 storage_epoch: 1
 embed_dim: 4
 facts:

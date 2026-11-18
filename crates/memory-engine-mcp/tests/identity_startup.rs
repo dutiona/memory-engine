@@ -44,6 +44,10 @@ impl EmbeddingProvider for Stub {
 }
 
 /// Stamp `dir/memory.db` with `fp` through the real first-write path (one `add_fact`).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the store is stamped before any server runs, as a first embedded write does"
+)]
 fn stamp_store(dir: &Path, fp: &EmbeddingFingerprint) {
     let db = dir.join("memory.db");
     let fp = fp.clone();

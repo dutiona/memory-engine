@@ -9,6 +9,7 @@ mod cognitive;
 pub mod consolidation;
 /// Dream-cycle report DTOs (the delta-based `CycleReport` vocabulary, R7).
 pub mod cycle_report;
+mod embed_queue;
 mod events;
 mod facts;
 /// Forgetting/prune policy (`ForgetPolicy`) and output (`PruneStats`).
@@ -35,6 +36,7 @@ pub mod snapshot;
 
 pub use activity::*;
 pub use cognitive::*;
+pub use embed_queue::*;
 pub use events::*;
 pub use facts::*;
 pub use provenance::*;

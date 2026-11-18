@@ -168,7 +168,8 @@ pub fn read_fingerprint(conn: &Connection) -> Result<DbFingerprint> {
             COALESCE((SELECT MAX(id) FROM edges), 0), \
             (SELECT COUNT(*) FROM edges WHERE t_expired IS NULL), \
             COALESCE((SELECT MAX(id) FROM scopes), 0), \
-            (SELECT COUNT(*) FROM scopes)",
+            (SELECT COUNT(*) FROM scopes), \
+            (SELECT COUNT(*) FROM facts WHERE length(embedding) = 0)",
         [],
         |row| {
             Ok(DbFingerprint {
@@ -178,6 +179,7 @@ pub fn read_fingerprint(conn: &Connection) -> Result<DbFingerprint> {
                 active_edge_count: row.get(3)?,
                 max_scope_id: row.get(4)?,
                 scope_count: row.get(5)?,
+                vectorless_fact_count: row.get(6)?,
             })
         },
     )
@@ -260,6 +262,7 @@ pub fn fuzz_wrap_payload(payload: &[u8], embed_dim: usize) -> Vec<u8> {
             active_edge_count: 0,
             max_scope_id: 0,
             scope_count: 0,
+            vectorless_fact_count: 0,
         },
         embed_dim,
         engine_version: String::new(),
@@ -425,6 +428,40 @@ mod tests {
     }
 
     #[test]
+    fn filling_a_fact_without_a_vector_changes_the_fingerprint() {
+        use crate::store::facts::FactStore;
+        let conn = crate::test_util::setup_memory_db();
+        let store = FactStore::new(&conn, 4);
+        let other = store
+            .insert(&me_types::test_util::new_fact(
+                "embedded",
+                vec![1.0, 0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+        let first = crate::test_util::seed_without_vector(&conn, "first");
+        let second = crate::test_util::seed_without_vector(&conn, "second");
+        let fill = |id: i64| {
+            conn.execute(
+                "UPDATE facts SET embedding = ?1 WHERE id = ?2",
+                rusqlite::params![crate::store::serialize_embedding(&[0.0, 1.0, 0.0, 0.0]), id],
+            )
+            .unwrap();
+        };
+
+        // A fill alone changes no id and no active count.
+        let before = read_fingerprint(&conn).unwrap();
+        fill(first);
+        let after = read_fingerprint(&conn).unwrap();
+        assert_ne!(after, before);
+
+        let tx = conn.unchecked_transaction().unwrap();
+        fill(second);
+        store.expire(other, chrono::Utc::now()).unwrap();
+        tx.commit().unwrap();
+        assert_ne!(read_fingerprint(&conn).unwrap(), after);
+    }
+
+    #[test]
     fn corrupt_file_returns_none() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.db.snapshot");
@@ -452,6 +489,7 @@ mod tests {
                 active_edge_count: 0,
                 max_scope_id: 1,
                 scope_count: 1,
+                vectorless_fact_count: 0,
             },
             embed_dim: 128,
             engine_version: "test".into(),
@@ -491,6 +529,7 @@ mod tests {
                 active_edge_count: 0,
                 max_scope_id: 1,
                 scope_count: 1,
+                vectorless_fact_count: 0,
             },
             embed_dim: 128,
             engine_version: "test".into(),
@@ -531,6 +570,7 @@ mod tests {
                 active_edge_count: 0,
                 max_scope_id: 1,
                 scope_count: 1,
+                vectorless_fact_count: 0,
             },
             embed_dim: 256, // mismatch — we'll request 128
             engine_version: "test".into(),
@@ -570,6 +610,7 @@ mod tests {
                 active_edge_count: 5,
                 max_scope_id: 3,
                 scope_count: 3,
+                vectorless_fact_count: 0,
             },
             embed_dim: 128,
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -696,6 +737,7 @@ mod tests {
                 active_edge_count: 0,
                 max_scope_id: 1,
                 scope_count: 1,
+                vectorless_fact_count: 0,
             },
             embed_dim: 4,
             engine_version: "test".into(),
@@ -733,6 +775,7 @@ mod tests {
                 active_edge_count: 0,
                 max_scope_id: 1,
                 scope_count: 1,
+                vectorless_fact_count: 0,
             },
             embed_dim: 4,
             engine_version: "test".into(),
@@ -806,6 +849,7 @@ mod tests {
                 active_edge_count in any::<i64>(),
                 max_scope_id in any::<i64>(),
                 scope_count in any::<i64>(),
+                vectorless_fact_count in any::<i64>(),
             ) -> DbFingerprint {
                 DbFingerprint {
                     max_fact_id,
@@ -814,6 +858,7 @@ mod tests {
                     active_edge_count,
                     max_scope_id,
                     scope_count,
+                    vectorless_fact_count,
                 }
             }
         }

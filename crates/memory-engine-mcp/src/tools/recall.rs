@@ -1,7 +1,5 @@
 //! `recall(query, project?)` (ADR-0020 §8): search the memories this session can read.
 
-use std::sync::Arc;
-
 use memory_engine::MemoryQuery;
 use memory_engine::types::Fact;
 use rmcp::model::Tool;
@@ -9,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::CallContext;
+use crate::embedding;
 use crate::home::Home;
 use crate::project::ProjectKey;
 
@@ -98,39 +97,33 @@ async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>)
     let context = context.path(ctx.user);
 
     let terms = fts_terms(&query);
-    if terms.is_none() && ctx.embedder.is_none() {
-        // Neither text nor a vector: the engine would read that as a non-search listing.
-        return Ok((
-            json!({ "search": "full-text only", "results": [] }).to_string(),
-            Vec::new(),
-        ));
-    }
     let mut search_query = MemoryQuery::new()
         .scope_exact_set([context.clone(), user_home.clone()])
         .limit(RESULTS);
     if let Some(terms) = &terms {
         search_query = search_query.text(terms.clone());
     }
-    let search = if let Some(provider) = ctx.embedder {
-        // A blocking reqwest provider must run off the async executor: dropping its
-        // internal runtime on an executor thread panics.
-        let provider = Arc::clone(provider);
-        let text = query;
-        let embedding = tokio::task::spawn_blocking(move || {
-            memory_engine::traits::EmbeddingProvider::embed_query(provider.as_ref(), &text)
-        })
-        .await
-        .map_err(|e| format!("query embedding task failed: {e}"))?
-        .map_err(|e| e.to_string())?;
-        search_query = search_query.embedding(embedding);
-        if terms.is_some() {
-            "hybrid"
-        } else {
-            "vector only"
+    let mut vector = false;
+    let mut answer = json!({ "results": [] });
+    if let Some(provider) = ctx.embedder {
+        match embedding::embed_query_bounded(provider, query).await {
+            Ok(embedding) => {
+                search_query = search_query.embedding(embedding);
+                vector = true;
+            }
+            Err(cause) => answer["degraded"] = cause.as_str().into(),
         }
-    } else {
-        "full-text only"
-    };
+    }
+    answer["search"] = match (vector, terms.is_some()) {
+        (true, true) => "hybrid",
+        (true, false) => "vector only",
+        (false, _) => "full-text only",
+    }
+    .into();
+    if !vector && terms.is_none() {
+        // Neither text nor a vector: the engine would read that as a non-search listing.
+        return Ok((answer.to_string(), Vec::new()));
+    }
 
     let response = ctx
         .engine
@@ -148,10 +141,8 @@ async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>)
         .map(|r| shape(&r.fact, &homes))
         .collect::<Result<Vec<_>, _>>()?;
     let fact_ids = response.results.iter().map(|r| r.fact.id).collect();
-    Ok((
-        json!({ "search": search, "results": results }).to_string(),
-        fact_ids,
-    ))
+    answer["results"] = results.into();
+    Ok((answer.to_string(), fact_ids))
 }
 
 /// The query's words for FTS5: each maximal run of alphanumerics, quoted and OR-ed (bm25

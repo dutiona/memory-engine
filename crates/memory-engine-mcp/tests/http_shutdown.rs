@@ -1,4 +1,5 @@
-//! A stop drains the tool calls already started, then flushes the sidecar snapshot.
+//! A stop drains the tool calls already started, stops the embedding drain, then flushes the
+//! sidecar snapshot.
 
 mod common;
 
@@ -39,26 +40,29 @@ async fn wait_for_embed_request(server: &TestServer) {
     }
 }
 
-fn remember(server: &TestServer) -> reqwest::RequestBuilder {
+/// A query embed that answers just inside recall's limit, so the call stays in flight.
+const SLOW_QUERY: Duration = Duration::from_millis(400);
+
+fn recall(server: &TestServer) -> reqwest::RequestBuilder {
     server.rpc(
         Some("laptop"),
         "tools/call",
-        &json!({ "name": "remember", "arguments": { "content": "in flight" } }),
+        &json!({ "name": "recall", "arguments": { "query": "in flight" } }),
     )
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn shutdown_lets_an_in_flight_call_finish() {
     let mut server = TestServer::start().await;
-    slow_embedder(&server, Duration::from_millis(1500)).await;
-    let call = tokio::spawn(remember(&server).send());
+    slow_embedder(&server, SLOW_QUERY).await;
+    let call = tokio::spawn(recall(&server).send());
     wait_for_embed_request(&server).await;
 
     server.stop().await;
 
     let response = call.await.unwrap().unwrap();
     assert_eq!(response.status(), 200);
-    assert_eq!(server.fact_count().await, 1);
+    assert_eq!(server.records().len(), 1, "the call committed its record");
     assert!(server.snapshot_path().is_file());
     assert!(
         reqwest::Client::new()
@@ -73,8 +77,8 @@ async fn shutdown_lets_an_in_flight_call_finish() {
 #[tokio::test(flavor = "multi_thread")]
 async fn shutdown_waits_for_an_abandoned_call() {
     let mut server = TestServer::start().await;
-    slow_embedder(&server, Duration::from_secs(2)).await;
-    let call = tokio::spawn(remember(&server).send());
+    slow_embedder(&server, SLOW_QUERY).await;
+    let call = tokio::spawn(recall(&server).send());
     wait_for_embed_request(&server).await;
     // The client hangs up mid-call; rmcp keeps running the call in its own task.
     call.abort();
@@ -83,11 +87,36 @@ async fn shutdown_waits_for_an_abandoned_call() {
     server.stop().await;
 
     assert_eq!(
-        server.fact_count().await,
+        server.records().len(),
         1,
         "the flush ran before the call committed"
     );
     assert!(server.snapshot_path().is_file());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drain_write_never_lands_after_the_stop() {
+    let mut server = TestServer::start().await;
+    slow_embedder(&server, Duration::from_secs(2)).await;
+    let reply = server
+        .tool("laptop", "remember", json!({ "content": "in flight" }))
+        .await;
+    assert!(!reply.is_error, "{reply:?}");
+    let id: i64 = reply.body.split(' ').nth(1).unwrap().parse().unwrap();
+    wait_for_embed_request(&server).await;
+
+    let started = Instant::now();
+    server.stop().await;
+    assert!(
+        started.elapsed() < Duration::from_millis(1500),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(server.snapshot_path().is_file());
+
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(server.queue(id).is_some(), "the fact still waits");
+    assert!(!server.has_vector(id).await);
 }
 
 #[tokio::test(flavor = "multi_thread")]

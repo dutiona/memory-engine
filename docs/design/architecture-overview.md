@@ -14,7 +14,7 @@ graph TB
 
     subgraph MemoryEngine Facade
         ingest["ingest()"]
-        add_fact["add_fact()"]
+        add_fact["add_fact() / add_fact_deferred()"]
         query["query()"]
         consolidate["consolidate()"]
         forget["forget()"]
@@ -194,7 +194,7 @@ The core data flow follows an event-sourced pattern:
 
 1. **Ingest** -- Raw events (interactions, tool calls, system events) are appended to an immutable event log. This log is the source of truth.
 
-2. **Add Fact** -- The consumer explicitly derives facts from events. Facts are not auto-projected; the consumer decides what to remember. Each fact gets a blake3 content hash, an embedding vector (via `EmbeddingProvider`), bi-temporal timestamps, and a scope assignment.
+2. **Add Fact** -- The consumer explicitly derives facts from events. Facts are not auto-projected; the consumer decides what to remember. Each fact gets a blake3 content hash, an embedding vector (via `EmbeddingProvider`), bi-temporal timestamps, and a scope assignment. The vector comes either at once (`add_fact` embeds before it writes) or from the deferred-embedding queue (`add_fact_deferred` writes with no vector and queues the fact; a drain embeds it later through `next_embedding` and `settle_embedding`, #1021). Until then full-text search finds the fact and no vector reader sees it. The MCP server's `remember` takes the deferred path, so a write never waits on the embedder.
 
 3. **Query** -- Hybrid retrieval combines FTS5 (keyword, BM25-ranked), vector (cosine similarity via `VectorSearchStrategy` dispatch — brute-force or HNSW), or both (Reciprocal Rank Fusion with k=60). Results are filtered by temporal validity, fact type, and scope.
 
