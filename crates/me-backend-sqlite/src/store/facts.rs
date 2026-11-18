@@ -1688,7 +1688,8 @@ impl<'a> FactStore<'a> {
     /// expired_before`), ordered by id ascending.
     ///
     /// A forgotten fact is never a candidate (#1023): the forget keeps its row so an
-    /// unforget can restore it, and archival hard-deletes what it archives.
+    /// unforget can restore it, and archival hard-deletes what it archives. Nor is a fact
+    /// without a vector (#1021): archival would take it out of the embedding queue for good.
     ///
     /// This pushes the archive selection predicate into SQL so the engine never
     /// materializes every fact (and every embedding BLOB) just to discard the
@@ -1723,6 +1724,7 @@ impl<'a> FactStore<'a> {
                AND t_expired IS NOT NULL
                AND t_expired < ?1
                AND id NOT IN (SELECT fact_id FROM fact_tombstones WHERE fact_id IS NOT NULL)
+               AND {HAS_VECTOR}
              ORDER BY id ASC"
             ))
             .map_err(StorageError::backend)?;
@@ -2163,6 +2165,29 @@ mod tests {
             vec![qualifies, qualifies2],
             "only non-pinned facts expired strictly before the cutoff, id-ascending"
         );
+    }
+
+    /// Archival hard-deletes, so it must never take a fact that waits for its vector
+    /// (#1021): the fact would leave the queue, and recovery, for good.
+    #[test]
+    fn list_archive_candidates_skips_a_fact_without_a_vector() {
+        let conn = setup();
+        let store = FactStore::new(&conn, DIM);
+        let cutoff = Utc::now();
+        let candidates = || -> Vec<i64> {
+            let facts = store.list_archive_candidates(cutoff).unwrap();
+            facts.iter().map(|f| f.id).collect()
+        };
+        let waiting = crate::test_util::seed_without_vector(&conn, "expired while waiting");
+        store.expire(waiting, cutoff - TimeDelta::hours(1)).unwrap();
+        assert_eq!(candidates(), Vec::<i64>::new());
+
+        conn.execute(
+            "UPDATE facts SET embedding = ?1 WHERE id = ?2",
+            params![serialize_embedding(&[0.1; DIM]), waiting],
+        )
+        .unwrap();
+        assert_eq!(candidates(), [waiting], "once embedded, it may be archived");
     }
 
     #[test]
