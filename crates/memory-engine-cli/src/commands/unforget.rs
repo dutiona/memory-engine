@@ -15,16 +15,15 @@ pub async fn run(db: &Path, id: i64, format: OutputFormat) -> anyhow::Result<()>
     let outcome = engine.unforget_fact(id).await?;
     // The restore is committed whatever close does: say what came back before its error.
     let closed = engine.close().await;
+    let then = closed
+        .as_ref()
+        .err()
+        .map(|e| format!("; closing the store then failed: {e}"))
+        .unwrap_or_default();
     let facts = match outcome {
         UnforgetOutcome::Restored { facts } => facts,
-        UnforgetOutcome::NotForgotten => {
-            closed?;
-            anyhow::bail!("fact {id} is not forgotten")
-        }
-        UnforgetOutcome::NotFound => {
-            closed?;
-            anyhow::bail!("fact {id} not found")
-        }
+        UnforgetOutcome::NotForgotten => anyhow::bail!("fact {id} is not forgotten{then}"),
+        UnforgetOutcome::NotFound => anyhow::bail!("fact {id} not found{then}"),
     };
     match format {
         OutputFormat::Json => crate::output::print_json(&serde_json::json!({
