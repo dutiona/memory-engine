@@ -102,9 +102,11 @@ pub fn fts_search_filtered(
 /// storage error otherwise.
 ///
 /// FTS5 rejects a malformed string with a bare `SQLITE_ERROR` under varying messages,
-/// but the filter fragment's JSON functions raise the same code (e.g. on a tampered
-/// `metadata` value). So the string is re-run alone: only when it fails there with
-/// that code is the error the query's, and a string that fails alone matches nothing.
+/// but other failures raise the same code: the filter fragment's JSON functions (e.g. on
+/// a tampered `metadata` value) and the index itself (an invalid format version, read
+/// when another writer changes its config). So the error is the query's only when the
+/// string fails alone with that code while a fixed valid query still runs; a string
+/// that fails alone matches nothing.
 fn no_match_or_fault<T>(
     conn: &Connection,
     query: &str,
@@ -113,16 +115,22 @@ fn no_match_or_fault<T>(
 ) -> Result<T> {
     let is_sqlite_error =
         |e: &rusqlite::Error| e.sqlite_extended_error_code() == Some(rusqlite::ffi::SQLITE_ERROR);
-    if is_sqlite_error(&err) {
-        let alone = conn.query_row(
+    let run_alone = |q: &str| {
+        conn.query_row(
             "SELECT rowid FROM facts_fts WHERE facts_fts MATCH ?1 LIMIT 1",
-            [query],
+            [q],
             |_| Ok(()),
-        );
-        if alone.as_ref().is_err_and(is_sqlite_error) {
-            tracing::warn!("FTS5 rejected the query, reading it as no match: {err}");
-            return Ok(no_match);
-        }
+        )
+    };
+    if is_sqlite_error(&err)
+        && run_alone(query).as_ref().is_err_and(is_sqlite_error)
+        && run_alone("\"a\"")
+            .err()
+            .and_then(|e| e.sqlite_extended_error_code())
+            .is_none()
+    {
+        tracing::warn!("FTS5 rejected the query, reading it as no match: {err}");
+        return Ok(no_match);
     }
     Err(StorageError::backend(err).into())
 }
@@ -578,6 +586,46 @@ mod tests {
         assert!(is_storage_error(&fts_search(&conn, "Rust", 10, None, None)));
         assert!(is_storage_error(&fts_count_expired(
             &conn, "Rust", None, None
+        )));
+    }
+
+    #[test]
+    fn unreadable_fts_config_on_an_open_connection_is_a_storage_error() {
+        // FTS5 reloads its config when another writer bumps the config cookie; an
+        // invalid format version then fails every MATCH at step time with a bare
+        // SQLITE_ERROR, valid query strings included.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fts.db");
+        let conn = Connection::open(&path).unwrap();
+        init_schema(&conn).unwrap();
+        FactStore::new(&conn, DIM)
+            .insert(&make_fact("Rust language"))
+            .unwrap();
+        assert_eq!(fts_search(&conn, "Rust", 10, None, None).unwrap().len(), 1);
+
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute(
+                "INSERT INTO facts_fts(facts_fts, rank) VALUES('automerge', 4)",
+                [],
+            )
+            .unwrap();
+        writer
+            .execute("UPDATE facts_fts_config SET v = 99 WHERE k = 'version'", [])
+            .unwrap();
+
+        assert_eq!(
+            raw_match_code(&conn, "Rust"),
+            Some(rusqlite::ffi::SQLITE_ERROR),
+            "injection: a valid MATCH must now fail with a bare SQLITE_ERROR"
+        );
+        assert!(is_storage_error(&fts_search(&conn, "Rust", 10, None, None)));
+        assert!(is_storage_error(&fts_search(
+            &conn,
+            "\"unbalanced",
+            10,
+            None,
+            None
         )));
     }
 
