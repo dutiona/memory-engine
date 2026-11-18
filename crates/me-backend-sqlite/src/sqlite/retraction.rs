@@ -316,4 +316,24 @@ mod tests {
         assert_eq!(retry.erased_facts, Vec::<i64>::new());
         assert!(retry.purged, "{:?}", retry.purge_error);
     }
+
+    /// A read-only handle refuses an erasure before it touches the store's sidecar.
+    #[tokio::test]
+    async fn a_read_only_erase_keeps_the_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.db");
+        drop(ConnectionPool::open(&path, DIM, 1, None).unwrap());
+        let sidecar = crate::snapshot::snapshot_path(&path);
+        std::fs::write(&sidecar, b"snapshot").unwrap();
+        let pool = Arc::new(ConnectionPool::open_read_only(&path, DIM, 1).unwrap());
+        let err = backend(&pool)
+            .erase(&EraseTarget::Fact(1), Utc::now())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, me_types::error::MemoryError::ReadOnly),
+            "{err:?}"
+        );
+        assert!(sidecar.exists(), "a refused erasure keeps the sidecar");
+    }
 }

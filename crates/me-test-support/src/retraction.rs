@@ -263,6 +263,11 @@ pub async fn unforget_reverses_the_whole_forget<F: ConformanceBackend>(f: &F) {
         "[{}]",
         f.name()
     );
+    assert!(
+        be.is_forgotten("pair").await.unwrap(),
+        "[{}] the erased copy keeps its block",
+        f.name()
+    );
 }
 
 /// `Restored { active }` follows recall: a fact whose validity ended before the forget comes
