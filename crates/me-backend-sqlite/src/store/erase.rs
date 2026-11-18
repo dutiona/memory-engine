@@ -16,7 +16,6 @@ use me_types::limits::check_json_size;
 use me_types::types::{EraseReport, EraseTarget, is_dns_label, machine_bucket};
 
 use super::UpcasterRegistry;
-use super::activities::ActivityStore;
 use super::edges::EdgeStore;
 use super::facts::FactStore;
 use super::tombstones::append_maintenance;
@@ -138,7 +137,6 @@ fn delete(conn: &Connection, dim: usize, sel: &Selection) -> Result<BTreeMap<Str
             OR scope_id IN (SELECT value FROM json_each(?2))",
         params![taken_json, json_ids(&sel.subtree)?],
     )?;
-    ActivityStore::new(conn).unlink_promoted_facts(&sel.taken)?;
     let checkpoints = match &sel.bucket {
         Some(bucket) => exec(
             conn,
