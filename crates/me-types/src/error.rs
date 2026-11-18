@@ -656,7 +656,9 @@ mod tests {
         variants
     }
 
-    /// The first cell of each row of `docs/reference/api.md`'s `MemoryError` table.
+    /// The first cell of each row of `docs/reference/api.md`'s `MemoryError` table. Past
+    /// the header and separator, a row whose first cell is not backticked panics, so a
+    /// stale row cannot hide from the comparison.
     fn documented_memory_error_variants() -> Vec<String> {
         let (_, table) = include_str!("../../../docs/reference/api.md")
             .split_once("`MemoryError` variants:")
@@ -665,8 +667,11 @@ mod tests {
             .lines()
             .skip_while(|l| l.trim().is_empty())
             .take_while(|l| l.starts_with('|'))
-            .filter_map(|row| row.strip_prefix("| `"))
-            .map(|cell| {
+            .skip(2)
+            .map(|row| {
+                let cell = row
+                    .strip_prefix("| `")
+                    .unwrap_or_else(|| panic!("api.md error-table row without a variant: {row:?}"));
                 cell.split_once('`')
                     .expect("a closing backtick")
                     .0
