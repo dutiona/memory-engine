@@ -13,11 +13,18 @@ use crate::output::OutputFormat;
 pub async fn run(db: &Path, id: i64, format: OutputFormat) -> anyhow::Result<()> {
     let mut engine = open_engine_writable(db)?;
     let outcome = engine.unforget_fact(id).await?;
-    engine.close().await?;
+    // The restore is committed whatever close does: say what came back before its error.
+    let closed = engine.close().await;
     let facts = match outcome {
         UnforgetOutcome::Restored { facts } => facts,
-        UnforgetOutcome::NotForgotten => anyhow::bail!("fact {id} is not forgotten"),
-        UnforgetOutcome::NotFound => anyhow::bail!("fact {id} not found"),
+        UnforgetOutcome::NotForgotten => {
+            closed?;
+            anyhow::bail!("fact {id} is not forgotten")
+        }
+        UnforgetOutcome::NotFound => {
+            closed?;
+            anyhow::bail!("fact {id} not found")
+        }
     };
     match format {
         OutputFormat::Json => crate::output::print_json(&serde_json::json!({
@@ -44,5 +51,6 @@ pub async fn run(db: &Path, id: i64, format: OutputFormat) -> anyhow::Result<()>
             }
         }
     }
+    closed?;
     Ok(())
 }
