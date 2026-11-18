@@ -97,7 +97,7 @@ impl<'a> ScopeStore<'a> {
     /// low-level method inserts `label` verbatim — callers are responsible for
     /// ensuring it is non-empty, contains no `/`, has no leading/trailing
     /// whitespace, and is at most [`me_types::types::MAX_SEGMENT_LEN`] bytes (the
-    /// rules enforced by [`me_types::types::validate_segment`]). Storing a malformed
+    /// rules [`Self::ensure_path`] enforces). Storing a malformed
     /// label here can break round-tripping through
     /// `ScopeTree::resolve_path`. Prefer [`Self::ensure_path`]
     /// for a validated, idempotent alternative.
