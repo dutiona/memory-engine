@@ -60,7 +60,11 @@ pub async fn run(db: &Path, args: &EraseArgs, format: OutputFormat) -> anyhow::R
         .map(|e| format!("; closing the store then failed: {e}"))
         .unwrap_or_default();
     if let Some(cause) = &report.purge_error {
-        let command = shell_command(std::env::args().skip(1));
+        let command = shell_command(
+            std::env::args_os()
+                .skip(1)
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        );
         anyhow::bail!(
             "erased, not purged: {cause}; free disk space, stop any reader, then run this same \
              command again: memory-engine-cli {command}{then}"
