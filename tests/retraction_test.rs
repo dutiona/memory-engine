@@ -369,14 +369,7 @@ async fn erase_removes_the_sidecar_first() {
     let mut engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
     let id = remember(&engine, "kestrel nests", "unscoped:laptop").await;
     engine.close().await.unwrap();
-    let sidecars = || {
-        std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|e| e.unwrap().file_name().into_string().unwrap())
-            .filter(|n| n.ends_with(".snapshot"))
-            .count()
-    };
-    assert_eq!(sidecars(), 1, "a clean close writes the sidecar");
+    assert_eq!(sidecars(dir.path()), 1, "a clean close writes the sidecar");
     let engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
     let report = engine
         .erase(&memory_engine::types::EraseTarget::Machine("laptop".into()))
@@ -384,16 +377,25 @@ async fn erase_removes_the_sidecar_first() {
         .unwrap();
     assert_eq!(report.erased_facts, vec![id]);
     assert!(report.purged, "{:?}", report.purge_error);
-    assert_eq!(sidecars(), 0, "erasure removes the sidecar");
+    assert_eq!(sidecars(dir.path()), 0, "erasure removes the sidecar");
+}
+
+fn sidecars(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.ends_with(".snapshot"))
+        .count()
 }
 
 #[tokio::test]
-async fn a_read_only_engine_refuses_erase() {
+async fn a_read_only_engine_refuses_erase_and_keeps_the_sidecar() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("memory.db");
     let mut engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
     remember(&engine, "kestrel nests", "user:alice").await;
     engine.close().await.unwrap();
+    assert_eq!(sidecars(dir.path()), 1);
     let engine = MemoryEngine::builder(DIM)
         .path(&path)
         .read_only(true)
@@ -406,5 +408,36 @@ async fn a_read_only_engine_refuses_erase() {
     assert!(
         matches!(err, memory_engine::MemoryError::ReadOnly),
         "{err:?}"
+    );
+    assert_eq!(
+        sidecars(dir.path()),
+        1,
+        "a refused erasure keeps the sidecar"
+    );
+}
+
+#[tokio::test]
+async fn an_invalid_machine_is_refused_before_the_sidecar_is_touched() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("memory.db");
+    let mut engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    remember(&engine, "kestrel nests", "unscoped:laptop").await;
+    engine.close().await.unwrap();
+    let engine = MemoryEngine::builder(DIM).path(&path).build().unwrap();
+    let err = engine
+        .erase(&memory_engine::types::EraseTarget::Machine("a/b".into()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            memory_engine::MemoryError::Conflict(memory_engine::ConflictError::PolicyParameter(_))
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        sidecars(dir.path()),
+        1,
+        "a refused erasure keeps the sidecar"
     );
 }

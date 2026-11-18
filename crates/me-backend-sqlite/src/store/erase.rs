@@ -46,6 +46,18 @@ struct Selection {
     taken: Vec<i64>,
 }
 
+/// Refuse a target no erasure can mean, before anything is touched.
+pub(crate) fn validate(target: &EraseTarget) -> Result<()> {
+    match target {
+        EraseTarget::Machine(machine) if !is_dns_label(machine.as_bytes()) => {
+            Err(MemoryError::Conflict(ConflictError::PolicyParameter(
+                format!("a machine is a lowercase DNS label: {machine:?}"),
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn select(conn: &Connection, target: &EraseTarget) -> Result<Selection> {
     // The bucket subtree, the machine's events and the facts seeding the erasure.
     let (bucket, subtree, events, seed) = match target {
@@ -56,11 +68,6 @@ fn select(conn: &Connection, target: &EraseTarget) -> Result<Selection> {
             ids(conn, "SELECT id FROM facts WHERE id = ?1", params![id])?,
         ),
         EraseTarget::Machine(machine) => {
-            if !is_dns_label(machine.as_bytes()) {
-                return Err(MemoryError::Conflict(ConflictError::PolicyParameter(
-                    format!("a machine is a lowercase DNS label: {machine:?}"),
-                )));
-            }
             let bucket = machine_bucket(machine);
             let subtree = ids(
                 conn,
@@ -186,6 +193,7 @@ pub fn erase(
     dim: usize,
     now: DateTime<Utc>,
 ) -> Result<EraseReport> {
+    validate(target)?;
     let sel = select(conn, target)?;
     let taken_json = json_ids(&sel.taken)?;
     // What the erasure leaves behind, read before any edge goes.

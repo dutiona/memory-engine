@@ -125,22 +125,25 @@ impl Retraction for SqliteBackend {
 
     // WRITE
     async fn erase(&self, target: &EraseTarget, now: DateTime<Utc>) -> Result<EraseReport> {
-        // The sidecar holds the erased facts' vectors and graph nodes. Remove it first, so
-        // a crash before the next clean close cannot leave them behind; the next open
-        // rebuilds it from the store.
-        if let Some(db_path) = self.pool.path() {
-            match std::fs::remove_file(crate::snapshot::snapshot_path(db_path)) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(StorageError::backend(e).into());
-                }
-                _ => {}
-            }
-        }
+        erase::validate(target)?;
+        let sidecar = self.pool.path().map(crate::snapshot::snapshot_path);
         let target = target.clone();
         let registry = Arc::clone(&self.upcaster_registry);
         let dim = self.embed_dim;
         let mut report = self
             .block_write(move |c| {
+                // The sidecar holds the erased facts' graph nodes (and vectors, under `ann`).
+                // Remove it once the write is granted and before the transaction, so a crash
+                // before the next clean close cannot leave them behind; the next open
+                // rebuilds it from the store.
+                if let Some(sidecar) = sidecar {
+                    match std::fs::remove_file(sidecar) {
+                        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                            return Err(StorageError::backend(e).into());
+                        }
+                        _ => {}
+                    }
+                }
                 let tx = c.unchecked_transaction().map_err(StorageError::backend)?;
                 let report = erase::erase(&tx, &registry, &target, dim, now)?;
                 tx.commit().map_err(StorageError::backend)?;
