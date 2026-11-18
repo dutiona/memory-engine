@@ -273,20 +273,5 @@ test-util = [
     "me-backend-postgres?/test-util",
 ]
 
-[lints.rust]
-unsafe_code = "forbid"
-# `fuzzing` is set only by cargo-fuzz (`--cfg fuzzing`); it gates the
-# `fuzz_seam` module. Register it so the normal build does not warn on the
-# otherwise-unknown cfg name.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-# Embedded-library panic-safety gate (#725): an `.unwrap()` in a production path
-# aborts the *consumer's* process, so it is denied in library code. Test code,
-# benches, and examples opt out with a justified, file-local
-# `#![allow(clippy::unwrap_used)]`; forgetting it red-builds, which is the point.
-# `expect("documented invariant")` is the sanctioned escape hatch and stays allowed.
-unwrap_used = "deny"
+[lints]
+workspace = true
