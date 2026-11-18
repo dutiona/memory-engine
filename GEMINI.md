@@ -42,6 +42,16 @@ The last line is the **facade-API gate** (#993): `fuzz/` is a detached workspace
 
 The workflow also carries an **MSRV** job — `cargo +1.89 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you change a dependency or edition-sensitive code.
 
+**Image build**: when a change touches `Containerfile`, `.containerignore` or `Cargo.lock`, build the server image from the committed tree (commit first: `git archive` reads `HEAD`) and run both binaries from it. It is heavy: it compiles the workspace again, in release, inside the container. It is bounded to 16 CPUs and 32 GiB by a CPU quota and a memory limit (`--cpuset-cpus` fails under rootless podman, which is usually delegated only the cpu, memory and pids controllers); it keeps no intermediate layers, and it removes its image:
+
+```bash
+git archive --format=tar HEAD | podman build --pull=newer --layers=false --memory=32g \
+    --cpu-period=100000 --cpu-quota=1600000 -t memory-engine:verify -
+podman run --rm --network=none memory-engine:verify --version            # memory-engine-mcp, the entrypoint
+podman run --rm --network=none --entrypoint memory-engine-cli memory-engine:verify --version
+podman rmi memory-engine:verify
+```
+
 **Dispatching and monitoring CI** (it will not run itself):
 
 ```bash

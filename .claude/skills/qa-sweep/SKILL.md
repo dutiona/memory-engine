@@ -60,6 +60,16 @@ MSRV is **1.89** (the root `Cargo.toml` records what sets it). The workflow's MS
 or dev-dep needing newer Rust fails it. Reproduce it locally if you change a dependency or
 edition-sensitive code; it will not run on its own either.
 
+**Image build**: when a change touches `Containerfile`, `.containerignore` or `Cargo.lock`, build the server image from the committed tree (commit first: `git archive` reads `HEAD`) and run both binaries from it. It is heavy: it compiles the workspace again, in release, inside the container. It is bounded to 16 CPUs and 32 GiB by a CPU quota and a memory limit (`--cpuset-cpus` fails under rootless podman, which is usually delegated only the cpu, memory and pids controllers); it keeps no intermediate layers, and it removes its image:
+
+```bash
+git archive --format=tar HEAD | podman build --pull=newer --layers=false --memory=32g \
+    --cpu-period=100000 --cpu-quota=1600000 -t memory-engine:verify -
+podman run --rm --network=none memory-engine:verify --version            # memory-engine-mcp, the entrypoint
+podman run --rm --network=none --entrypoint memory-engine-cli memory-engine:verify --version
+podman rmi memory-engine:verify
+```
+
 ---
 
 ## 1. The failure taxonomy (what bit us, ranked)
