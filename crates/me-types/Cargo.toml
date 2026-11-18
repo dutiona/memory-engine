@@ -1,6 +1,6 @@
 [package]
 name = "me-types"
-version = "0.2.0-rc.1"
+version = "0.2.0-rc.2"
 edition = "2024"
 rust-version.workspace = true
 description = "Layer-0 data + error vocabulary for the memory-engine workspace (Wave 2 #816)"
