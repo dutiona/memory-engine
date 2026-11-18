@@ -138,7 +138,8 @@ let config = BootstrapConfig {
 | `prewarm_metrics`     | `PrewarmMetrics` | Cold-start quality metrics.                                       |
 
 A memory the model forgot (`forget`, #1023) stays out of every re-run: its tombstone blocks the exact content in any
-scope, and the run counts it in `facts_blocked`. Only `memory-engine-cli unforget` lifts it.
+scope, and the run counts it in `facts_blocked`. `memory-engine-cli unforget` lifts that forget's block; the content
+stays blocked while any other tombstone holds the same text (another forget, or a forgotten copy that was erased).
 
 ### `PrewarmMetrics`
 

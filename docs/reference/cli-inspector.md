@@ -120,8 +120,6 @@ memory-engine-cli --db new-agent.db import backup.json.gz --embed-dim 384
 
 Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots.
 
-**Note:** Import currently has a known issue with schema version mismatch (v6 vs v5 in restore path, tracked in #80). The test is `#[ignore]` pending library fix.
-
 #### `batch-ingest` — Bulk Fact Loading from JSONL
 
 ```bash
@@ -236,8 +234,9 @@ same content are listed as `copies`. Output: `erased: activities=0 checkpoints=0
 `kind=N` per line.
 
 After the commit, `VACUUM` and a truncating WAL checkpoint remove the deleted rows' earlier copies from the store's
-files (a forget or any later update leaves them in free pages), and the vector-index sidecar is removed before the
-erasure and rebuilt at the next open. `VACUUM` takes time and up to about twice the store's size in free disk. When the
+files (a forget or any later update leaves them in free pages), and the store's snapshot sidecar (`<db>.snapshot`: the
+graph, and the vector index when it is built) is removed before the erasure and rebuilt from the store at the next
+close or open. `VACUUM` takes time and up to about twice the store's size in free disk. When the
 purge does not complete (a full disk, a reader holding the WAL), the rows are gone, the command exits 1 with
 `erased, not purged: <cause>` and the exact command to run again: an erasure whose target is already gone deletes
 nothing, records nothing and still purges. An `erase --fact` that finds nothing exits 1 with `fact N not found; purged`.
