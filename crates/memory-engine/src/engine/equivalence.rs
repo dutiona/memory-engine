@@ -1,8 +1,7 @@
 //! Construction-equivalence golden harness (issue #541).
 //!
 //! These `insta` snapshots were **originally frozen against the five legacy
-//! `MemoryEngine::open*` constructors** (see the PR history / the plan in
-//! `docs/plans/2026-06-15-engine-builder.md`), then re-pointed at
+//! `MemoryEngine::open*` constructors** (see the PR history), then re-pointed at
 //! [`MemoryEngineBuilder`] — the snapshots did not change, which is what proved
 //! the builder reproduces each constructor's observable configuration. Now that
 //! the legacy constructors are deleted, the committed harness exercises only the

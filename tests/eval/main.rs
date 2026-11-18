@@ -4,7 +4,7 @@
 //! - **Tier 1 (Conformance)**: Binary pass/fail invariant tests for system contracts
 //! - **Tier 2 (Quality)**: Regression corpus with retrieval quality metrics and gates
 //!
-//! See issue #16 and `docs/plans/2026-03-09-future-phases-design.md`.
+//! See issue #16.
 
 #![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
 
