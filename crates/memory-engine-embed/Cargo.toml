@@ -37,3 +37,4 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+unwrap_used = "deny"

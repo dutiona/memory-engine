@@ -20,6 +20,7 @@
 //! Asserts the Wave-0 premises against the real model: native 1024 dim, the query
 //! instruction prefix is applied by `embed_query` (and lifts retrieval), concurrent
 //! embeds all succeed, and a model-identity mismatch is hard-rejected through the engine.
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
 
 use std::sync::Arc;
 use std::thread;

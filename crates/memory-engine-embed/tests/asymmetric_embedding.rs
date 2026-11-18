@@ -5,6 +5,7 @@
 //! runtime), so all provider work runs inside `spawn_blocking` to avoid the
 //! nested-runtime panic — mirroring `proposer_integration.rs`. The request body
 //! the provider actually sent is inspected afterwards via `received_requests()`.
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
 
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine_embed::HttpEmbeddingProvider;

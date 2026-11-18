@@ -5,6 +5,7 @@
 //! `HttpEmbeddingProvider` uses `reqwest::blocking::Client` (internal tokio
 //! runtime), so all provider work runs inside `spawn_blocking` to avoid the
 //! nested-runtime panic — mirroring `asymmetric_embedding.rs`.
+#![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
 
 use memory_engine::error::MemoryError;
 use memory_engine::traits::EmbeddingProvider;
