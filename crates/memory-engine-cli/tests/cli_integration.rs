@@ -777,6 +777,59 @@ async fn a_store_whose_facts_all_wait_opens_for_stats_dump_and_erase() {
         .stdout(predicate::str::contains("facts.active=1"));
 }
 
+#[tokio::test]
+async fn an_imported_snapshot_whose_facts_all_wait_opens_for_stats_and_erase() {
+    let dir = TempDir::new().unwrap();
+    let source = dir.path().join("source.db");
+    let mut engine = memory_engine::MemoryEngine::builder(4)
+        .path(source.clone())
+        .build()
+        .unwrap();
+    for content in ["the kestrel nests", "the falcon hunts"] {
+        engine
+            .add_fact_deferred(&memory_engine::AddFactRequest {
+                content: content.into(),
+                fact_type: memory_engine::FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            })
+            .await
+            .unwrap();
+    }
+    engine.close().await.unwrap();
+    let snapshot = dir.path().join("snapshot.json");
+    cli()
+        .args(["--db", source.to_str().unwrap(), "export", "-o"])
+        .arg(&snapshot)
+        .assert()
+        .success();
+    // No identity and no recorded dimension: all the importing store has is the header's.
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&snapshot).unwrap()).unwrap();
+    assert_eq!(json["embedding_spaces"], serde_json::json!([]));
+    json["config"].as_object_mut().unwrap().remove("embed_dim");
+    std::fs::write(&snapshot, serde_json::to_vec(&json).unwrap()).unwrap();
+
+    let db = dir.path().join("imported.db");
+    let db = db.to_str().unwrap();
+    cli()
+        .args(["--db", db, "import", "--embed-dim", "4"])
+        .arg(&snapshot)
+        .assert()
+        .success();
+    cli()
+        .args(["--db", db, "--format", "plain", "stats"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("facts.active=2"));
+    cli()
+        .args(["--db", db, "erase", "--fact", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("facts=1"));
+}
+
 // --- error handling ---
 
 #[test]

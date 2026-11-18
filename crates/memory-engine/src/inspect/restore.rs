@@ -22,8 +22,15 @@ use super::types::EngineSnapshot;
 /// `embedding_meta` is the pre-#622 legacy identity key. It no longer exists as a live
 /// config row (the identity moved to the `embedding_spaces` table), so it must not be
 /// copied back into `config`; an old snapshot's value is handled explicitly when restoring
-/// the registry (see the embedding-space restore step).
-const MANAGED_CONFIG_KEYS: &[&str] = &["schema_version", "storage_epoch", "embedding_meta"];
+/// the registry (see the embedding-space restore step). The store's dimension
+/// ([`STORE_DIM`](crate::store::embedding_meta::STORE_DIM)) is recorded from the validated
+/// header instead, when restored facts wait for their vectors.
+const MANAGED_CONFIG_KEYS: &[&str] = &[
+    "schema_version",
+    "storage_epoch",
+    "embedding_meta",
+    crate::store::embedding_meta::STORE_DIM,
+];
 
 // ---------------------------------------------------------------------------
 // Compression detection
@@ -658,6 +665,12 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
 
     // 8b. Restore the embedding-space registry (#622).
     restore_embedding_spaces(&tx, snapshot)?;
+    // A fact restored without a vector waits in the queue (`restore_facts`); with no
+    // identity, the store's dimension is the header's, as a deferred insert records it
+    // (#1021).
+    if snapshot.facts.iter().any(|f| f.embedding.is_empty()) {
+        crate::store::embedding_meta::record_dim_if_unknown(&tx, snapshot.embed_dim)?;
+    }
 
     // 8c. Restore the non-active spaces' vectors (#623) — after facts (8b: spaces;
     //     3-5: facts) so both foreign keys resolve.
@@ -1573,6 +1586,23 @@ mod tests {
         assert!(
             matches!(err, MemoryError::Internal(ref m) if m.contains("unknown embedding space")),
             "expected unknown-space Internal error, got {err:?}"
+        );
+    }
+
+    /// A restore whose facts all wait has no identity: the store records the validated
+    /// header's dimension, never a snapshot's own config value for it (#1021).
+    #[test]
+    fn a_restored_store_whose_facts_all_wait_records_the_header_dimension() {
+        let mut snapshot =
+            snapshot_with(vec![fact_with_embedding(1, vec![])], vec![], vec![], vec![]);
+        snapshot.config.insert("embed_dim".into(), "8".into());
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        restore_snapshot_into(&conn, &snapshot).unwrap();
+        assert_eq!(
+            get_config(&conn, "embed_dim").unwrap().as_deref(),
+            Some("4")
         );
     }
 
