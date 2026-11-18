@@ -665,12 +665,9 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
 
     // 8b. Restore the embedding-space registry (#622).
     restore_embedding_spaces(&tx, snapshot)?;
-    // A fact restored without a vector waits in the queue (`restore_facts`); with no
-    // identity, the store's dimension is the header's, as a deferred insert records it
-    // (#1021).
-    if snapshot.facts.iter().any(|f| f.embedding.is_empty()) {
-        crate::store::embedding_meta::record_dim_if_unknown(&tx, snapshot.embed_dim)?;
-    }
+    // With no identity, the store's dimension is the validated header's, as a deferred
+    // insert records it (#1021): engine-opening commands need it even when no fact waits.
+    crate::store::embedding_meta::record_dim_if_unknown(&tx, snapshot.embed_dim)?;
 
     // 8c. Restore the non-active spaces' vectors (#623) — after facts (8b: spaces;
     //     3-5: facts) so both foreign keys resolve.
@@ -1595,6 +1592,22 @@ mod tests {
     fn a_restored_store_whose_facts_all_wait_records_the_header_dimension() {
         let mut snapshot =
             snapshot_with(vec![fact_with_embedding(1, vec![])], vec![], vec![], vec![]);
+        snapshot.config.insert("embed_dim".into(), "8".into());
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        migrate(&conn, None).unwrap();
+        restore_snapshot_into(&conn, &snapshot).unwrap();
+        assert_eq!(
+            get_config(&conn, "embed_dim").unwrap().as_deref(),
+            Some("4")
+        );
+    }
+
+    #[test]
+    fn a_restored_store_without_an_identity_keeps_the_header_dimension() {
+        // No waiting fact and no identity: an emptied store, or a pre-#613 dump whose only
+        // dimension record was `config.embed_dim`, which restore no longer imports.
+        let mut snapshot = snapshot_with(vec![], vec![], vec![], vec![]);
         snapshot.config.insert("embed_dim".into(), "8".into());
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
