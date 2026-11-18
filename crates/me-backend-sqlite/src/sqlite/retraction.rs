@@ -361,6 +361,41 @@ mod tests {
         assert_eq!(queued, 1, "it still waits for the drain");
     }
 
+    /// Erasing a fact that waits for its vector (#1021), by fact or by machine, takes its
+    /// queue row with it: nothing is left for the drain to embed.
+    #[tokio::test]
+    async fn erase_leaves_no_queue_row_behind() {
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let by_fact = crate::test_util::seed_without_vector(&pool.write(), "erase me");
+        let by_machine = crate::test_util::seed_without_vector(&pool.write(), "laptop's");
+        let kept = crate::test_util::seed_without_vector(&pool.write(), "kept");
+        pool.write()
+            .execute(
+                "UPDATE facts SET metadata = '{\"machine\":\"laptop\"}' WHERE id = ?1",
+                [by_machine],
+            )
+            .unwrap();
+        let be = backend(&pool);
+        for (target, id) in [
+            (EraseTarget::Fact(by_fact), by_fact),
+            (EraseTarget::Machine("laptop".into()), by_machine),
+        ] {
+            assert_eq!(
+                be.erase(&target, Utc::now()).await.unwrap().erased_facts,
+                vec![id]
+            );
+        }
+        let queued: Vec<i64> = pool
+            .write()
+            .prepare("SELECT fact_id FROM embed_queue")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(queued, vec![kept]);
+    }
+
     /// A read-only handle refuses an erasure before it touches the store's sidecar.
     #[tokio::test]
     async fn a_read_only_erase_keeps_the_sidecar() {
