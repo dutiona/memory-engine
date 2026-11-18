@@ -2064,7 +2064,6 @@ version = "0.2.0-rc.1"
 dependencies = [
  "async-trait",
  "chrono",
- "me-backend-postgres",
  "me-backend-sqlite",
  "me-storage",
  "me-traits",
