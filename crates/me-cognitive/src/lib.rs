@@ -114,6 +114,6 @@ pub use context::CycleContext;
 pub use default_impl::DefaultDreamCycle;
 pub use llm_impl::LlmDreamCycle;
 pub use me_types::types::cycle_report::{
-    ApplyResult, CycleAnomaly, CycleDelta, CycleMetadata, CycleOutcome, CycleReport,
-    IMPORTANCE_STEP, IdentityOutput, MAX_ADJUSTMENT, SkipReason, TimeWindow,
+    ApplyResult, CycleDelta, CycleMetadata, CycleOutcome, CycleReport, IMPORTANCE_STEP,
+    IdentityOutput, MAX_ADJUSTMENT, SkipReason, TimeWindow,
 };

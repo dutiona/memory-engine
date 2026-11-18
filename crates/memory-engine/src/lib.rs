@@ -307,7 +307,7 @@ pub use storage::{
 // capabilities live on the `DreamCtx` trait now, re-exported above) plus
 // `INSIGHT_MARKER_KEY` folded into the same list.
 pub use cognitive::{
-    ApplyResult, CycleAnomaly, CycleContext, CycleDelta, CycleMetadata, CycleOutcome, CycleReport,
+    ApplyResult, CycleContext, CycleDelta, CycleMetadata, CycleOutcome, CycleReport,
     DefaultDreamCycle, IMPORTANCE_STEP, INSIGHT_MARKER_KEY, IdentityOutput, LlmDreamCycle,
     MAX_ADJUSTMENT, SkipReason, TimeWindow,
 };
