@@ -83,3 +83,17 @@ pub fn validate_segment(segment: &str) -> std::result::Result<(), &'static str> 
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Unreachable through `ensure_path` and `resolve_path`: both split on '/' first.
+    #[test]
+    fn validate_segment_rejects_a_slash() {
+        assert_eq!(
+            validate_segment("a/b"),
+            Err("scope label must not contain '/'")
+        );
+    }
+}

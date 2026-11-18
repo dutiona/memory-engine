@@ -348,13 +348,15 @@ mod tests {
     }
 
     #[test]
-    fn ensure_path_rejects_slash_in_label() {
+    fn ensure_path_rejects_leading_whitespace_label() {
         let conn = setup();
         let store = ScopeStore::new(&conn);
-        // A single segment containing a slash would be split by the '/' delimiter,
-        // so we test a label with leading whitespace instead
         let err = store.ensure_path(" leading-space").unwrap_err();
-        assert!(matches!(err, MemoryError::Conflict(_)));
+        assert!(matches!(
+            err,
+            MemoryError::Conflict(ConflictError::ScopeLabel(m))
+                if m == "scope label must not have leading/trailing whitespace"
+        ));
     }
 
     #[test]
