@@ -27,9 +27,9 @@ fn parse_denylist(contents: &str) -> Vec<String> {
 /// control (caller's responsibility; `.secrets-denylist` is a pre-`.gitignore`d default).
 /// Feed the result to the bootstrap pipeline's `BootstrapConfig::denylist`.
 ///
-/// Note: an unset variable degrading to signatures-only is silent by design here (the
-/// gate is not yet wired); the #53 backfill caller should log how many literals loaded
-/// so "denylist active" vs "silently empty" is never inferred from a missing var.
+/// Note: an unset variable degrading to signatures-only is silent by design here; the #53
+/// backfill caller should log how many literals loaded so "denylist active" vs "silently
+/// empty" is never inferred from a missing var.
 ///
 /// # Errors
 /// Returns an error only when the variable is set but its file cannot be read.
