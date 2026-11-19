@@ -193,3 +193,18 @@ fn a_long_tool_input_becomes_a_string_of_its_first_bytes() {
     assert_eq!(s.len(), CAPTURE_CAP);
     assert!(s.starts_with("{\"content\":\"xxx"));
 }
+
+#[test]
+fn every_placeholder_is_a_fixpoint() {
+    let rules = SECRET_PREFIXES.iter().map(|&(rule, _, _)| rule).chain([
+        "denylist",
+        "machine-token",
+        "connection-string-password",
+        "hex-secret",
+        "high-entropy",
+    ]);
+    for rule in rules {
+        let text = format!("x [REDACTED:{rule}] y");
+        assert_eq!(scrub_with(&text, &[]).unwrap(), (text.clone(), 0), "{rule}");
+    }
+}

@@ -10,7 +10,8 @@
 //! 0. the author's denylist (bootstrap's input only);
 //! 1. `machine-token`: `me_` and 32 base62 characters, with no `[0-9A-Za-z_]` on either side
 //!    (ADR-0020 §4);
-//! 2. provider prefixes: a known token prefix at a token boundary, 20 bytes or more in all;
+//! 2. provider prefixes: a known token prefix at a token boundary, 20 bytes or more in all
+//!    (a `SG.` or `eyJ` token needs a dot past its prefix);
 //! 3. `connection-string-password`: the password of a `user:pass@` URL authority;
 //! 4. `hex-secret`: a run of 32+ hex digits whose preceding word holds a secret key word;
 //! 5. `high-entropy`: a token of 20+ characters of the secret charset at 4.3 bits or more.
@@ -34,18 +35,45 @@ pub const PROVENANCE_KEY: &str = "project";
 /// of UTF-8, back to a character boundary, after redaction.
 pub const CAPTURE_CAP: usize = 512;
 
-/// Known secret-token prefixes, in priority order: (rule, prefix).
-const SECRET_PREFIXES: &[(&str, &str)] = &[
-    ("aws-access-key", "AKIA"),
-    ("github-pat", "ghp_"),
-    ("github-fine-pat", "github_pat_"),
-    ("openai-key", "sk-"),
-    ("google-api-key", "AIza"),
-    ("slack-token", "xoxb-"),
-    ("slack-token", "xoxp-"),
-    ("private-key-header", "-----BEGIN"),
-    ("jwt", "eyJ"),
-    ("sendgrid", "SG."),
+/// What a prefixed token's body may hold after its prefix.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Body {
+    /// Alphanumerics and `. _ - + / =`.
+    Token,
+    /// ASCII alphanumerics only: the provider documents a base62 body, so an identifier such as
+    /// `npm_config_user_agent` stays readable.
+    Base62,
+}
+
+/// Known secret-token prefixes, in priority order: (rule, prefix, body). The rule names are
+/// stored in placeholders, and knowledge-base's port carries the same table.
+const SECRET_PREFIXES: &[(&str, &str, Body)] = &[
+    ("aws-access-key", "AKIA", Body::Token),
+    ("github-pat", "ghp_", Body::Token),
+    ("github-fine-pat", "github_pat_", Body::Token),
+    ("openai-key", "sk-", Body::Token),
+    ("google-api-key", "AIza", Body::Token),
+    ("slack-token", "xoxb-", Body::Token),
+    ("slack-token", "xoxp-", Body::Token),
+    ("private-key-header", "-----BEGIN", Body::Token),
+    ("jwt", "eyJ", Body::Token),
+    ("sendgrid", "SG.", Body::Token),
+    ("huggingface-token", "hf_", Body::Base62),
+    ("tailscale-key", "tskey-", Body::Token),
+    ("gitlab-pat", "glpat-", Body::Token),
+    ("github-token", "gho_", Body::Base62),
+    ("github-token", "ghu_", Body::Base62),
+    ("github-token", "ghs_", Body::Base62),
+    ("github-token", "ghr_", Body::Base62),
+    ("stripe-key", "sk_live_", Body::Base62),
+    ("stripe-key", "rk_live_", Body::Base62),
+    ("npm-token", "npm_", Body::Base62),
+    ("pypi-token", "pypi-", Body::Token),
+    ("age-secret-key", "AGE-SECRET-KEY-1", Body::Token),
+    ("slack-token", "xapp-", Body::Token),
+    ("supabase-token", "sbp_", Body::Base62),
+    ("docker-pat", "dckr_pat_", Body::Token),
+    ("digitalocean-token", "dop_v1_", Body::Base62),
 ];
 
 /// A prefix matches only at the text start, after whitespace, or after one of these.
@@ -324,7 +352,7 @@ fn detect_provider_prefix(text: &str, spans: &mut Spans, links: &Spans) {
     });
     let dots = positions(text, '.');
     let newlines = positions(text, '\n');
-    for &(rule, prefix) in SECRET_PREFIXES {
+    for &(rule, prefix, class) in SECRET_PREFIXES {
         let mut pos = 0;
         while let Some(rel) = text[pos..].find(prefix) {
             let start = pos + rel;
@@ -348,9 +376,18 @@ fn detect_provider_prefix(text: &str, spans: &mut Spans, links: &Spans) {
                 end
             } else {
                 let body = start + prefix.len();
-                let end = bodies.run_at(body).map_or(body, |(_, e)| e);
+                let end = match class {
+                    Body::Token => bodies.run_at(body).map_or(body, |(_, e)| e),
+                    Body::Base62 => {
+                        body + b[body..]
+                            .iter()
+                            .take_while(|c| c.is_ascii_alphanumeric())
+                            .count()
+                    }
+                };
+                // A SendGrid key and a JWT are dotted: the dot must lie past the prefix.
                 let dotless =
-                    || dots.partition_point(|&d| d < end) == dots.partition_point(|&d| d < start);
+                    || dots.partition_point(|&d| d < end) == dots.partition_point(|&d| d < body);
                 if end - start < MIN_PREFIXED_SECRET_LEN
                     || (matches!(prefix, "SG." | "eyJ") && dotless())
                 {
