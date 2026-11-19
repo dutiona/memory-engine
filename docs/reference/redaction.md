@@ -88,7 +88,10 @@ provenance, which are not embedded, are scrubbed.
 
 **Cycle deltas.** `apply_cycle_report` skips an `AddFact` or `Synthesize` delta whose text is not clean and counts it
 in `ApplyResult.blocked`, like a tombstone-blocked delta (#1023): the window is still marked, so a deterministic
-proposer cannot livelock on it. Quarantine reasons, promotion provenance and every metadata leaf are scrubbed.
+proposer cannot livelock on it. Quarantine reasons, promotion provenance, the report's own `method_version` (kept in
+the cycle history) and every metadata leaf are scrubbed. Every raw bound is checked before a delta is read: an
+oversized delta is skipped as blocked, while an oversized quarantine reason or report label becomes an omission
+marker, so the action still applies.
 Consolidation scrubs its `SummaryGenerator`'s output before embedding it. `LlmDreamCycle` embeds its proposer's
 summaries below the facade, so `redact::ScrubbingProposer` wraps a proposer and scrubs each summary (dropping a group
 whose summary exceeds the write limit or does not settle); `memory-engine-cli consolidate --backend llm` uses it. A
@@ -158,7 +161,9 @@ The store keeps two totals in its `config` table, shown by `memory-engine-cli st
 
 Uncounted: text scrubbed before the engine sees it (the MCP server's refusal errors and forget reasons,
 `ScrubbingProposer`'s summaries, embedder and proposer error bodies) and queries, which are never stored. The totals
-start at 0 on upgrade, and a crash between a write's commit and its count undercounts that write.
+start at 0 on upgrade, and a crash between a write's commit and its count undercounts that write. A cycle's counts
+are taken just before its apply, so a forget that commits between the two can count the findings of a delta the
+apply then skips.
 
 ## The shared fixture
 

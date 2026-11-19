@@ -1211,6 +1211,34 @@ async fn findings_in_text_never_written_do_not_count() {
 
 /// The report's own metadata reaches the cycle history; an oversized reason is never scanned;
 /// a promotion the tombstone blocks writes nothing and counts nothing.
+/// An oversized label is a marker, never a refusal: the report still applies and its window is
+/// still marked (#641).
+#[tokio::test]
+async fn an_oversized_cycle_label_is_a_marker() {
+    let store = Store::new();
+    let recorder = Arc::new(Recorder::default());
+    two_facts(&store, &recorder).await;
+    let raw = LlmDreamCycle::new(
+        Arc::new(Merges("plain".into())),
+        Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
+    );
+    let mut report = store.engine.run_dream_cycle(&raw).await.unwrap();
+    report.metadata.method_version = "v".repeat(me_types::limits::MAX_PAYLOAD_BYTES + 1);
+    report.deltas.clear();
+    store.engine.apply_cycle_report(&report).await.unwrap();
+    let history = store
+        .engine
+        .get_config("dream_cycle_history")
+        .await
+        .unwrap()
+        .unwrap();
+    let marker = format!(
+        "[omitted: {} bytes]",
+        me_types::limits::MAX_PAYLOAD_BYTES + 1
+    );
+    assert!(history.contains(&marker), "{history}");
+}
+
 #[tokio::test]
 async fn cycle_history_and_oversized_deltas() {
     let c = Canaries::new();
@@ -1246,6 +1274,17 @@ async fn cycle_history_and_oversized_deltas() {
         .await
         .unwrap();
     let gone = copy;
+    // A quarantine whose reason fits, but not beside the fact's own metadata once merged.
+    let half = me_types::limits::MAX_PAYLOAD_BYTES * 6 / 10;
+    let heavy = store
+        .engine
+        .add_fact(
+            &request("heavy note".into(), json!({ "note": "n".repeat(half) })),
+            embedder(),
+            None,
+        )
+        .await
+        .unwrap();
     let raw = LlmDreamCycle::new(
         Arc::new(Merges("plain".into())),
         Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
@@ -1257,6 +1296,10 @@ async fn cycle_history_and_oversized_deltas() {
         CycleDelta::Quarantine {
             fact_id: kept,
             reason: "q".repeat(me_types::limits::MAX_PAYLOAD_BYTES + 1),
+        },
+        CycleDelta::Quarantine {
+            fact_id: heavy,
+            reason: "r".repeat(half),
         },
         CycleDelta::Promote {
             fact_id: gone,
@@ -1272,7 +1315,18 @@ async fn cycle_history_and_oversized_deltas() {
         },
     ];
     let applied = store.engine.apply_cycle_report(&report).await.unwrap();
-    assert_eq!((applied.blocked, applied.quarantined), (2, 0));
+    // Both quarantines apply, each with a marker for a reason; the promotion is blocked.
+    assert_eq!((applied.blocked, applied.quarantined), (1, 2));
+    for (id, len) in [
+        (kept, me_types::limits::MAX_PAYLOAD_BYTES + 1),
+        (heavy, half),
+    ] {
+        let fact = store.engine.get_fact(id).await.unwrap();
+        assert_eq!(
+            fact.metadata["quarantine"]["reason"],
+            format!("[omitted: {len} bytes]")
+        );
+    }
     let history = store
         .engine
         .get_config("dream_cycle_history")
