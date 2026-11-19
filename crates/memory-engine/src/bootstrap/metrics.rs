@@ -19,16 +19,10 @@ pub struct BootstrapConfig {
     pub max_turns: usize,
     /// Skip sessions already bootstrapped (idempotency via `session_id` check).
     pub skip_existing: bool,
-    /// Redact secrets/PII from every candidate's content **before** it is
-    /// embedded or stored (#45/#51 gate). Default `true`; the CLI offers no
-    /// flag to disable it in normal operation. The switch exists for library
-    /// callers and for tests that assert on raw content. Redaction touches the
-    /// ME copy only — the source `.jsonl`/`.md` backbone is never modified.
-    pub redact: bool,
     /// Author-seeded known-secret literals (loaded from the gitignored denylist
     /// file, see [`crate::bootstrap::load_secret_denylist`]). Augments the
-    /// signature detectors; empty = signatures-only. Ignored when `redact` is
-    /// `false`.
+    /// signature detectors, which always run (#1024: there is no switch to turn
+    /// redaction off); empty = signatures-only.
     pub denylist: Vec<String>,
     /// Maximum total bytes read from a single session stream before parsing
     /// stops (#293). Bounds the per-stream I/O against a hostile or corrupt
@@ -50,7 +44,6 @@ impl Default for BootstrapConfig {
             scope: None,
             max_turns: 0,
             skip_existing: true,
-            redact: true,
             denylist: Vec::new(),
             max_session_bytes: super::parse::DEFAULT_MAX_SESSION_BYTES,
             max_entries: super::parse::DEFAULT_MAX_ENTRIES,

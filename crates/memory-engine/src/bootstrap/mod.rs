@@ -147,9 +147,7 @@ pub(crate) fn prepare_session(
     // the gate covers extraction, embedding, AND storage. Counted here (per
     // session); the caller skips already-bootstrapped sessions before this point,
     // so the count stays idempotent.
-    if ctx.config.redact {
-        report.secrets_redacted += redact_turns(&mut turns, &ctx.config.denylist);
-    }
+    report.secrets_redacted += redact_turns(&mut turns, &ctx.config.denylist);
 
     // --- Classify outcome on FULL turns (before truncation) ---
     // Outcome evidence (commits, test results) lives at the end of sessions, so we
@@ -259,32 +257,24 @@ fn prepare_extracted_fact(
     // against an extractor introducing text not present verbatim in the turns.
     // Findings are held in `redactions` and only added to the report on the *created*
     // branch by the caller, so the audit counter stays idempotent (a reinforced
-    // re-run re-scrubs but does not re-count). Disabled only when `config.redact` is
-    // false (library/test callers); the CLI has no bypass.
+    // re-run re-scrubs but does not re-count).
     let mut redactions = 0usize;
-    let content = if ctx.config.redact {
-        let Ok((clean, found)) = crate::redact::scrub_with(&fact.content, &ctx.config.denylist)
-        else {
-            tracing::warn!("skipping a bootstrap fact whose redaction did not settle");
-            return Ok(None);
-        };
-        redactions += usize::try_from(found).unwrap_or(usize::MAX);
-        clean
-    } else {
-        fact.content.clone()
+    let Ok((content, found)) = crate::redact::scrub_with(&fact.content, &ctx.config.denylist)
+    else {
+        tracing::warn!("skipping a bootstrap fact whose redaction did not settle");
+        return Ok(None);
     };
+    redactions += usize::try_from(found).unwrap_or(usize::MAX);
 
     // Redact the extractor-supplied metadata too: a pluggable SessionExtractor may
     // place turn-derived text in metadata, and the stored row must carry no
     // unredacted secret anywhere (not just in content). Keys are left intact.
     let mut metadata = fact.metadata.clone();
-    if ctx.config.redact {
-        let Ok(found) = crate::redact::scrub_json(&mut metadata, &ctx.config.denylist) else {
-            tracing::warn!("skipping a bootstrap fact whose redaction did not settle");
-            return Ok(None);
-        };
-        redactions += usize::try_from(found).unwrap_or(usize::MAX);
-    }
+    let Ok(found) = crate::redact::scrub_json(&mut metadata, &ctx.config.denylist) else {
+        tracing::warn!("skipping a bootstrap fact whose redaction did not settle");
+        return Ok(None);
+    };
+    redactions += usize::try_from(found).unwrap_or(usize::MAX);
 
     // Session files are third-party input: a fact whose (redacted) content or
     // metadata exceeds the ingest bound is skipped best-effort — mirroring the
