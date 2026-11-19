@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 
-use crate::error::Result;
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
 use crate::types::{ClassifierInput, FactType, NewFact};
 
@@ -335,9 +335,15 @@ pub fn prepare_memory_file(
     if parsed.body.is_empty() {
         return Ok(None);
     }
-    let (fact, redactions) =
-        prepare_one_memory(embedder, config, classifier, scope_id, path, &parsed)?;
-    Ok(Some((fact, redactions)))
+    match prepare_one_memory(embedder, config, classifier, scope_id, path, &parsed) {
+        Ok(prepared) => Ok(Some(prepared)),
+        // A text that does not settle is skipped, as the session path skips one (#1024).
+        Err(MemoryError::Conflict(ConflictError::Redaction(_))) => {
+            tracing::warn!(path = %path.display(), "skipping a memory file whose redaction did not settle");
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Build one `NewFact` from a parsed `.md` memory file — redact, backdate, embed.

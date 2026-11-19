@@ -450,6 +450,10 @@ impl MemoryEngine {
                     } else {
                         report.facts_created += 1;
                         report.secrets_redacted += redactions;
+                        // Each file commits on its own, so it counts now: a later file's
+                        // failure must not drop it (#1024, decision 6).
+                        self.tally(u64::try_from(redactions).unwrap_or(u64::MAX), 0)
+                            .await;
                         match fact_type {
                             FactType::Episodic => report.prewarm_metrics.episodic_count += 1,
                             FactType::Semantic => report.prewarm_metrics.semantic_count += 1,
@@ -468,11 +472,6 @@ impl MemoryEngine {
                 report.prewarm_metrics.avg_importance = importance_sum / total as f64;
             }
         }
-        self.tally(
-            u64::try_from(report.secrets_redacted).unwrap_or(u64::MAX),
-            0,
-        )
-        .await;
         Ok(report)
     }
 }
