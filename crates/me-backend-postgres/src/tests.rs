@@ -588,6 +588,24 @@ async fn capabilities_is_the_stock_pg_tier() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires Docker/Postgres testcontainer; run with --ignored"]
+async fn redaction_counts_round_trip() {
+    let (_c, _url, be) = migrated_backend().await;
+    be.add_redaction_counts(0, 0).await.expect("add nothing");
+    assert_eq!(be.get_config("redact_count").await.expect("get"), None);
+    be.add_redaction_counts(2, 0).await.expect("add");
+    be.add_redaction_counts(3, 1).await.expect("add");
+    assert_eq!(
+        be.get_config("redact_count").await.expect("get").as_deref(),
+        Some("5")
+    );
+    assert_eq!(
+        be.get_config("stub_count").await.expect("get").as_deref(),
+        Some("1")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker/Postgres testcontainer; run with --ignored"]
 async fn config_round_trip() {
     let (_c, _url, be) = migrated_backend().await;
     assert_eq!(be.get_config("missing").await.expect("get"), None);

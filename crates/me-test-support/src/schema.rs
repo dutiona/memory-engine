@@ -77,6 +77,49 @@ pub async fn set_config_on_read_only_yields_read_only<F: ConformanceBackend>(f: 
     );
 }
 
+/// The redaction totals (#1024) start at 0 and add up; a zero leaves a total as it is.
+pub async fn redaction_counts_accumulate<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    let total = |key: &'static str| {
+        let be = &be;
+        async move { be.get_config(key).await.expect("get") }
+    };
+    assert_eq!(
+        total("redact_count").await,
+        None,
+        "[{}] a fresh store has no totals",
+        f.name()
+    );
+    be.add_redaction_counts(2, 0).await.expect("add");
+    be.add_redaction_counts(3, 1).await.expect("add");
+    assert_eq!(
+        total("redact_count").await.as_deref(),
+        Some("5"),
+        "[{}] redacted adds up",
+        f.name()
+    );
+    assert_eq!(
+        total("stub_count").await.as_deref(),
+        Some("1"),
+        "[{}] stubbed adds up",
+        f.name()
+    );
+}
+
+/// `add_redaction_counts` on a read-only backend yields `ReadOnly`.
+pub async fn add_redaction_counts_on_read_only_yields_read_only<F: ConformanceBackend>(f: &F) {
+    let be = f.make_read_only().await;
+    let err = be
+        .add_redaction_counts(1, 1)
+        .await
+        .expect_err("add_redaction_counts on read-only must be rejected");
+    assert!(
+        matches!(err, MemoryError::ReadOnly),
+        "[{}] add_redaction_counts on read-only must be ReadOnly, got {err:?}",
+        f.name()
+    );
+}
+
 // --- embedding fingerprint identity (4 split contracts) ---
 
 /// `record_if_absent` records the candidate when absent, then returns the STORED

@@ -196,6 +196,25 @@ pub async fn set_config(client: &Client, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Add to the redaction totals (#1024) in one statement; their keys match the SQLite backend's.
+pub async fn add_redaction_counts(client: &Client, redacted: u64, stubbed: u64) -> Result<()> {
+    let as_i64 = |n: u64| {
+        i64::try_from(n).map_err(|_| MemoryError::Internal("redaction count overflows".into()))
+    };
+    let (redacted, stubbed) = (as_i64(redacted)?, as_i64(stubbed)?);
+    client
+        .execute(
+            "INSERT INTO config (key, value) \
+             SELECT k, n::text FROM (VALUES ('redact_count', $1::bigint), ('stub_count', $2::bigint)) AS t(k, n) \
+             WHERE n > 0 \
+             ON CONFLICT (key) DO UPDATE SET value = (config.value::bigint + EXCLUDED.value::bigint)::text",
+            &[&redacted, &stubbed],
+        )
+        .await
+        .map_err(pg_err)?;
+    Ok(())
+}
+
 async fn config_table_exists(client: &Client) -> Result<bool> {
     // Schema-qualify `public.config` — a bare `to_regclass('config')` is `search_path`-
     // sensitive, so a session with a non-default `search_path` would not find the table

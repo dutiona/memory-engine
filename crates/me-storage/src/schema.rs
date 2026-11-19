@@ -73,6 +73,12 @@ pub trait SchemaManager: Send + Sync {
     /// if the backend was opened in read-only mode.
     async fn set_config(&self, key: &str, value: &str) -> Result<()>;
 
+    /// Add to the store-wide redaction totals (#1024), both in one transaction; a zero leaves
+    /// its total as it is. An absent total reads as 0.
+    ///
+    /// Returns `MemoryError::ReadOnly` if the backend was opened in read-only mode.
+    async fn add_redaction_counts(&self, redacted: u64, stubbed: u64) -> Result<()>;
+
     // -------------------------------------------------------------------------
     // Stage E (cutover) snapshot seam — engine-projection persistence.
     //

@@ -46,6 +46,7 @@ mod lineage;
 mod outcome;
 mod query;
 mod reconstruct;
+pub(crate) mod redaction_counts;
 mod restore;
 mod resume;
 mod retraction;

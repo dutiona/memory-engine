@@ -98,6 +98,8 @@ macro_rules! all_behaviors_into {
             capabilities_self_consistent => schema::capabilities_self_consistent,
             config_round_trip => schema::config_round_trip,
             set_config_on_read_only_yields_read_only => schema::set_config_on_read_only_yields_read_only,
+            redaction_counts_accumulate => schema::redaction_counts_accumulate,
+            add_redaction_counts_on_read_only_yields_read_only => schema::add_redaction_counts_on_read_only_yields_read_only,
             fingerprint_record_then_returns_stored => schema::fingerprint_record_if_absent_records_then_returns_stored,
             fingerprint_dim_mismatch_is_embedding_dim => schema::fingerprint_dim_mismatch_is_embedding_dimension,
             fingerprint_model_mismatch_rejected => schema::fingerprint_model_mismatch_rejected,

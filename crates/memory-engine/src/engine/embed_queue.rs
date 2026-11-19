@@ -264,7 +264,7 @@ pub fn read_embed_queue_status(db: &Path) -> Result<EmbedQueueStatus> {
     crate::store::embed_queue::read_status(&tx)
 }
 
-fn open_status_connection(db: &Path) -> Result<Connection> {
+pub fn open_status_connection(db: &Path) -> Result<Connection> {
     let conn = crate::store::schema::open_connection_read_only(&db.to_string_lossy())?;
     if !conn.is_readonly(MAIN_DB).map_err(StorageError::backend)? {
         return Err(MemoryError::Internal(
