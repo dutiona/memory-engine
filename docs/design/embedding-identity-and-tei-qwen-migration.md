@@ -78,6 +78,10 @@ The canonical policy lives in [ADR 0015](adr/0015-cross-layer-embedding-identity
 | `matryoshka_base_dim` | int?          | native dim before MRL truncation; `None` if not truncated               |
 | `element_type`        | string        | `float32` (room for `int8` later)                                       |
 
+> **Status: superseded by ADR-0015 §1 (#1017).** The canonical tuple now has nine fields:
+> these five plus the served artifact (`artifact_sha256`, `pooling`, `normalization`,
+> `max_input_tokens`).
+
 ME's single-active-space is a **degenerate case** of KB's multi-space registry: same
 field names, same semantics, so ME can grow into multi-space (Wave 2) without a schema
 divergence to reconcile. KB-internal lifecycle fields (`status`, `table_name`,
