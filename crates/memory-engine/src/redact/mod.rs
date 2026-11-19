@@ -293,6 +293,13 @@ fn links(text: &str) -> (Spans, Spans) {
         while start < sep && !b[start].is_ascii_alphabetic() {
             start += 1;
         }
+        // A placeholder right before `://` replaced a token glued to the scheme: it keeps the
+        // link, so a later pass leaves the link's content alone.
+        if start == sep
+            && let Some(placeholder) = placeholder_ending_at(text, sep)
+        {
+            start = placeholder;
+        }
         let mut end = sep + 3;
         while end < b.len() && is_link_byte(b[end]) {
             end += 1;
@@ -348,6 +355,20 @@ fn detect_denylist(text: &str, denylist: &[String], spans: &mut Spans) {
         spans.add(s, e, "denylist");
     }
     spans.flush();
+}
+
+/// The start of a `[REDACTED:<rule>]` placeholder ending at byte `end`, looked for within the
+/// longest placeholder's length, so the test stays constant-time.
+fn placeholder_ending_at(text: &str, end: usize) -> Option<usize> {
+    if !text[..end].ends_with(']') {
+        return None;
+    }
+    let mut lo = end.saturating_sub(64);
+    while !text.is_char_boundary(lo) {
+        lo += 1;
+    }
+    let start = lo + text[lo..end].rfind("[REDACTED:")?;
+    (!text[start..end - 1].contains(']')).then_some(start)
 }
 
 fn placeholder_spans(text: &str) -> Vec<(usize, usize)> {

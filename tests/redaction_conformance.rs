@@ -14,7 +14,7 @@ use proptest::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const FIXTURE_SHA256: &str = "2cc50a060a426a0099dec7ea6a3cf7e90f33aef7908c5a25a9a31e431ad02a92";
+const FIXTURE_SHA256: &str = "b1902ceba79a1208fd096aac9d01ddc802d8e5f165158b7ccc41bda44d3b1b09";
 
 fn fixture() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -305,5 +305,21 @@ proptest! {
         let settled = scrub(&text).expect("every fragment mix settles");
         prop_assert_eq!(&redact(&settled).0, &settled);
         prop_assert_eq!(scrub(&settled).unwrap(), settled);
+    }
+}
+
+/// A glued token's placeholder stands where the link's scheme was; it keeps the link, so a
+/// second pass leaves the link's content alone and the scrub settles where one pass did.
+#[test]
+fn a_glued_token_settles_with_its_link_intact() {
+    let ghp = format!("ghp_{}", "Ex4mpleTok3nBody0123456789abcdefABCD");
+    for (glued, rule) in [
+        (format!("AKIA{}https", "IOSFODNN7EXAMPLE"), "aws-access-key"),
+        (format!("{ghp}/https"), "github-pat"),
+    ] {
+        let text = format!("key {glued}://example.com/x?k={ghp} end");
+        let want = format!("key [REDACTED:{rule}]://example.com/x?k={ghp} end");
+        assert_eq!(redact(&text).0, want);
+        assert_eq!(scrub(&text).unwrap(), want);
     }
 }
