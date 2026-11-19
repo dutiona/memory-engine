@@ -819,7 +819,7 @@ async fn a_recorded_embedder_error_is_redacted() {
 }
 
 #[tokio::test]
-async fn a_read_only_engine_refuses_first_and_oversize_stores_nothing() {
+async fn a_read_only_engine_answers_read_only_first() {
     let store = Store::new();
     let (dir, db) = store.close().await;
     let oversized = "x".repeat(me_types::limits::MAX_PAYLOAD_BYTES + 1);
@@ -828,7 +828,9 @@ async fn a_read_only_engine_refuses_first_and_oversize_stores_nothing() {
         .read_only(true)
         .build()
         .unwrap();
-    // #972: `ReadOnly` wins over an oversized or a secret-bearing input on every gated write.
+    // #972: `ReadOnly` wins over an oversized or a secret-bearing input on every gated write that
+    // takes caller text (`settle_embedding`, `apply_cycle_report` and `bootstrap_*` check it on
+    // their first line, before any input is read).
     let c = Canaries::new();
     let embedder = || Arc::new(RecordingEmbedder(Arc::default())) as Arc<dyn EmbeddingProvider>;
     let fingerprint = EmbeddingFingerprint::new("test", "test", DIM);
@@ -875,6 +877,40 @@ async fn a_read_only_engine_refuses_first_and_oversize_stores_nothing() {
                 .checkpoint_session("s", None, Some(&text), None)
                 .await
                 .map(|()| 0),
+            read_only
+                .add_facts_batch_partial(&[request(text.clone(), json!({}))], embedder(), None)
+                .await
+                .map(|_| 0),
+            read_only
+                .ingest_at("unscoped:laptop", &event(json!({ "text": text })))
+                .await,
+            read_only
+                .move_fact(
+                    1,
+                    1,
+                    "unscoped:laptop",
+                    "unscoped:laptop",
+                    &event(json!({ "text": text })),
+                )
+                .await,
+            read_only
+                .record_activity(
+                    &memory_engine::RecordActivityRequest {
+                        tool_name: "Write".into(),
+                        args: json!({ "content": text }),
+                        result: Some(text.clone()),
+                        session_id: "s".into(),
+                        timestamp: chrono::Utc::now(),
+                        scope_path: None,
+                        outcome_class: None,
+                        touched_paths: vec![],
+                        cwd: None,
+                    },
+                    None,
+                    &memory_engine::ActivityFilterConfig::default(),
+                )
+                .await
+                .map(|_| 0),
         ];
         for (i, refusal) in refusals.into_iter().enumerate() {
             let err = refusal.unwrap_err();
@@ -882,6 +918,14 @@ async fn a_read_only_engine_refuses_first_and_oversize_stores_nothing() {
         }
     }
     drop(read_only);
+    drop(dir);
+}
+
+#[tokio::test]
+async fn an_oversized_write_stores_nothing() {
+    let store = Store::new();
+    let (dir, db) = store.close().await;
+    let oversized = "x".repeat(me_types::limits::MAX_PAYLOAD_BYTES + 1);
     let engine = MemoryEngine::builder(DIM).path(&db).build().unwrap();
     for err in [
         engine
