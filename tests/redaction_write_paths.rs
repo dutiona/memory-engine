@@ -1259,6 +1259,18 @@ async fn a_delta_whose_metadata_would_outgrow_the_limit_is_blocked() {
         )
         .await
         .unwrap();
+    let escaped = store
+        .engine
+        .add_fact(
+            &request(
+                "escaped note".into(),
+                json!({ "note": "n".repeat(max - 30) }),
+            ),
+            Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
+            None,
+        )
+        .await
+        .unwrap();
     // 100 one-byte URL passwords, each becoming a 38-byte placeholder.
     let passwords = "https://u:p@h ".repeat(100);
     let growing = json!({ "note": format!("{passwords}{}", "z".repeat(max - 2000)) });
@@ -1272,6 +1284,11 @@ async fn a_delta_whose_metadata_would_outgrow_the_limit_is_blocked() {
             fact_id: full,
             reason: "short".into(),
         },
+        // Eight quotes: 15 bytes raw, 25 as stored, so its marker (21 as stored) is the shorter.
+        CycleDelta::Quarantine {
+            fact_id: escaped,
+            reason: "\"\"\"\"\"\"\"\"x7chars".into(),
+        },
         CycleDelta::AddFact(
             NewFact::builder("plain addition", vec![0.5; DIM], FactType::Semantic)
                 .metadata(growing)
@@ -1281,12 +1298,17 @@ async fn a_delta_whose_metadata_would_outgrow_the_limit_is_blocked() {
     let applied = store.engine.apply_cycle_report(&report).await.unwrap();
     assert_eq!(
         (applied.blocked, applied.quarantined, applied.facts_added),
-        (1, 1, 0)
+        (1, 2, 0)
     );
     // The quarantine applies even to a fact already at the limit; a reason shorter than its
     // marker is kept.
     let quarantined = store.engine.get_fact(full).await.unwrap();
     assert_eq!(quarantined.metadata["quarantine"]["reason"], "short");
+    let escaped = store.engine.get_fact(escaped).await.unwrap();
+    assert_eq!(
+        escaped.metadata["quarantine"]["reason"],
+        "[omitted: 15 bytes]"
+    );
 }
 
 /// An oversized label is a marker, never a refusal: the report still applies and its window is

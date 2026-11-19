@@ -400,9 +400,11 @@ impl MemoryEngine {
                     if fits(&reason) {
                         *found += n;
                     } else {
-                        // Only a shorter marker helps: a short reason is kept as it is.
+                        // Only a shorter marker helps: a short reason is kept as it is. Lengths are
+                        // compared as stored, JSON-encoded, since escapes count toward the bound.
                         let short = marker(&reason);
-                        if short.len() < reason.len() {
+                        let stored = |text: &str| serde_json::Value::from(text).to_string().len();
+                        if stored(&short) < stored(&reason) {
                             reason = short;
                         } else {
                             *found += n;
