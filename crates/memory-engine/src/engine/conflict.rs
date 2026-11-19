@@ -1,6 +1,7 @@
 use chrono::Utc;
 
 use crate::error::Result;
+use crate::limits::{check_json_size, check_str_size};
 use crate::traits::{ConflictArbiter, ConflictResolution};
 use crate::types::NewFact;
 
@@ -26,6 +27,10 @@ impl MemoryEngine {
     /// graph mirror leaves the graph and DB transiently diverged for the rest of
     /// the session; the next `open()` recovers the graph via
     /// `MemoryGraph::load_from_db`.
+    ///
+    /// Redaction (#1024): the candidate carries a vector computed from its content, so a content
+    /// that redaction would change is refused with `Conflict(Redaction)`; its `metadata` is
+    /// scrubbed.
     ///
     /// # Errors
     ///
@@ -86,14 +91,29 @@ impl MemoryEngine {
         old_id: i64,
         new_fact: &NewFact,
     ) -> Result<ConflictResolution> {
-        me_resolve::resolve_conflict(
+        // #972 first: `ReadOnly` wins over any refusal of the input.
+        self.ensure_open()?;
+        self.ensure_writable()?;
+        // #1024: the candidate carries a vector computed from its content, which must be clean;
+        // its metadata is scrubbed.
+        check_str_size(&new_fact.content, "fact content")?;
+        check_json_size(&new_fact.metadata, "fact metadata")?;
+        crate::redact::require_clean(&new_fact.content)?;
+        let mut candidate = new_fact.clone();
+        let found = crate::redact::scrub_json(&mut candidate.metadata, &[])?;
+        let resolution = me_resolve::resolve_conflict(
             self.mem_ctx(),
             &self.graph,
             arbiter,
             old_id,
-            new_fact,
+            &candidate,
             Utc::now(),
         )
-        .await
+        .await?;
+        // The candidate's metadata is written only when the arbiter stores it.
+        if resolution.new_fact_id.is_some() {
+            self.tally(found, 0).await;
+        }
+        Ok(resolution)
     }
 }

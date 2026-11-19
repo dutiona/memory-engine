@@ -162,6 +162,9 @@ impl MemoryEngine {
     /// [`Self::apply_cycle_report`]. Verifies write access up front since applying
     /// will require it.
     ///
+    /// Redaction (#1024): the report is applied through
+    /// [`apply_cycle_report`](Self::apply_cycle_report), which skips a delta with unredacted text.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
@@ -244,6 +247,9 @@ impl MemoryEngine {
     /// **not** mutual exclusion; concurrent guarded calls can both run (idempotent via the
     /// marker + watermark). True mutual exclusion is #207.
     ///
+    /// Redaction (#1024): the report is applied through
+    /// [`apply_cycle_report`](Self::apply_cycle_report), which skips a delta with unredacted text.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only, or a store/cycle error.
@@ -269,6 +275,10 @@ impl MemoryEngine {
     /// via the marker + watermark). Mutual exclusion against a concurrent writer is out
     /// of scope here — see #207 / #209.
     ///
+    /// Redaction (#1024): an `AddFact` or `Synthesize` delta whose text redaction would change
+    /// carries a vector of a secret, so it is skipped and counted in `blocked`; quarantine reasons,
+    /// promotion provenance and every metadata leaf are scrubbed.
+    ///
     /// # Errors
     ///
     /// - [`MemoryError::ReadOnly`] if the engine is read-only.
@@ -280,13 +290,166 @@ impl MemoryEngine {
         &self,
         report: &crate::cognitive::CycleReport,
     ) -> Result<crate::cognitive::ApplyResult> {
-        crate::cognitive::apply_cycle_report(
+        use crate::limits::check_str_size;
+        self.ensure_writable()?;
+        // #1024: a delta whose embedded text redaction would change carries a vector of a
+        // secret; it is skipped and counted as blocked, like a tombstone-blocked delta (#1023),
+        // so the window is still marked and a deterministic proposer cannot livelock on it
+        // (#641). Text that is not embedded (reasons, metadata, provenance, the report's own
+        // `method_version`, which the cycle history keeps) is scrubbed; an oversized one that
+        // only labels or explains a delta becomes an omission marker (`gate_delta`).
+        let mut found = 0;
+        let label = &report.metadata.method_version;
+        let method_version = if check_str_size(label, "cycle method version").is_err() {
+            marker(label)
+        } else {
+            let (method, n) = crate::redact::scrub_with(label, &[])?;
+            found += n;
+            method
+        };
+        // Built field by field, so an oversized label is never copied.
+        let metadata = crate::cognitive::CycleMetadata {
+            cycle_id: report.metadata.cycle_id,
+            ran_at: report.metadata.ran_at,
+            time_window: report.metadata.time_window,
+            facts_selected: report.metadata.facts_selected,
+            method_version,
+            processed_ids: report.metadata.processed_ids.clone(),
+        };
+        let mut blocked = 0;
+        let mut deltas = Vec::with_capacity(report.deltas.len());
+        for delta in &report.deltas {
+            match self.gate_delta(delta, &mut found).await? {
+                Some(delta) => deltas.push(delta),
+                None => blocked += 1,
+            }
+        }
+        let report = crate::cognitive::CycleReport {
+            deltas,
+            identity: report.identity.clone(),
+            metadata,
+        };
+        let mut result = crate::cognitive::apply_cycle_report(
             self.mem_ctx(),
             &self.graph,
             &self.upcaster_registry,
-            report,
+            &report,
         )
-        .await
+        .await?;
+        result.blocked += blocked;
+        self.tally(found, 0).await;
+        Ok(result)
+    }
+
+    /// One delta of a cycle report as the apply may write it (#1024), or `None` when it is
+    /// skipped and counted as blocked. Raw bounds are checked before it is copied or scanned;
+    /// `found` gains the findings of text that will be written.
+    async fn gate_delta(
+        &self,
+        delta: &crate::cognitive::CycleDelta,
+        found: &mut u64,
+    ) -> Result<Option<crate::cognitive::CycleDelta>> {
+        use crate::cognitive::CycleDelta;
+        use crate::limits::{check_json_size, check_str_size};
+        Ok(Some(match delta {
+            CycleDelta::AddFact(fact) | CycleDelta::Synthesize { new_fact: fact, .. } => {
+                if check_str_size(&fact.content, "fact content").is_err()
+                    || check_json_size(&fact.metadata, "fact metadata").is_err()
+                    || crate::redact::require_clean(&fact.content).is_err()
+                {
+                    return Ok(None);
+                }
+                let mut delta = delta.clone();
+                if let CycleDelta::AddFact(fact) | CycleDelta::Synthesize { new_fact: fact, .. } =
+                    &mut delta
+                {
+                    let n = crate::redact::scrub_json(&mut fact.metadata, &[])?;
+                    // Placeholders can grow the metadata past the limit, and the store would then
+                    // refuse the whole report: such a delta is skipped instead (#641).
+                    if check_json_size(&fact.metadata, "fact metadata").is_err() {
+                        return Ok(None);
+                    }
+                    // A forgotten text is blocked when the report applies (#1023), so its
+                    // metadata is never written and does not count.
+                    if !self.storage.is_forgotten(&fact.content).await? {
+                        *found += n;
+                    }
+                }
+                delta
+            }
+            CycleDelta::Quarantine { fact_id, reason } => {
+                let (mut reason, n) = if check_str_size(reason, "quarantine reason").is_err() {
+                    (marker(reason), 0)
+                } else {
+                    crate::redact::scrub_with(reason, &[])?
+                };
+                // The reason is merged into the fact's metadata, as the store merges it; one that
+                // would overflow it is stored as a marker. A quarantine always applies: the
+                // marker's envelope is an engine annotation of bounded size, like the cycle's own
+                // stamp, so it may take a fact already at the limit a few dozen bytes past it.
+                let quarantine =
+                    |reason: &str| serde_json::json!({ "reason": reason, "at": LONGEST_RFC3339 });
+                if let Ok(fact) = self.storage.get_fact(*fact_id).await {
+                    let fits = |reason: &str| {
+                        check_json_size(
+                            &merged(&fact.metadata, "quarantine", quarantine(reason)),
+                            "fact metadata",
+                        )
+                        .is_ok()
+                    };
+                    if fits(&reason) {
+                        *found += n;
+                    } else {
+                        // Only a shorter marker helps: a short reason is kept as it is. Lengths are
+                        // compared as stored, JSON-encoded, since escapes count toward the bound.
+                        let short = marker(&reason);
+                        let stored = |text: &str| serde_json::Value::from(text).to_string().len();
+                        if stored(&short) < stored(&reason) {
+                            reason = short;
+                        } else {
+                            *found += n;
+                        }
+                    }
+                } else {
+                    *found += n;
+                }
+                CycleDelta::Quarantine {
+                    fact_id: *fact_id,
+                    reason,
+                }
+            }
+            CycleDelta::Promote {
+                fact_id,
+                provenance,
+            } => {
+                if check_str_size(&provenance.method_version, "promotion provenance").is_err() {
+                    return Ok(None);
+                }
+                let mut provenance = provenance.clone();
+                let (method, n) = crate::redact::scrub_with(&provenance.method_version, &[])?;
+                provenance.method_version = method;
+                // A promotion copies its source row with the provenance merged into its
+                // metadata: one that would overflow it is skipped as blocked. One whose text
+                // is forgotten is blocked when the report applies (#1023) and writes nothing.
+                let source = self.storage.get_fact(*fact_id).await.ok();
+                if let Some(source) = &source {
+                    let provenance_value = serde_json::to_value(&provenance)
+                        .map_err(|e| MemoryError::Internal(format!("serialize provenance: {e}")))?;
+                    let stored = merged(&source.metadata, "promotion_provenance", provenance_value);
+                    if check_json_size(&stored, "fact metadata").is_err() {
+                        return Ok(None);
+                    }
+                    if !self.storage.is_forgotten(&source.content).await? {
+                        *found += n;
+                    }
+                }
+                CycleDelta::Promote {
+                    fact_id: *fact_id,
+                    provenance,
+                }
+            }
+            other => other.clone(),
+        }))
     }
 
     /// Atomic promotion: insert promoted fact + lineage record in one savepoint.
@@ -300,6 +463,22 @@ impl MemoryEngine {
         &self,
         req: &PromoteRequest,
     ) -> Result<PromotionResult> {
+        // #972 first: `ReadOnly` wins over any refusal of the input.
+        self.ensure_open()?;
+        self.ensure_writable()?;
+        // #1024: the vector was computed from `content`, which must be clean; the metadata and
+        // the provenance, which are not embedded, are scrubbed.
+        crate::limits::check_str_size(&req.content, "fact content")?;
+        crate::limits::check_json_size(&req.metadata, "fact metadata")?;
+        crate::limits::check_str_size(&req.provenance.method_version, "promotion provenance")?;
+        crate::redact::require_clean(&req.content)?;
+        let mut found = 0;
+        let mut req = req.clone();
+        found += crate::redact::scrub_json(&mut req.metadata, &[])?;
+        let (method, n) = crate::redact::scrub_with(&req.provenance.method_version, &[])?;
+        req.provenance.method_version = method;
+        found += n;
+        let req = &req;
         // Validate embedding dimension up-front.
         if req.embedding.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
@@ -324,6 +503,8 @@ impl MemoryEngine {
                     .map_err(|e| MemoryError::Internal(format!("serialize provenance: {e}")))?,
             );
         }
+        // The provenance is merged into the stored metadata: the result must fit.
+        crate::limits::check_json_size(&metadata, "fact metadata")?;
 
         let now = Utc::now();
         let new_fact = NewFact {
@@ -360,9 +541,30 @@ impl MemoryEngine {
         for sid in scope_ids_to_cache {
             self.cache_scope_chain(sid).await?;
         }
+        self.tally(found, 0).await;
 
         Ok(result)
     }
+}
+
+/// What stands for an oversized text that only labels or explains a delta: the action still
+/// applies and the window is still marked (#641).
+fn marker(text: &str) -> String {
+    format!("[omitted: {} bytes]", text.len())
+}
+
+/// The longest form `DateTime::to_rfc3339` gives: the size checks measure a stamp at its widest.
+const LONGEST_RFC3339: &str = "1970-01-01T00:00:00.000000000+00:00";
+
+/// `metadata` with `key` set to `value`, as the store merges it: a non-object becomes an object,
+/// and an existing `key` is replaced.
+fn merged(metadata: &serde_json::Value, key: &str, value: serde_json::Value) -> serde_json::Value {
+    let mut map = match metadata {
+        serde_json::Value::Object(map) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    map.insert(key.to_owned(), value);
+    serde_json::Value::Object(map)
 }
 
 #[cfg(test)]
@@ -838,6 +1040,68 @@ mod tests {
         assert!(
             prov.is_some(),
             "metadata should contain promotion_provenance"
+        );
+    }
+
+    /// #1024: a promotion brings its own vector, so its content must already be clean; its
+    /// metadata and provenance are scrubbed, and a clean promotion still goes through.
+    #[tokio::test]
+    async fn promote_refuses_unredacted_text() {
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let source_ids = add_source_facts(&engine, &[1, 2]).await;
+        let aws = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+        let request = |content: String| PromoteRequest {
+            content,
+            fact_type: FactType::Semantic,
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            importance: 0.9,
+            metadata: serde_json::json!({ "note": format!("key {aws}") }),
+            scope: None,
+            source_fact_ids: source_ids.clone(),
+            provenance: PromotionProvenance {
+                method_version: format!("v1 {aws}"),
+                ..stub_provenance()
+            },
+        };
+        let err = engine
+            .promote_with_lineage(&request(format!("wisdom {aws}")))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::Conflict(crate::error::ConflictError::Redaction(_))
+            ),
+            "{err:?}"
+        );
+        // Raw bounds come before the scan: an oversized metadata or provenance is refused as
+        // too large, never scanned.
+        let mut oversized = request("plain wisdom".into());
+        oversized.metadata =
+            serde_json::json!({ "note": "m".repeat(me_types::limits::MAX_PAYLOAD_BYTES + 1) });
+        let err = engine.promote_with_lineage(&oversized).await.unwrap_err();
+        assert!(err.to_string().contains("exceeding"), "{err}");
+        // Each part fits, but not the stored metadata they assemble.
+        let mut assembled = request("plain wisdom".into());
+        assembled.metadata =
+            serde_json::json!({ "note": "m".repeat(me_types::limits::MAX_PAYLOAD_BYTES - 64) });
+        assembled.provenance.method_version = "v".repeat(128);
+        let err = engine.promote_with_lineage(&assembled).await.unwrap_err();
+        assert!(err.to_string().contains("exceeding"), "{err}");
+        // The check measures what is stored: an existing provenance is replaced, not added to.
+        let mut replaced = request("replaced wisdom".into());
+        replaced.metadata = serde_json::json!({ "promotion_provenance": "p".repeat(me_types::limits::MAX_PAYLOAD_BYTES - 64) });
+        engine.promote_with_lineage(&replaced).await.unwrap();
+        let result = engine
+            .promote_with_lineage(&request("plain wisdom".into()))
+            .await
+            .unwrap();
+        let fact = engine.get_fact(result.fact_id).await.unwrap();
+        assert_eq!(fact.content, "plain wisdom");
+        assert_eq!(fact.metadata["note"], "key [REDACTED:aws-access-key]");
+        assert_eq!(
+            fact.metadata["promotion_provenance"]["method_version"],
+            "v1 [REDACTED:aws-access-key]"
         );
     }
 

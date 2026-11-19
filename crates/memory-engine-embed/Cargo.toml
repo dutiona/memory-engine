@@ -24,6 +24,7 @@ serde_json = "1"
 tracing = "0.1"
 
 [dev-dependencies]
+tempfile = "3"
 wiremock = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 proptest = "1"

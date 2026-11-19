@@ -27,12 +27,12 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 
-use crate::error::Result;
+use crate::error::{ConflictError, MemoryError, Result};
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
 use crate::types::{ClassifierInput, FactType, NewFact};
 
 use super::BootstrapConfig;
-use super::redact;
+use crate::redact;
 
 /// Baseline importance for curated native-memory facts. Higher than the
 /// keyword-extracted session candidates: these files are hand-authored durable
@@ -335,9 +335,15 @@ pub fn prepare_memory_file(
     if parsed.body.is_empty() {
         return Ok(None);
     }
-    let (fact, redactions) =
-        prepare_one_memory(embedder, config, classifier, scope_id, path, &parsed)?;
-    Ok(Some((fact, redactions)))
+    match prepare_one_memory(embedder, config, classifier, scope_id, path, &parsed) {
+        Ok(prepared) => Ok(Some(prepared)),
+        // A text that does not settle is skipped, as the session path skips one (#1024).
+        Err(MemoryError::Conflict(ConflictError::Redaction(_))) => {
+            tracing::warn!(path = %path.display(), "skipping a memory file whose redaction did not settle");
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Build one `NewFact` from a parsed `.md` memory file — redact, backdate, embed.
@@ -372,13 +378,8 @@ fn prepare_one_memory(
     // and only added to the report on the *created* branch below, so the audit
     // counter is idempotent (a reinforced re-run re-scrubs but does not re-count).
     let mut redactions = 0usize;
-    let content = if config.redact {
-        let (clean, findings) = redact::redact_text_with_denylist(&parsed.body, &config.denylist);
-        redactions += findings.len();
-        clean
-    } else {
-        parsed.body.clone()
-    };
+    let (content, found) = redact::scrub_with(&parsed.body, &config.denylist)?;
+    redactions += usize::try_from(found).unwrap_or(usize::MAX);
 
     let (fact_type, route_kb) = classify_memory_type(parsed.mem_type.as_deref());
     let embedding = embedder.embed(&content)?;
@@ -388,9 +389,8 @@ fn prepare_one_memory(
     // Scrub the whole metadata object so the stored row holds no unredacted
     // secret anywhere, not just in the body content.
     let mut metadata = build_metadata(path, parsed, route_kb);
-    if config.redact {
-        redactions += redact::redact_json_strings(&mut metadata, &config.denylist);
-    }
+    redactions +=
+        usize::try_from(redact::scrub_json(&mut metadata, &config.denylist)?).unwrap_or(usize::MAX);
 
     // Classifiers read only content/fact_type/base_importance/metadata — build the
     // owned `ClassifierInput` view, not a 20-field synthetic `Fact` cloning the

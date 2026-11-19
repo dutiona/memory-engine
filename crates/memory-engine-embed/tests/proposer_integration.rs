@@ -110,3 +110,109 @@ async fn propose_surfaces_http_error_status() {
         "error should carry the status: {err}"
     );
 }
+
+/// One byte over the crate's 32 MiB response cap.
+const OVER_CAP: usize = 32 * 1024 * 1024 + 1;
+
+async fn propose_against(status: u16) -> memory_engine::MemoryError {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/generate"))
+        .respond_with(ResponseTemplate::new(status).set_body_string("x".repeat(OVER_CAP)))
+        .mount(&server)
+        .await;
+    let url = format!("{}/api/generate", server.uri());
+    tokio::task::spawn_blocking(move || {
+        let proposer =
+            HttpDeltaProposer::new(url, "gemma4:26b".to_string(), None, 30).expect("client build");
+        proposer
+            .propose(&[], &[])
+            .expect_err("an over-cap response is refused")
+    })
+    .await
+    .expect("spawn_blocking join")
+}
+
+#[tokio::test]
+async fn an_over_cap_success_response_is_refused_unread() {
+    let err = propose_against(200).await;
+    assert!(err.to_string().contains("too large"), "{err}");
+}
+
+#[tokio::test]
+async fn an_over_cap_error_response_is_refused_unread() {
+    let err = propose_against(500).await;
+    let message = err.to_string();
+    assert!(
+        message.contains("too large"),
+        "{}",
+        &message[..message.len().min(200)]
+    );
+    assert!(
+        message.len() < 1_000,
+        "the error does not carry the body: {} bytes",
+        message.len()
+    );
+}
+
+#[tokio::test]
+async fn a_proposer_error_body_is_redacted_before_it_is_cut() {
+    let token = format!("ghp_{}", "0123456789abcdefghij".repeat(2));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/generate"))
+        .respond_with(ResponseTemplate::new(500).set_body_string(format!(
+            "{} {token} {}",
+            "x".repeat(969),
+            "y".repeat(500)
+        )))
+        .mount(&server)
+        .await;
+    let url = format!("{}/api/generate", server.uri());
+    let err = tokio::task::spawn_blocking(move || {
+        let proposer =
+            HttpDeltaProposer::new(url, "gemma4:26b".to_string(), None, 10).expect("client build");
+        proposer.propose(&[], &[])
+    })
+    .await
+    .expect("spawn_blocking join")
+    .expect_err("a 500 must surface as an error");
+    let text = err.to_string();
+    assert!(
+        text.contains("500")
+            && text.contains("[REDACTED:github-pat]")
+            && !text.contains(&token[..12]),
+        "{text}"
+    );
+    assert!(text.len() < 1200, "the body is cut: {} bytes", text.len());
+}
+
+#[tokio::test]
+async fn a_malformed_merge_preview_is_redacted_before_it_is_cut() {
+    // The token starts at byte 480: the old 500-character preview would keep 20 bytes of it.
+    let token = format!("ghp_{}", "0123456789abcdefghij".repeat(2));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/generate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "model": "gemma4:26b",
+            "response": format!("{} {token} {{{{", "x".repeat(479)),
+            "done": true,
+        })))
+        .mount(&server)
+        .await;
+    let url = format!("{}/api/generate", server.uri());
+    let err = tokio::task::spawn_blocking(move || {
+        let proposer =
+            HttpDeltaProposer::new(url, "gemma4:26b".to_string(), None, 10).expect("client build");
+        proposer.propose(&[], &[])
+    })
+    .await
+    .expect("spawn_blocking join")
+    .expect_err("malformed merge JSON is an error");
+    let text = err.to_string();
+    assert!(
+        text.contains("[REDACTED:github-pat]") && !text.contains(&token[..12]),
+        "{text}"
+    );
+}

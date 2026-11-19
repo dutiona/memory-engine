@@ -125,7 +125,10 @@ async fn status_of_an_idle_queue_says_never() {
         ))
         .stdout(predicate::str::contains("paused: no\n"))
         .stdout(predicate::str::contains("last embed success: never\n"))
-        .stdout(predicate::str::contains("last embed error: never\n"));
+        .stdout(predicate::str::contains("last embed error: never\n"))
+        .stdout(predicate::str::contains(
+            "redaction: 0 redacted, 0 stubbed\n",
+        ));
     let json = stdout_json(cli(&db).args(["--format", "json", "status"]));
     for key in [
         "oldest_age_secs",
@@ -137,6 +140,52 @@ async fn status_of_an_idle_queue_says_never() {
     ] {
         assert!(json[key].is_null(), "{key} is null");
     }
+}
+
+/// #1024: the store-wide totals of redacted secrets and stubbed activities.
+#[tokio::test]
+async fn status_reports_the_counters() {
+    let aws = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+    let ghp = format!("ghp_{}", "0123456789abcdefghij".repeat(2));
+    let (_dir, db, mut engine) = store(&[&format!("key {aws}"), &format!("token {ghp}")]).await;
+    let dotenv = format!("app/.{}", "env");
+    let activity = memory_engine::RecordActivityRequest {
+        tool_name: "Read".into(),
+        args: serde_json::json!({ "file_path": dotenv }),
+        result: None,
+        session_id: "s1".into(),
+        timestamp: chrono::Utc::now(),
+        scope_path: None,
+        outcome_class: None,
+        touched_paths: vec![dotenv.clone()],
+        cwd: None,
+    };
+    engine
+        .record_activity(
+            &activity,
+            None,
+            &memory_engine::ActivityFilterConfig::default(),
+        )
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+
+    cli(&db)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "redaction: 2 redacted, 1 stubbed\n",
+        ));
+    let json = stdout_json(cli(&db).args(["--format", "json", "status"]));
+    assert_eq!(json["redacted"], 2);
+    assert_eq!(json["stubbed"], 1);
+    cli(&db)
+        .args(["--format", "plain", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("redacted=2\n"))
+        .stdout(predicate::str::contains("stubbed=1\n"));
 }
 
 #[tokio::test]

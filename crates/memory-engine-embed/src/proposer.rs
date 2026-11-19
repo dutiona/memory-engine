@@ -160,9 +160,9 @@ impl HttpDeltaProposer {
             })?;
         let cleaned = strip_code_fence(response);
         serde_json::from_str(cleaned).map_err(|e| {
-            let preview: String = cleaned.chars().take(500).collect();
             MemoryError::Internal(format!(
-                "proposer returned malformed merge JSON ({e}): {preview}"
+                "proposer returned malformed merge JSON ({e}): {}",
+                crate::http::body_diagnostic(cleaned)
             ))
         })
     }
@@ -199,15 +199,17 @@ impl DeltaProposer for HttpDeltaProposer {
         let resp = req
             .send()
             .map_err(|e| MemoryError::Internal(format!("proposer HTTP request failed: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().unwrap_or_default();
+        // Both bodies are read through the crate's cap: an LLM endpoint is as untrusted as an
+        // embedder, and ScrubbingProposer scans what this returns (#1024).
+        let status = resp.status();
+        let bytes = crate::http::read_body_capped(resp, "proposer response")?;
+        if !status.is_success() {
+            let body = crate::http::body_diagnostic(&String::from_utf8_lossy(&bytes));
             return Err(MemoryError::Internal(format!(
                 "proposer endpoint returned {status}: {body}"
             )));
         }
-        let envelope: serde_json::Value = resp
-            .json()
+        let envelope: serde_json::Value = serde_json::from_slice(&bytes)
             .map_err(|e| MemoryError::Internal(format!("proposer response parse error: {e}")))?;
 
         // Record the call + tokens it burned BEFORE parsing the merge JSON: a 200 with

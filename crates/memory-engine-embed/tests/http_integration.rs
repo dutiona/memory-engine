@@ -896,3 +896,143 @@ async fn over_length_rule_leaves_another_400_alone() {
         assert!(requests(&server, "/tokenize").await.is_empty(), "{err}");
     }
 }
+
+// ── Upstream bodies in diagnostics (#1024) ────────────────────────────────────
+
+fn ghp() -> String {
+    format!("ghp_{}", "0123456789abcdefghij".repeat(2))
+}
+
+/// No 8-byte window of `secret` appears in `text`.
+fn holds_no_fragment(text: &str, secret: &str) -> bool {
+    secret
+        .as_bytes()
+        .windows(8)
+        .all(|w| !text.as_bytes().windows(8).any(|t| t == w))
+}
+
+/// The error `provider_for` answers when every request gets `response`, for one text and
+/// for a batch.
+async fn errors_for(response: ResponseTemplate) -> [MemoryError; 2] {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    let uri = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let provider = provider_for(&uri, 4);
+        [
+            provider.embed("hello").unwrap_err(),
+            provider.embed_batch(&["a", "b"]).unwrap_err(),
+        ]
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn an_error_body_is_redacted_before_it_is_cut() {
+    let token = ghp();
+    // The token starts at byte 970 of the body, so the 1,000-byte cut alone would keep 30
+    // bytes of it.
+    let failed = format!("{} {token} {}", "x".repeat(969), "y".repeat(500));
+    // A 2xx body of no known shape is quoted as JSON: `{"note":"` puts the token at byte 970.
+    let shapeless = json!({ "note": format!("{} {token} {}", "x".repeat(960), "y".repeat(500)) });
+    let mut texts = Vec::new();
+    for response in [
+        ResponseTemplate::new(500).set_body_string(failed),
+        ResponseTemplate::new(200).set_body_json(shapeless),
+    ] {
+        for err in errors_for(response).await {
+            texts.push(err.to_string());
+        }
+    }
+    for text in &texts {
+        assert!(
+            text.contains("[REDACTED:github-pat]") && holds_no_fragment(text, &token),
+            "{text}"
+        );
+    }
+
+    // The facade stores the provider's text as it is.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.db");
+    let engine = memory_engine::MemoryEngine::builder(4)
+        .path(&db)
+        .build()
+        .unwrap();
+    engine
+        .add_fact_deferred(&memory_engine::types::AddFactRequest {
+            content: "plain".into(),
+            fact_type: memory_engine::types::FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        })
+        .await
+        .unwrap();
+    let memory_engine::NextEmbedding::Due(item) = engine.next_embedding().await.unwrap() else {
+        panic!("queued")
+    };
+    let [error, _] = errors_for(ResponseTemplate::new(500).set_body_string(format!(
+        "{} {token} {}",
+        "x".repeat(969),
+        "y".repeat(500)
+    )))
+    .await;
+    let text = error.to_string();
+    let fingerprint = memory_engine::EmbeddingFingerprint::new("tei", "m", 4);
+    engine
+        .settle_embedding(
+            &item,
+            Err(error),
+            &fingerprint,
+            memory_engine::Backoff::DEFAULT,
+        )
+        .await
+        .unwrap();
+    let mut engine = engine;
+    engine.close().await.unwrap();
+    let last = memory_engine::read_embed_queue_status(&db)
+        .unwrap()
+        .last_error
+        .unwrap();
+    assert_eq!(last, text, "the facade stores the provider's text as it is");
+    assert!(
+        last.contains("[REDACTED:github-pat]") && holds_no_fragment(&last, &token),
+        "{last}"
+    );
+}
+
+#[tokio::test]
+async fn an_error_body_over_8_kib_is_named_by_its_size_only() {
+    // A URL password whose authority ends past 8 KiB: a cut there could hide its `@`.
+    let body = format!("see https://u:{}@example.com/", "p".repeat(9000));
+    let len = body.len();
+    for err in errors_for(ResponseTemplate::new(502).set_body_string(body)).await {
+        let text = err.to_string();
+        assert!(
+            text.contains("502")
+                && text.contains(&format!("{len}-byte body"))
+                && !text.contains("ppp"),
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_token_behind_a_json_escape_is_redacted() {
+    // In the body's JSON text the token follows the `n` of a `\n` escape, a word character, so
+    // only the decoded string shows the line break that makes it a machine token.
+    let token = format!("me_{}", "Zq7Xw3Rt9Lp2Vb6Nm4Kc8Hd1Fs5Gj0Ay");
+    let body = format!(r#"{{"error":{{"message":"bad key\n{token}"}}}}"#);
+    for err in errors_for(ResponseTemplate::new(500).set_body_string(body)).await {
+        let text = err.to_string();
+        assert!(
+            text.contains("[REDACTED:machine-token]") && !text.contains(&token),
+            "{text}"
+        );
+    }
+}

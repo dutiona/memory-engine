@@ -5,8 +5,12 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use crate::engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, apply_filter};
+use crate::engine::activity_filter::{
+    ActivityFilterConfig, ActivityFilterDecision, PromoteAction, apply_filter,
+    format_promote_content,
+};
 use crate::error::{MemoryError, Result};
+use crate::limits::{check_json_size, check_str_size};
 use crate::traits::EmbeddingProvider;
 use crate::types::{
     ActivityStatus, AddFactOptions, AddFactRequest, NewActivity, ProjectContext,
@@ -17,10 +21,8 @@ use super::MemoryEngine;
 
 /// Compute blake3 hex hash, truncated to 32 chars (128 bits).
 /// Same policy as `FactStore::content_hash`.
-fn args_hash(args: &serde_json::Value) -> String {
-    let canonical = serde_json::to_string(args).unwrap_or_default();
-    let hash = blake3::hash(canonical.as_bytes());
-    hash.to_hex()[..32].to_string()
+fn args_hash(canonical: &str) -> String {
+    blake3::hash(canonical.as_bytes()).to_hex()[..32].to_string()
 }
 
 impl MemoryEngine {
@@ -29,11 +31,13 @@ impl MemoryEngine {
     /// Record a tool activity with server-side filtering.
     ///
     /// Flow:
-    /// 1. Apply ignore/promote filter (pre-storage).
-    /// 2. Compute `args_hash` (blake3, 32 hex).
-    /// 3. Resolve scope if provided.
-    /// 4. Insert or dedup at store layer.
-    /// 5. If promote AND not deduplicated: create a fact.
+    /// 1. Apply the ignore/promote filter (pre-storage).
+    /// 2. Apply the capture contract (#1024, ADR-0020 §6): a call touching a sensitive path is
+    ///    a stub keeping only its path; otherwise input and result are redacted, then cut.
+    /// 3. Compute `args_hash` (blake3, 32 hex) over the redacted, uncut input.
+    /// 4. Resolve scope if provided, then insert or dedup at the store layer.
+    /// 5. If promote AND not deduplicated AND not a stub: create a fact from the redacted
+    ///    result.
     ///
     /// # Errors
     ///
@@ -46,13 +50,8 @@ impl MemoryEngine {
         filter_config: &ActivityFilterConfig,
     ) -> Result<RecordActivityResult> {
         self.ensure_writable()?; // #972: fail fast before filtering/embedding + the activity write
-        // Step 1: Filter decision (no locks needed).
-        let decision = apply_filter(
-            &req.tool_name,
-            &req.args,
-            req.result.as_deref(),
-            filter_config,
-        );
+        // Step 1: Filter decision (no locks needed); an ignored tool is never scanned.
+        let mut decision = apply_filter(&req.tool_name, &req.args, None, filter_config);
         if matches!(decision, ActivityFilterDecision::Ignore) {
             return Ok(RecordActivityResult {
                 activity_id: None,
@@ -62,10 +61,28 @@ impl MemoryEngine {
             });
         }
 
-        // Step 2: Compute args hash.
-        let hash = args_hash(&req.args);
-        // `None` defaults to `OutcomeClass::Success` (the DB column default).
-        let outcome = req.outcome_class.clone().unwrap_or_default();
+        // Step 2: the capture contract.
+        let capture = crate::redact::capture_tool_use(
+            &req.args,
+            req.result.as_deref(),
+            // `None` defaults to `OutcomeClass::Success` (the DB column default).
+            req.outcome_class.clone().unwrap_or_default(),
+            &req.touched_paths,
+            req.cwd.as_deref(),
+        )?;
+        let omitted_result = req.result.is_some() && capture.full_result.is_none();
+        if let ActivityFilterDecision::Promote(action) = &mut decision {
+            // Scrubbed again after its own 200-byte cut, which can expose a match the result did
+            // not hold: the tombstone check below must read the text `add_fact` stores.
+            action.fact_content = crate::redact::scrub(&format_promote_content(
+                &req.tool_name,
+                capture.full_result.as_deref(),
+            ))?;
+        }
+        let input_found = capture.input_found;
+
+        // Step 3: Compute args hash.
+        let hash = args_hash(&capture.hash_input);
 
         // Steps 3+4: Resolve scope, then insert/dedup via the port.
         let scope_id = match req.scope_path.as_deref() {
@@ -77,9 +94,9 @@ impl MemoryEngine {
             session_id: req.session_id.clone(),
             tool_name: req.tool_name.clone(),
             args_hash: hash,
-            args: req.args.clone(),
-            result_summary: req.result.as_ref().map(|r| truncate(r, 512).to_string()),
-            outcome_class: outcome,
+            args: capture.args,
+            result_summary: capture.result,
+            outcome_class: capture.outcome,
             timestamp: req.timestamp,
             scope_id,
         };
@@ -88,65 +105,25 @@ impl MemoryEngine {
             .storage
             .insert_or_dedup_activity(&new_activity, filter_config.dedup_window_secs)
             .await?;
+        // A duplicate's input and outcome only matched its row; its result rewrote the row's.
+        if was_deduplicated {
+            self.tally(capture.result_found, 0).await;
+        } else {
+            self.tally(input_found + capture.result_found, u64::from(capture.stub))
+                .await;
+        }
 
         // Step 5: Promote (only if new, not deduplicated).
-        let mut promoted_fact_id = None;
-        let status = if was_deduplicated {
-            ActivityStatus::Deduplicated
+        let (status, promoted_fact_id) = if was_deduplicated {
+            (ActivityStatus::Deduplicated, None)
+        } else if capture.stub || omitted_result {
+            // A stub keeps nothing to promote; an omitted result was never scanned.
+            (ActivityStatus::Recorded, None)
         } else if let ActivityFilterDecision::Promote(action) = &decision {
-            // A promotion is a derivation, so a forget's tombstone keeps its content out
-            // (#1023). `add_fact` is the ungated assertion path, so the check is here; it
-            // reads outside the write, and `record_activity` has no server or CLI caller.
-            if self.storage.is_forgotten(&action.fact_content).await? {
-                ActivityStatus::Recorded
-            } else if let Some(emb) = embedder {
-                // Embed OUTSIDE the write lock.
-                match self
-                    .add_fact(
-                        &AddFactRequest {
-                            content: action.fact_content.clone(),
-                            fact_type: action.fact_type,
-                            source_event_id: None,
-                            scope: req.scope_path.clone(),
-                            opts: Some(AddFactOptions {
-                                base_importance: Some(action.importance),
-                                ..Default::default()
-                            }),
-                        },
-                        emb,
-                        None, // no persistence classifier
-                    )
-                    .await
-                {
-                    Ok(fact_id) => {
-                        promoted_fact_id = Some(fact_id);
-                        // Update activity status to promoted.
-                        self.storage
-                            .update_activity_status(
-                                activity_id,
-                                ActivityStatus::Promoted,
-                                Some(fact_id),
-                            )
-                            .await?;
-                        ActivityStatus::Promoted
-                    }
-                    Err(e) => {
-                        // Promotion failed (e.g., embedding error). Record as
-                        // normal, but surface the failure so it is not silent.
-                        tracing::warn!(
-                            activity_id,
-                            error = %e,
-                            "activity promotion to fact failed; recording without promotion"
-                        );
-                        ActivityStatus::Recorded
-                    }
-                }
-            } else {
-                // No embedder — skip promotion, record as normal.
-                ActivityStatus::Recorded
-            }
+            self.promote_activity(activity_id, action, req, embedder)
+                .await?
         } else {
-            ActivityStatus::Recorded
+            (ActivityStatus::Recorded, None)
         };
 
         Ok(RecordActivityResult {
@@ -157,11 +134,63 @@ impl MemoryEngine {
         })
     }
 
+    /// Promote a newly recorded activity to a fact, best-effort: a failure records it as is.
+    async fn promote_activity(
+        &self,
+        activity_id: i64,
+        action: &PromoteAction,
+        req: &RecordActivityRequest,
+        embedder: Option<Arc<dyn EmbeddingProvider>>,
+    ) -> Result<(ActivityStatus, Option<i64>)> {
+        // A promotion is a derivation, so a forget's tombstone keeps its content out
+        // (#1023). `add_fact` is the ungated assertion path, so the check is here; it
+        // reads outside the write, and `record_activity` has no server or CLI caller.
+        if self.storage.is_forgotten(&action.fact_content).await? {
+            return Ok((ActivityStatus::Recorded, None));
+        }
+        // No embedder: skip promotion, record as normal.
+        let Some(emb) = embedder else {
+            return Ok((ActivityStatus::Recorded, None));
+        };
+        // Embed OUTSIDE the write lock.
+        let request = AddFactRequest {
+            content: action.fact_content.clone(),
+            fact_type: action.fact_type,
+            source_event_id: None,
+            scope: req.scope_path.clone(),
+            opts: Some(AddFactOptions {
+                base_importance: Some(action.importance),
+                ..Default::default()
+            }),
+        };
+        match self.add_fact(&request, emb, None).await {
+            Ok(fact_id) => {
+                self.storage
+                    .update_activity_status(activity_id, ActivityStatus::Promoted, Some(fact_id))
+                    .await?;
+                Ok((ActivityStatus::Promoted, Some(fact_id)))
+            }
+            Err(e) => {
+                // Promotion failed (e.g., embedding error). Record as
+                // normal, but surface the failure so it is not silent.
+                tracing::warn!(
+                    activity_id,
+                    error = %e,
+                    "activity promotion to fact failed; recording without promotion"
+                );
+                Ok((ActivityStatus::Recorded, None))
+            }
+        }
+    }
+
     // --- Public API: Session lifecycle ---
 
     /// Checkpoint a session (last-write-wins upsert).
     ///
     /// Called by the Stop hook when a session ends or pauses.
+    ///
+    /// Redaction (#1024): `summary` and `metadata` are scrubbed and kept whole (no cut); a text
+    /// that does not settle is refused with `Conflict(Redaction)`.
     ///
     /// # Errors
     ///
@@ -175,6 +204,22 @@ impl MemoryEngine {
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
         self.ensure_writable()?; // #972: fail fast before the activity read + the checkpoint write
+        // #1024: redact what is kept in full, after the raw size checks and before the write.
+        let mut found = 0;
+        let summary = match summary {
+            Some(text) => {
+                check_str_size(text, "checkpoint summary")?;
+                let (clean, n) = crate::redact::scrub_with(text, &[])?;
+                check_str_size(&clean, "checkpoint summary")?;
+                found += n;
+                Some(clean)
+            }
+            None => None,
+        };
+        let mut metadata = metadata.unwrap_or_else(|| serde_json::json!({}));
+        check_json_size(&metadata, "checkpoint metadata")?;
+        found += crate::redact::scrub_json(&mut metadata, &[])?;
+        check_json_size(&metadata, "checkpoint metadata")?;
         // Find last activity_id for this session. `list_activities_by_session`
         // orders by `last_seen DESC`, so the first row of a 1-row page is the
         // most-recent activity — same row the old raw SQL `ORDER BY last_seen
@@ -189,12 +234,14 @@ impl MemoryEngine {
         let checkpoint = SessionCheckpoint {
             session_id: session_id.to_string(),
             scope_path: scope_path.map(String::from),
-            summary: summary.map(String::from),
+            summary,
             last_activity_id,
             checkpoint_at: Utc::now(),
-            metadata: metadata.unwrap_or_else(|| serde_json::json!({})),
+            metadata,
         };
-        self.storage.upsert_checkpoint(&checkpoint).await
+        self.storage.upsert_checkpoint(&checkpoint).await?;
+        self.tally(found, 0).await;
+        Ok(())
     }
 
     /// Load project context for session bootstrap.
@@ -239,16 +286,4 @@ impl MemoryEngine {
             relevant_facts,
         })
     }
-}
-
-/// Truncate a string to at most `max_len` characters, respecting UTF-8 boundaries.
-fn truncate(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        return s;
-    }
-    let mut end = max_len;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }

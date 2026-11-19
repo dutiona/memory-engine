@@ -11,17 +11,28 @@ impl MemoryEngine {
 
     /// Append an event to the event log. Returns the assigned event id.
     ///
+    /// Redaction (#1024): the payload is scrubbed, but for a genuine capture context under
+    /// `redact::PROVENANCE_KEY`, which gets the machine-token rule only; a payload that does not
+    /// settle is refused with `Conflict(Redaction)`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Storage` on insert failure.
     pub async fn ingest(&self, event: &NewEvent) -> Result<i64> {
-        me_ingest::ingest(self.mem_ctx(), event).await
+        let (event, found) = self.scrubbed_event(event)?;
+        let id = me_ingest::ingest(self.mem_ctx(), &event).await?;
+        self.tally(found, 0).await;
+        Ok(id)
     }
 
     /// Append an event under the scope `path`, creating the path in the event's own
     /// transaction: a failed append leaves no new scope node. `event.scope_id` is replaced
     /// by the path's leaf. Returns the assigned event id.
+    ///
+    /// Redaction (#1024): the payload is scrubbed, but for a genuine capture context under
+    /// `redact::PROVENANCE_KEY`, which gets the machine-token rule only; a payload that does not
+    /// settle is refused with `Conflict(Redaction)`.
     ///
     /// # Errors
     ///
@@ -51,13 +62,19 @@ impl MemoryEngine {
     /// # });
     /// ```
     pub async fn ingest_at(&self, path: &str, event: &NewEvent) -> Result<i64> {
-        me_ingest::ingest_at(self.mem_ctx(), &self.scope_tree, path, event).await
+        let (event, found) = self.scrubbed_event(event)?;
+        let id = me_ingest::ingest_at(self.mem_ctx(), &self.scope_tree, path, &event).await?;
+        self.tally(found, 0).await;
+        Ok(id)
     }
 
     /// Move fact `id` from scope `from` to the scope path `to` and append `record` under
     /// the scope path `record_at`, in one transaction that creates both paths. Only a
     /// live fact (not expired, valid now) still at `from` moves, so of two concurrent
     /// moves the second answers `NotFound`. Returns the record's id.
+    ///
+    /// Redaction (#1024): the move's record payload is scrubbed as [`ingest`](Self::ingest) scrubs
+    /// one.
     ///
     /// # Errors
     ///
@@ -97,16 +114,19 @@ impl MemoryEngine {
         record_at: &str,
         record: &NewEvent,
     ) -> Result<i64> {
-        me_ingest::move_fact(
+        let (record, found) = self.scrubbed_event(record)?;
+        let written = me_ingest::move_fact(
             self.mem_ctx(),
             &self.scope_tree,
             id,
             from,
             to,
             record_at,
-            record,
+            &record,
         )
-        .await
+        .await?;
+        self.tally(found, 0).await;
+        Ok(written)
     }
 
     /// Add a fact: compute embedding via `embedder`, compute blake3 content hash,
@@ -114,6 +134,9 @@ impl MemoryEngine {
     ///
     /// Embedding is computed **before** acquiring the write lock, so slow
     /// embedding calls (network API) don't block readers.
+    ///
+    /// Redaction (#1024): `content` and `metadata` are scrubbed before the classifier, the embedder
+    /// or the store sees them; a text that does not settle is refused with `Conflict(Redaction)`.
     ///
     /// # Errors
     ///
@@ -128,7 +151,11 @@ impl MemoryEngine {
         embedder: Arc<dyn EmbeddingProvider>,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<i64> {
-        me_ingest::add_fact(self.mem_ctx(), &self.scope_tree, req, embedder, classifier).await
+        let (req, found) = self.scrubbed_request(req)?;
+        let id = me_ingest::add_fact(self.mem_ctx(), &self.scope_tree, &req, embedder, classifier)
+            .await?;
+        self.tally(found, 0).await;
+        Ok(id)
     }
 
     /// Add a fact with a caller-supplied **pre-computed** embedding.
@@ -143,6 +170,10 @@ impl MemoryEngine {
     /// hole the old `PassthroughEmbedder` sentinel left open — the caller can no longer
     /// slip a vector from a different model into the store's vector space unchecked.
     ///
+    /// Redaction (#1024): `embedding` was computed from `content`, so a content that redaction
+    /// would change is refused with `Conflict(Redaction)` and nothing is stored; clean content is
+    /// stored as given, with its `metadata` scrubbed.
+    ///
     /// # Errors
     ///
     /// Returns [`MemoryError::EmbeddingModelMismatch`] if `declared` disagrees with the
@@ -155,15 +186,23 @@ impl MemoryEngine {
         declared: &EmbeddingFingerprint,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<i64> {
-        me_ingest::add_fact_precomputed(
+        // #1024: the caller computed `embedding` from `req.content`, so that text must already
+        // be clean; the metadata, which is not embedded, is scrubbed.
+        let (scrubbed, found) = self.scrubbed_request(req)?;
+        if scrubbed.content != req.content {
+            crate::redact::require_clean(&req.content)?;
+        }
+        let id = me_ingest::add_fact_precomputed(
             self.mem_ctx(),
             &self.scope_tree,
-            req,
+            &scrubbed,
             embedding,
             declared,
             classifier,
         )
-        .await
+        .await?;
+        self.tally(found, 0).await;
+        Ok(id)
     }
 
     /// Add a fact now and queue its vector (#1021): the write never waits on an embedder.
@@ -175,6 +214,10 @@ impl MemoryEngine {
     /// [`add_fact`](Self::add_fact)'s gates and validation, consults no classifier (the
     /// fact is pinned only when `opts.pinned` says so), and records no embedding
     /// identity: there is no vector yet.
+    ///
+    /// Redaction (#1024): `content` and `metadata` are scrubbed before the fact is stored and
+    /// queued, so the drain embeds the scrubbed text; a text that does not settle is refused with
+    /// `Conflict(Redaction)`.
     ///
     /// # Errors
     ///
@@ -208,8 +251,10 @@ impl MemoryEngine {
     /// # }).unwrap();
     /// ```
     pub async fn add_fact_deferred(&self, req: &AddFactRequest) -> Result<i64> {
-        let id = me_ingest::add_fact_deferred(self.mem_ctx(), &self.scope_tree, req).await?;
+        let (req, found) = self.scrubbed_request(req)?;
+        let id = me_ingest::add_fact_deferred(self.mem_ctx(), &self.scope_tree, &req).await?;
         self.embed_work.notify_one();
+        self.tally(found, 0).await;
         Ok(id)
     }
 
@@ -255,6 +300,9 @@ impl MemoryEngine {
     /// - Scope resolution inside savepoint for atomicity; `scope_tree`
     ///   cache deferred to after `RELEASE` (two-phase commit).
     ///
+    /// Redaction (#1024): every request's `content` and `metadata` are scrubbed before anything is
+    /// embedded or stored; one that does not settle refuses the batch with `Conflict(Redaction)`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
@@ -272,14 +320,23 @@ impl MemoryEngine {
         embedder: Arc<dyn EmbeddingProvider>,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<Vec<i64>> {
-        me_ingest::add_facts_batch(
+        let mut scrubbed = Vec::with_capacity(entries.len());
+        let mut found = 0;
+        for entry in entries {
+            let (entry, n) = self.scrubbed_request(entry)?;
+            scrubbed.push(entry);
+            found += n;
+        }
+        let ids = me_ingest::add_facts_batch(
             self.mem_ctx(),
             &self.scope_tree,
-            entries,
+            &scrubbed,
             embedder,
             classifier,
         )
-        .await
+        .await?;
+        self.tally(found, 0).await;
+        Ok(ids)
     }
 
     /// Partial-success variant of [`add_facts_batch`](Self::add_facts_batch):
@@ -292,6 +349,10 @@ impl MemoryEngine {
     /// forget's tombstone blocks its content (`Conflict(Forgotten)`, #1023). The
     /// **valid** partition is embedded and inserted in one atomic batch, so the
     /// invalid records are simply skipped rather than failing their neighbours.
+    ///
+    /// Redaction (#1024): every request's `content` and `metadata` are scrubbed before anything is
+    /// embedded or stored; one that does not settle fails at its own position with
+    /// `Conflict(Redaction)`.
     ///
     /// # Errors
     ///
@@ -310,14 +371,45 @@ impl MemoryEngine {
         embedder: Arc<dyn EmbeddingProvider>,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<Vec<std::result::Result<i64, MemoryError>>> {
-        me_ingest::add_facts_batch_partial(
+        self.ensure_open()?;
+        self.ensure_writable()?;
+        // A record whose redaction fails, or that is oversized, fails alone, like any other
+        // per-record rejection; the others go to me-ingest in their order.
+        let prepared: Vec<Result<(AddFactRequest, u64)>> =
+            entries.iter().map(|e| self.scrubbed_request(e)).collect();
+        let valid: Vec<AddFactRequest> = prepared
+            .iter()
+            .filter_map(|p| p.as_ref().ok().map(|(req, _)| req.clone()))
+            .collect();
+        let mut stored = me_ingest::add_facts_batch_partial(
             self.mem_ctx(),
             &self.scope_tree,
-            entries,
+            &valid,
             embedder,
             classifier,
         )
-        .await
+        .await?
+        .into_iter();
+        let mut found = 0;
+        let mut results = Vec::with_capacity(entries.len());
+        for p in prepared {
+            results.push(match p {
+                Err(e) => Err(e),
+                Ok((_, n)) => {
+                    let result = stored.next().ok_or_else(|| {
+                        MemoryError::Internal(
+                            "me-ingest returned fewer results than records".into(),
+                        )
+                    })?;
+                    if result.is_ok() {
+                        found += n;
+                    }
+                    result
+                }
+            });
+        }
+        self.tally(found, 0).await;
+        Ok(results)
     }
 }
 

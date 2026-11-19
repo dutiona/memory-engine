@@ -17,10 +17,12 @@ use crate::storage::sqlite::SqliteBackend;
 // helper as `memory_engine::storage::spawn_join_err`. See the note in `storage/mod.rs`.
 use me_storage::spawn_join_err;
 
+use crate::limits::{check_json_size, check_str_size};
+use crate::redact;
 use crate::storage::{MemoryCtx, StorageBackend};
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::{EmbeddingProvider, Reranker};
-use crate::types::{ConsolidationLevel, EmbeddingFingerprint, Fact};
+use crate::types::{AddFactRequest, ConsolidationLevel, EmbeddingFingerprint, Fact, NewEvent};
 // `MatchType`/`SearchResult` are no longer used by this module's own (moved-to-
 // `me-query`) production code, but `engine/tests.rs`'s `use super::*;` still needs
 // them in scope — cfg(test)-gated to avoid an unused-import warning in the plain
@@ -46,6 +48,7 @@ mod lineage;
 mod outcome;
 mod query;
 mod reconstruct;
+pub(crate) mod redaction_counts;
 mod restore;
 mod resume;
 mod retraction;
@@ -717,6 +720,48 @@ impl MemoryEngine {
             return Err(MemoryError::ReadOnly);
         }
         Ok(())
+    }
+
+    /// The write gate of #1024, for a fact request: open and writable first (so `ReadOnly`
+    /// wins, #972), then the raw size checks (so no oversized text is ever scanned), then the
+    /// scrubbed copy and how many secrets it lost. me-ingest re-checks the scrubbed size.
+    fn scrubbed_request(&self, req: &AddFactRequest) -> Result<(AddFactRequest, u64)> {
+        self.ensure_open()?;
+        self.ensure_writable()?;
+        check_str_size(&req.content, "fact content")?;
+        if let Some(metadata) = req.opts.as_ref().and_then(|o| o.metadata.as_ref()) {
+            check_json_size(metadata, "fact metadata")?;
+        }
+        let mut req = req.clone();
+        let (content, mut found) = redact::scrub_with(&req.content, &[])?;
+        req.content = content;
+        if let Some(metadata) = req.opts.as_mut().and_then(|o| o.metadata.as_mut()) {
+            found += redact::scrub_json(metadata, &[])?;
+        }
+        Ok((req, found))
+    }
+
+    /// The write gate of #1024, for an event or a call record: as [`Self::scrubbed_request`],
+    /// with the payload scrubbed by [`redact::scrub_payload`] and its scrubbed size re-checked.
+    fn scrubbed_event(&self, event: &NewEvent) -> Result<(NewEvent, u64)> {
+        self.ensure_open()?;
+        self.ensure_writable()?;
+        check_json_size(&event.payload, "event payload")?;
+        let mut event = event.clone();
+        let found = redact::scrub_payload(&mut event.payload)?;
+        check_json_size(&event.payload, "event payload")?;
+        Ok((event, found))
+    }
+
+    /// Raise the store's redaction totals once a write has committed (#1024). The write
+    /// stands whatever happens here, so a failure is logged, never returned.
+    async fn tally(&self, redacted: u64, stubbed: u64) {
+        if redacted == 0 && stubbed == 0 {
+            return;
+        }
+        if let Err(e) = self.storage.add_redaction_counts(redacted, stubbed).await {
+            tracing::warn!(error = %e, redacted, stubbed, "could not raise the redaction totals");
+        }
     }
 
     /// Test-only: arm the reconstruction dimension fence directly, so the read-safety

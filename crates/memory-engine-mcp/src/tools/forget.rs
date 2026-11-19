@@ -54,9 +54,14 @@ pub async fn run(ctx: &CallContext<'_>, call: &str, args: Value) -> Result<Strin
     detail.insert("fact_ids".to_owned(), json!([id]));
     let record = super::call_record(ctx, call, "forget", detail);
     let bucket = ctx.bucket().path(ctx.user);
+    // The tombstone keeps ADR-0020 §6's excerpt: redacted, then cut.
+    let reason = match memory_engine::redact::excerpt(&reason) {
+        Ok(reason) => reason,
+        Err(e) => return refuse(e.to_string()).await,
+    };
     match ctx
         .engine
-        .forget_fact(id, &homes, super::capture_cut(&reason), &bucket, &record)
+        .forget_fact(id, &homes, &reason, &bucket, &record)
         .await
     {
         Ok((ForgetOutcome::Forgotten, _)) => Ok("forgotten".to_owned()),

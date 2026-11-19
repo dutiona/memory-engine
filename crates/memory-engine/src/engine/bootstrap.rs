@@ -197,6 +197,13 @@ impl MemoryEngine {
             }
         }
         report.sessions_processed = 1;
+        // #1024 (decision 6): the store total takes bootstrap's audited count, which also
+        // holds turns scrubbed before extraction.
+        self.tally(
+            u64::try_from(report.secrets_redacted).unwrap_or(u64::MAX),
+            0,
+        )
+        .await;
         Ok(report)
     }
 
@@ -212,6 +219,10 @@ impl MemoryEngine {
     ///
     /// For LLM-powered extraction, provide a custom [`SessionExtractor`].
     /// The default [`KeywordExtractor`](crate::bootstrap::KeywordExtractor) requires no LLM.
+    ///
+    /// Redaction (#1024): every turn is scrubbed (with the configured denylist) before extraction,
+    /// and every fact again before it is embedded or stored; the run's `secrets_redacted` is added
+    /// to the store's redaction total.
     ///
     /// # Errors
     ///
@@ -246,6 +257,8 @@ impl MemoryEngine {
     /// Each session is processed independently within its own savepoint; an
     /// unreadable file or a per-session failure is logged and skipped (not fatal),
     /// and reports are aggregated.
+    ///
+    /// Redaction (#1024): as [`bootstrap_session`](Self::bootstrap_session), per session file.
     ///
     /// # Errors
     ///
@@ -437,6 +450,10 @@ impl MemoryEngine {
                     } else {
                         report.facts_created += 1;
                         report.secrets_redacted += redactions;
+                        // Each file commits on its own, so it counts now: a later file's
+                        // failure must not drop it (#1024, decision 6).
+                        self.tally(u64::try_from(redactions).unwrap_or(u64::MAX), 0)
+                            .await;
                         match fact_type {
                             FactType::Episodic => report.prewarm_metrics.episodic_count += 1,
                             FactType::Semantic => report.prewarm_metrics.semantic_count += 1,

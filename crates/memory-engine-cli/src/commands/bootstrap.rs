@@ -217,7 +217,6 @@ pub async fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyho
         scope: args.scope.clone(),
         max_turns: args.max_turns,
         skip_existing: !args.reprocess,
-        redact: true, // no bypass in normal CLI operation (#51)
         denylist,
         // #293 hostile-input caps (max_session_bytes / max_entries): no CLI flag
         // exposes them, so inherit the library defaults. This is what wires the

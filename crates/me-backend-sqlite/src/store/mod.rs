@@ -15,6 +15,7 @@ pub mod events;
 pub mod fact_vectors;
 pub mod facts;
 pub mod lineage;
+pub mod redaction;
 pub mod schema;
 pub mod scopes;
 pub mod summaries;

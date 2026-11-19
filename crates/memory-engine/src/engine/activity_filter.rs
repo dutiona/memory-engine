@@ -142,7 +142,7 @@ pub fn apply_filter(
     ActivityFilterDecision::Record
 }
 
-fn format_promote_content(tool_name: &str, result: Option<&str>) -> String {
+pub fn format_promote_content(tool_name: &str, result: Option<&str>) -> String {
     match result {
         Some(r) if !r.is_empty() => {
             let truncated = if r.len() > 200 {

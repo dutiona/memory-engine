@@ -52,6 +52,8 @@ async fn record_activity_stores_and_deduplicates() {
         timestamp: Utc::now(),
         scope_path: None,
         outcome_class: None,
+        touched_paths: vec![],
+        cwd: None,
     };
 
     let r1 = engine.record_activity(&req, None, &config).await.unwrap();
@@ -79,6 +81,8 @@ async fn record_activity_ignore_drops_silently() {
         timestamp: Utc::now(),
         scope_path: None,
         outcome_class: None,
+        touched_paths: vec![],
+        cwd: None,
     };
 
     let result = engine.record_activity(&req, None, &config).await.unwrap();
@@ -100,6 +104,8 @@ async fn record_activity_promotes_to_fact() {
         timestamp: Utc::now(),
         scope_path: None,
         outcome_class: None,
+        touched_paths: vec![],
+        cwd: None,
     };
 
     let result = engine
@@ -141,6 +147,8 @@ async fn record_activity_promote_failure_falls_back_to_recorded() {
         timestamp: Utc::now(),
         scope_path: None,
         outcome_class: None,
+        touched_paths: vec![],
+        cwd: None,
     };
 
     let result = engine
@@ -186,6 +194,8 @@ async fn checkpoint_and_load_context_cycle() {
             timestamp: Utc::now(),
             scope_path: Some("project:test".into()),
             outcome_class: None,
+            touched_paths: vec![],
+            cwd: None,
         };
         engine.record_activity(&req, None, &config).await.unwrap();
     }
@@ -237,6 +247,8 @@ async fn a_forgotten_activity_promotion_is_recorded_not_promoted() {
         timestamp: Utc::now(),
         scope_path: None,
         outcome_class: None,
+        touched_paths: vec![],
+        cwd: None,
     };
     let first = engine
         .record_activity(&req("sess-1"), embedder(), &config)
@@ -265,4 +277,505 @@ async fn a_forgotten_activity_promotion_is_recorded_not_promoted() {
     assert_eq!(again.status, ActivityStatus::Recorded);
     assert_eq!(again.promoted_fact_id, None);
     assert_eq!(engine.list_active_facts(None).await.unwrap().len(), 0);
+}
+
+// ── The capture contract (#1024, ADR-0020 §6) ─────────────────────────────────
+
+mod capture {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use memory_engine::types::OutcomeClass;
+    use memory_engine::{
+        ActivityFilterConfig, ActivityStatus, MemoryEngine, RecordActivityRequest,
+    };
+    use serde_json::{Value, json};
+
+    use super::{DIM, ZeroEmbedder};
+
+    const SCOPE: &str = "project:test";
+    const DOTENV: &str = ".env";
+
+    fn aws() -> String {
+        format!("AKIA{}", "IOSFODNN7EXAMPLE")
+    }
+
+    fn ghp() -> String {
+        format!("ghp_{}", "0123456789abcdefghij".repeat(2))
+    }
+
+    fn request(tool: &str, args: Value, result: Option<String>) -> RecordActivityRequest {
+        RecordActivityRequest {
+            tool_name: tool.into(),
+            args,
+            result,
+            session_id: "s1".into(),
+            timestamp: Utc::now(),
+            scope_path: Some(SCOPE.into()),
+            outcome_class: None,
+            touched_paths: vec![],
+            cwd: None,
+        }
+    }
+
+    fn embedder() -> Arc<dyn memory_engine::EmbeddingProvider> {
+        Arc::new(ZeroEmbedder(DIM))
+    }
+
+    struct Store {
+        dir: tempfile::TempDir,
+        db: std::path::PathBuf,
+        engine: MemoryEngine,
+    }
+
+    fn store() -> Store {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        let engine = MemoryEngine::builder(DIM).path(&db).build().unwrap();
+        Store { dir, db, engine }
+    }
+
+    async fn activities(engine: &MemoryEngine) -> Vec<memory_engine::types::Activity> {
+        let mut rows = engine
+            .load_context(SCOPE, 50, 0)
+            .await
+            .unwrap()
+            .recent_activities;
+        rows.sort_by_key(|a| a.id);
+        rows
+    }
+
+    async fn counts(store: Store) -> (u64, u64) {
+        let Store {
+            dir,
+            db,
+            mut engine,
+        } = store;
+        engine.close().await.unwrap();
+        let counts = memory_engine::read_redaction_counts(&db).unwrap();
+        drop(dir);
+        (counts.redacted, counts.stubbed)
+    }
+
+    /// No 8-byte window of `secret` appears in `text`.
+    fn holds_no_fragment(text: &str, secret: &str) -> bool {
+        secret
+            .as_bytes()
+            .windows(8)
+            .all(|w| !text.as_bytes().windows(8).any(|t| t == w))
+    }
+
+    #[tokio::test]
+    async fn a_sensitive_path_stubs_the_activity() {
+        let s = store();
+        let promote = ActivityFilterConfig::new(300, [] as [&str; 0], ["read"]);
+        let mut req = request(
+            "Read",
+            json!({ "file_path": DOTENV, "note": aws() }),
+            Some(format!("TOKEN={}", ghp())),
+        );
+        req.touched_paths = vec![DOTENV.into()];
+        req.outcome_class = Some(OutcomeClass::Other(format!("odd {}", aws())));
+        let result = s
+            .engine
+            .record_activity(&req, Some(embedder()), &promote)
+            .await
+            .unwrap();
+        assert_eq!(
+            (result.status, result.promoted_fact_id),
+            (ActivityStatus::Recorded, None)
+        );
+        // A relative token is also judged joined with the call's working directory, and the
+        // stub keeps the token as spelled.
+        let mut relative = request(
+            "Bash",
+            json!({ "command": "cat config" }),
+            Some("apiVersion: v1".into()),
+        );
+        relative.touched_paths = vec!["config".into()];
+        relative.cwd = Some("/home/u/.kube".into());
+        s.engine
+            .record_activity(&relative, None, &promote)
+            .await
+            .unwrap();
+        // A stub's token holding a secret keeps the placeholder.
+        let canary = format!("/srv/{} dir/{DOTENV}", aws());
+        let mut held = request("Read", json!({ "file_path": canary }), None);
+        held.touched_paths = vec![canary];
+        held.outcome_class = Some(OutcomeClass::Other("plain".into()));
+        s.engine
+            .record_activity(&held, None, &promote)
+            .await
+            .unwrap();
+        let rows = activities(&s.engine).await;
+        assert_eq!(rows[0].args, json!({ "sensitive_path": DOTENV }));
+        assert_eq!(rows[0].result_summary, None);
+        assert_eq!(
+            rows[0].outcome_class,
+            OutcomeClass::Other("odd [REDACTED:aws-access-key]".into())
+        );
+        assert_eq!(rows[1].args, json!({ "sensitive_path": "config" }));
+        assert_eq!(
+            rows[2].args,
+            json!({ "sensitive_path": format!("/srv/[REDACTED:aws-access-key] dir/{DOTENV}") })
+        );
+        assert!(
+            s.engine.list_active_facts(None).await.unwrap().is_empty(),
+            "a stub is never promoted"
+        );
+        assert_eq!(counts(s).await, (2, 3));
+    }
+
+    #[tokio::test]
+    async fn a_template_path_is_not_stubbed() {
+        let s = store();
+        let template = format!("{DOTENV}.example");
+        let mut req = request(
+            "Read",
+            json!({ "file_path": template, "note": aws() }),
+            None,
+        );
+        req.touched_paths = vec![template.clone()];
+        s.engine
+            .record_activity(&req, None, &ActivityFilterConfig::default())
+            .await
+            .unwrap();
+        let rows = activities(&s.engine).await;
+        assert_eq!(
+            rows[0].args,
+            json!({ "file_path": template, "note": "[REDACTED:aws-access-key]" })
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_input_and_result_are_cut_after_redaction() {
+        let s = store();
+        // A token straddles byte 512 after a space, with a quote, a backslash and a multibyte
+        // character just before the cut: the excerpt holds no 8-byte fragment of it.
+        let lead = format!("{}\"é\\ ", "x".repeat(498));
+        let token = ghp();
+        let long = format!("{lead}{token} {}", "y".repeat(1500));
+        let req = request("Write", json!({ "content": long }), Some(long.clone()));
+        s.engine
+            .record_activity(&req, None, &ActivityFilterConfig::default())
+            .await
+            .unwrap();
+        let small = request(
+            "Read",
+            json!({ "file_path": "src/lib.rs" }),
+            Some("ok".into()),
+        );
+        s.engine
+            .record_activity(&small, None, &ActivityFilterConfig::default())
+            .await
+            .unwrap();
+        let rows = activities(&s.engine).await;
+        let result = rows[0].result_summary.clone().unwrap();
+        assert!(
+            result.len() <= 512 && holds_no_fragment(&result, &token),
+            "{result}"
+        );
+        let Value::String(args) = &rows[0].args else {
+            panic!("a long input is a string: {:?}", rows[0].args)
+        };
+        assert!(
+            args.len() <= 512 && holds_no_fragment(args, &token),
+            "{args}"
+        );
+        assert_eq!(
+            rows[1].args,
+            json!({ "file_path": "src/lib.rs" }),
+            "a short input stays JSON"
+        );
+    }
+
+    #[tokio::test]
+    async fn deduplication_keys_on_the_scrubbed_input() {
+        let s = store();
+        let config = ActivityFilterConfig::default();
+        let call = |secret: String, result: &str| {
+            request(
+                "Bash",
+                json!({ "command": format!("export K={secret}") }),
+                Some(result.into()),
+            )
+        };
+        let first = s
+            .engine
+            .record_activity(&call(aws(), "ok"), None, &config)
+            .await
+            .unwrap();
+        let other_key = format!("AKIA{}", "ABCDEFGHIJKLMNOP");
+        let second = s
+            .engine
+            .record_activity(&call(other_key, &format!("now {}", ghp())), None, &config)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.activity_id, first.activity_id,
+            "calls that differ only by a secret deduplicate"
+        );
+        assert_eq!(
+            activities(&s.engine).await[0].result_summary.as_deref(),
+            Some("now [REDACTED:github-pat]")
+        );
+        // Two long inputs that share their first 512 bytes stay two rows.
+        let shared = "z".repeat(600);
+        let long_a = s
+            .engine
+            .record_activity(
+                &request("Write", json!({ "c": format!("{shared}A") }), None),
+                None,
+                &config,
+            )
+            .await
+            .unwrap();
+        let long_b = s
+            .engine
+            .record_activity(
+                &request("Write", json!({ "c": format!("{shared}B") }), None),
+                None,
+                &config,
+            )
+            .await
+            .unwrap();
+        assert_ne!(long_a.activity_id, long_b.activity_id);
+        // An ordinary call whose input equals a stub's never merges with it, in either order.
+        let mut stub = request("Read", json!({ "file_path": DOTENV }), None);
+        stub.touched_paths = vec![DOTENV.into()];
+        let lookalike = request("Read", json!({ "sensitive_path": DOTENV }), None);
+        let stub_first = s
+            .engine
+            .record_activity(&stub, None, &config)
+            .await
+            .unwrap();
+        let lookalike_row = s
+            .engine
+            .record_activity(&lookalike, None, &config)
+            .await
+            .unwrap();
+        let stub_again = s
+            .engine
+            .record_activity(&stub, None, &config)
+            .await
+            .unwrap();
+        assert_ne!(stub_first.activity_id, lookalike_row.activity_id);
+        assert_eq!(stub_first.activity_id, stub_again.activity_id);
+        // 1 secret in the first input, 1 in the rewritten result, 1 stub; the second input's
+        // secret only matched the row.
+        assert_eq!(counts(s).await, (2, 1));
+    }
+
+    #[tokio::test]
+    async fn a_promotion_is_built_from_the_redacted_result() {
+        let s = store();
+        let promote = ActivityFilterConfig::new(300, [] as [&str; 0], ["commit"]);
+        let token = ghp();
+        let result = format!("{} {token} done", "c".repeat(190));
+        let r = s
+            .engine
+            .record_activity(
+                &request("git_commit", json!({ "m": "x" }), Some(result)),
+                Some(embedder()),
+                &promote,
+            )
+            .await
+            .unwrap();
+        let fact = s
+            .engine
+            .get_fact(r.promoted_fact_id.unwrap())
+            .await
+            .unwrap();
+        assert!(holds_no_fragment(&fact.content, &token), "{}", fact.content);
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_promotion_with_a_secret_stays_forgotten() {
+        let s = store();
+        let promote = ActivityFilterConfig::new(0, [] as [&str; 0], ["commit"]);
+        let call = |session: &str| RecordActivityRequest {
+            session_id: session.into(),
+            scope_path: None,
+            ..request(
+                "git_commit",
+                json!({ "m": "x" }),
+                Some(format!("pushed {}", ghp())),
+            )
+        };
+        let first = s
+            .engine
+            .record_activity(&call("s1"), Some(embedder()), &promote)
+            .await
+            .unwrap();
+        let record = memory_engine::types::NewEvent {
+            timestamp: Utc::now(),
+            event_type: memory_engine::types::EventType::MemoryOp,
+            payload: json!({}),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "test".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        let outcome = s
+            .engine
+            .forget_fact(
+                first.promoted_fact_id.unwrap(),
+                &["/".into()],
+                "wrong",
+                "unscoped:test",
+                &record,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.0, memory_engine::types::ForgetOutcome::Forgotten);
+        let again = s
+            .engine
+            .record_activity(&call("s2"), Some(embedder()), &promote)
+            .await
+            .unwrap();
+        assert_eq!(
+            (again.status, again.promoted_fact_id),
+            (ActivityStatus::Recorded, None)
+        );
+    }
+
+    /// The promotion's 200-byte cut can expose a match its result did not hold; the tombstone
+    /// check reads the text `add_fact` stores, so a forgotten promotion stays forgotten.
+    #[tokio::test]
+    async fn a_forgotten_promotion_cut_into_a_match_stays_forgotten() {
+        let s = store();
+        let promote = ActivityFilterConfig::new(0, [] as [&str; 0], ["commit"]);
+        let result = format!(
+            "{} {}{}",
+            "x".repeat(177),
+            "Ab3dE5fG7hI9jK1lM2nO",
+            "a".repeat(300)
+        );
+        let call = |session: &str| RecordActivityRequest {
+            session_id: session.into(),
+            scope_path: None,
+            ..request("git_commit", json!({ "m": "x" }), Some(result.clone()))
+        };
+        let first = s
+            .engine
+            .record_activity(&call("s1"), Some(embedder()), &promote)
+            .await
+            .unwrap();
+        let id = first.promoted_fact_id.unwrap();
+        let record = memory_engine::types::NewEvent {
+            timestamp: Utc::now(),
+            event_type: memory_engine::types::EventType::MemoryOp,
+            payload: json!({}),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "test".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        let (outcome, _) = s
+            .engine
+            .forget_fact(id, &["/".into()], "wrong", "unscoped:test", &record)
+            .await
+            .unwrap();
+        assert_eq!(outcome, memory_engine::types::ForgetOutcome::Forgotten);
+        let again = s
+            .engine
+            .record_activity(&call("s2"), Some(embedder()), &promote)
+            .await
+            .unwrap();
+        assert_eq!(
+            (again.status, again.promoted_fact_id),
+            (ActivityStatus::Recorded, None)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_input_or_result_is_omitted_not_refused() {
+        let s = store();
+        let promote = ActivityFilterConfig::new(300, [] as [&str; 0], ["write"]);
+        let huge = "w".repeat(2 * 1024 * 1024);
+        let at = Utc::now();
+        let call = || RecordActivityRequest {
+            timestamp: at,
+            ..request("Write", json!({ "content": huge }), Some(huge.clone()))
+        };
+        let first = s
+            .engine
+            .record_activity(&call(), Some(embedder()), &promote)
+            .await
+            .unwrap();
+        assert_eq!(
+            (first.status, first.promoted_fact_id),
+            (ActivityStatus::Recorded, None)
+        );
+        let twin = s
+            .engine
+            .record_activity(&call(), None, &promote)
+            .await
+            .unwrap();
+        assert_ne!(
+            twin.activity_id, first.activity_id,
+            "identical args and timestamps"
+        );
+        let Store {
+            dir,
+            db,
+            mut engine,
+        } = s;
+        engine.close().await.unwrap();
+        let engine = MemoryEngine::builder(DIM).path(&db).build().unwrap();
+        let again = engine
+            .record_activity(&call(), None, &promote)
+            .await
+            .unwrap();
+        assert_ne!(
+            again.activity_id, first.activity_id,
+            "an omitted input never deduplicates, a replay after a restart included"
+        );
+        let literal = request("Write", json!("[omitted: over 1 MiB]"), None);
+        let third = engine
+            .record_activity(&literal, None, &promote)
+            .await
+            .unwrap();
+        assert_ne!(third.activity_id, again.activity_id);
+        let rows = activities(&engine).await;
+        assert_eq!(rows[0].args, json!("[omitted: over 1 MiB]"));
+        assert_eq!(
+            rows[0].result_summary.as_deref(),
+            Some("[omitted: 2097152 bytes]")
+        );
+        drop(dir);
+    }
+
+    /// An `Other` outcome is tool text like the result: redacted, then cut, and never scanned
+    /// over the write limit.
+    #[tokio::test]
+    async fn an_other_outcome_is_redacted_then_cut() {
+        let s = store();
+        let config = ActivityFilterConfig::default();
+        let token = ghp();
+        let long = format!("{} {token} {}", "o".repeat(497), "p".repeat(600));
+        let huge = "q".repeat(2 * 1024 * 1024);
+        for outcome in [long, huge] {
+            let mut req = request(
+                "Bash",
+                json!({ "command": outcome.len().to_string() }),
+                None,
+            );
+            req.outcome_class = Some(OutcomeClass::Other(outcome));
+            s.engine.record_activity(&req, None, &config).await.unwrap();
+        }
+        let rows = activities(&s.engine).await;
+        let OutcomeClass::Other(cut) = &rows[0].outcome_class else {
+            panic!("{:?}", rows[0].outcome_class)
+        };
+        assert!(cut.len() <= 512 && holds_no_fragment(cut, &token), "{cut}");
+        assert_eq!(
+            rows[1].outcome_class,
+            OutcomeClass::Other("[omitted: 2097152 bytes]".into())
+        );
+    }
 }

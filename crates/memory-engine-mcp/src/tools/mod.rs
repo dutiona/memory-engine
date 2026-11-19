@@ -162,7 +162,10 @@ fn call_record(
     payload.insert("call".to_owned(), call.into());
     payload.insert("tool".to_owned(), tool.into());
     payload.insert("machine".to_owned(), ctx.machine.as_str().into());
-    payload.insert("project".to_owned(), ctx.facts.provenance(ctx.key.as_ref()));
+    payload.insert(
+        memory_engine::redact::PROVENANCE_KEY.to_owned(),
+        ctx.facts.provenance(ctx.key.as_ref()),
+    );
     payload.extend(detail);
     NewEvent {
         timestamp: chrono::Utc::now(),
@@ -197,7 +200,8 @@ async fn record(
 }
 
 /// Record a call that failed before anything was stored, then answer its failure. The record
-/// keeps the message without the userinfo of any URL it quotes from a tool argument.
+/// keeps ADR-0020 §6's excerpt of the message, without the userinfo of any URL it quotes from
+/// a tool argument; a message that does not settle redaction records the refusal's own text.
 async fn refuse(
     ctx: &CallContext<'_>,
     call: &str,
@@ -205,22 +209,13 @@ async fn refuse(
     message: String,
 ) -> Result<String, String> {
     let mut detail = Map::new();
-    let recorded = crate::project::redact_userinfo(&message);
-    detail.insert("error".to_owned(), capture_cut(&recorded).into());
+    let recorded = memory_engine::redact::excerpt(&crate::project::redact_userinfo(&message))
+        .unwrap_or_else(|e| e.to_string());
+    detail.insert("error".to_owned(), recorded.into());
     match record(ctx, call, tool, detail, &ctx.bucket()).await {
         Ok(_) => Err(message),
         Err(e) => Err(format!("{message} ({e})")),
     }
-}
-
-/// ADR-0020 §6's capture cap, 512 bytes back to a character boundary: no client-supplied
-/// value can make a record outgrow the event payload limit.
-fn capture_cut(text: &str) -> &str {
-    let mut end = text.len().min(512);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 fn respond(call: &str, outcome: Result<String, String>) -> CallToolResult {
@@ -242,15 +237,6 @@ fn tool(name: &'static str, description: &'static str, schema: Value) -> Tool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_capture_cut_keeps_whole_characters() {
-        assert_eq!(capture_cut("short"), "short");
-        let long = "é".repeat(400); // 800 bytes
-        let cut = capture_cut(&long);
-        assert!(cut.len() <= 512 && cut.len() >= 511, "{}", cut.len());
-        assert!(cut.chars().all(|c| c == 'é'));
-    }
 
     #[test]
     fn a_call_line_is_call_and_sixteen_lowercase_hex_digits() {

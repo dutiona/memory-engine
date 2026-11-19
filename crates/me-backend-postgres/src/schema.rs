@@ -151,6 +151,14 @@ impl SchemaManager for PgBackend {
         .await
     }
 
+    async fn add_redaction_counts(&self, redacted: u64, stubbed: u64) -> Result<()> {
+        self.read_only_guard()?;
+        self.with_client(|client| async move {
+            migrations::add_redaction_counts(&client, redacted, stubbed).await
+        })
+        .await
+    }
+
     async fn write_engine_snapshot(
         &self,
         _graph: me_types::types::snapshot::GraphSnapshot,

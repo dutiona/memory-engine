@@ -139,6 +139,12 @@ impl SchemaManager for SqliteBackend {
             .await
     }
 
+    // WRITE
+    async fn add_redaction_counts(&self, redacted: u64, stubbed: u64) -> Result<()> {
+        self.block_write(move |c| crate::store::redaction::add(c, redacted, stubbed))
+            .await
+    }
+
     // -------------------------------------------------------------------------
     // Stage E snapshot seam — assemble the sidecar below the port.
     //

@@ -483,8 +483,8 @@ impl HttpEmbeddingProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let bytes = read_body_capped(resp).unwrap_or_default();
-            let body = truncate_on_char_boundary(&String::from_utf8_lossy(&bytes), 1000);
+            let bytes = read_body_capped(resp, "embedding response").unwrap_or_default();
+            let body = body_diagnostic(&String::from_utf8_lossy(&bytes));
             let message = format!("embedding endpoint returned {status}: {body}");
             let error = match status.as_u16() {
                 401 | 403 => EmbedderError::KeyRejected(message),
@@ -497,7 +497,7 @@ impl HttpEmbeddingProvider {
             });
         }
 
-        Ok(read_body_capped(resp)?)
+        Ok(read_body_capped(resp, "embedding response")?)
     }
 
     /// POST one embed request for `input` (a string or an array of them) and parse its body.
@@ -645,7 +645,7 @@ impl HttpEmbeddingProvider {
         let no_format = || {
             MemoryError::Internal(format!(
                 "cannot extract embedding from response: {}",
-                serde_json::to_string(&body).unwrap_or_default()
+                body_diagnostic(&serde_json::to_string(&body).unwrap_or_default())
             ))
         };
 
@@ -713,10 +713,9 @@ impl HttpEmbeddingProvider {
                 vec![emb]
             }
             None => {
-                let body_str = serde_json::to_string(&body).unwrap_or_default();
-                let truncated = truncate_on_char_boundary(&body_str, 1000);
+                let body = body_diagnostic(&serde_json::to_string(&body).unwrap_or_default());
                 return Err(MemoryError::Internal(format!(
-                    "cannot extract embeddings from batch response: {truncated}"
+                    "cannot extract embeddings from batch response: {body}"
                 ))
                 .into());
             }
@@ -928,18 +927,57 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 /// how slowly it trickles the body — the `+ 1` byte is the over-limit sentinel.
 /// This is the genuine resource-exhaustion guard: `Content-Length` can be
 /// absent or spoofed, so the cap is enforced on bytes actually read.
-fn read_body_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>, MemoryError> {
+pub fn read_body_capped(
+    resp: reqwest::blocking::Response,
+    what: &str,
+) -> Result<Vec<u8>, MemoryError> {
     let mut buf = Vec::new();
     let read = resp
         .take(MAX_BODY + 1)
         .read_to_end(&mut buf)
-        .map_err(|e| EmbedderError::NoAnswer(format!("embedding response read failed: {e}")))?;
+        .map_err(|e| EmbedderError::NoAnswer(format!("{what} read failed: {e}")))?;
     if read as u64 > MAX_BODY {
         return Err(MemoryError::Internal(format!(
-            "embedding response too large: exceeds {MAX_BODY}-byte cap"
+            "{what} too large: exceeds {MAX_BODY}-byte cap"
         )));
     }
     Ok(buf)
+}
+
+/// The largest upstream body a diagnostic scans.
+const DIAGNOSTIC_SCAN: usize = 8 * 1024;
+
+/// An upstream body as an error message quotes it (#1024): one of at most 8 KiB is redacted
+/// whole, then cut to 1,000 bytes; a longer one is named by its size only, so the scan stays
+/// bounded and no cut can split a secret before redaction. A JSON body is redacted in its
+/// decoded strings: in its text an escape (`\n`) can sit against a token and hide it.
+pub fn body_diagnostic(body: &str) -> String {
+    if body.len() <= DIAGNOSTIC_SCAN
+        && let Ok(clean) = scrub_body(body)
+    {
+        return truncate_on_char_boundary(&clean, 1000);
+    }
+    format!("a {}-byte body, not shown", body.len())
+}
+
+fn scrub_body(body: &str) -> Result<String, MemoryError> {
+    fn walk(value: &mut serde_json::Value) -> Result<(), MemoryError> {
+        match value {
+            serde_json::Value::String(s) => *s = memory_engine::redact::scrub(s)?,
+            serde_json::Value::Array(items) => items.iter_mut().try_for_each(walk)?,
+            serde_json::Value::Object(members) => members.values_mut().try_for_each(walk)?,
+            _ => {}
+        }
+        Ok(())
+    }
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(mut value) => {
+            walk(&mut value)?;
+            // The serialized form is scanned too, as a whole body is, for what spans values.
+            memory_engine::redact::scrub(&value.to_string())
+        }
+        Err(_) => memory_engine::redact::scrub(body),
+    }
 }
 
 /// Truncate `s` to at most `max` bytes for an error message, snapping the cut

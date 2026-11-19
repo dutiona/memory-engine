@@ -89,6 +89,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 insta = { version = "1", features = ["yaml", "redactions"] }
 proptest = "1"
+# The shared redaction fixture is pinned by its SHA-256 (tests/redaction_conformance.rs).
+sha2 = "0.11"
 # Force these leaf crates' `test-util` feature ON for every `cargo test` of this
 # crate, regardless of whether `--features test-util` was passed explicitly
 # (Wave 2 #816, me-backend-sqlite carve, Commit 2): `crate::test_utils` re-exports
@@ -118,6 +120,14 @@ harness = false
 [[test]]
 name = "eval"
 path = "../../tests/eval/main.rs"
+
+[[test]]
+name = "redaction_write_paths"
+path = "../../tests/redaction_write_paths.rs"
+
+[[test]]
+name = "redaction_conformance"
+path = "../../tests/redaction_conformance.rs"
 
 [[test]]
 name = "activity_stream_test"

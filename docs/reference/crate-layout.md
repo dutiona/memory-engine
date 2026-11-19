@@ -190,6 +190,9 @@ and `pool/` — the S2 scope — are **no longer facade modules**; they physical
 `archive/`
 : Cold-storage `.pak` snapshot subsystem (feature-gated) → **me-archive**.
 
+`redact/`
+: The write-path redaction gate (#1024, [redaction](redaction.md)): the text engine (`redact`, `scrub`, `excerpt`, `cut`, the JSON and provenance walks), the capture contract for tool calls, `ScrubbingProposer`, and `sensitive_path` (`is_sensitive_path`, the stub classifier). Every facade write method scrubs through it; `tests/redaction_write_paths.rs` fails when a public method is neither gated nor exempted.
+
 `bootstrap/`
 : Session log bootstrap pipeline (facade-internal). Parses Claude Code JSONL session logs and imports noteworthy episodes (bug fixes, decisions, conventions, learnings) as historical facts. Sub-modules handle each pipeline stage: `parse` (JSONL deserialization), `filter` (turn reconstruction and keyword pre-filter), `outcome` (heuristic session outcome classification), `extract` (fact extraction via the `SessionExtractor` trait), and `metrics` (configuration, reporting, and prewarm quality metrics). Uses savepoint transactions for crash safety and event-based idempotency to prevent duplicate imports.
 

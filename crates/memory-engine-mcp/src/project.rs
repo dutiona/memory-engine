@@ -44,6 +44,9 @@ pub enum Flaw {
     /// encoded `/` or `@` hid from the strip, or a keyless URL with an `@` in its path; dropped
     /// rather than stored, which changes no key.
     UnstrippedUserinfo,
+    /// The fact holds, or would key to, a machine token (ADR-0020 §4): dropped before key
+    /// derivation, so no stored provenance or key carries one (#1024).
+    MachineToken,
 }
 
 /// ADR-0020 §3: each header value is at most 4,096 bytes.
@@ -97,9 +100,16 @@ impl ProjectFacts {
                     let value = strip_userinfo(&value);
                     if unstripped_userinfo(&value) {
                         facts.dropped.insert(name, Flaw::UnstrippedUserinfo);
+                    } else if holds_machine_token(&value)
+                        || remote_key(&value).is_some_and(|key| holds_machine_token(&key))
+                    {
+                        facts.dropped.insert(name, Flaw::MachineToken);
                     } else {
                         *facts.slot(name) = Some(value);
                     }
+                }
+                Ok(value) if holds_machine_token(&value) => {
+                    facts.dropped.insert(name, Flaw::MachineToken);
                 }
                 Ok(value) => *facts.slot(name) = Some(value),
                 Err(flaw) => {
@@ -157,6 +167,10 @@ impl ProjectFacts {
             _ => &mut self.branch,
         }
     }
+}
+
+fn holds_machine_token(text: &str) -> bool {
+    memory_engine::redact::scrub_provenance(text) != text
 }
 
 /// A project's key, with its scope label: it exists only when `project:<label>` fits the

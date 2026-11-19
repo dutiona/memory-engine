@@ -98,9 +98,9 @@ memory-engine-cli query "how does auth work" \
   --embed-model nomic-embed-text --embed-provider ollama --query-instruction ''
 ```
 
-FTS5 text search by default. **When `--embed-url` + `--embed-model` are supplied (#619), the query text is embedded via `embed_query`** (prefixed with ME's pinned instruction unless `--query-instruction` replaces it; `''` means no prefix) for hybrid FTS + vector retrieval; with no embedder it stays FTS-only. The embedder flags are shared with `batch-ingest` / `bootstrap` / `consolidate` (`--embed-provider`, `--embed-api-key`, `--query-instruction`, `--mrl-dim`, `--native-dim`, `--embed-timeout`, and the served-artifact flags `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`, `--embed-max-input-tokens`, all four or none, with `MEMORY_ENGINE_EMBED_*` variables). Before embedding, `query` checks the declared identity against the store's recorded one and fails with `embedding identity check failed` on a mismatch (#614, #1017). Filters: `--scope`, `--limit`, `--fact-type` (episodic/semantic/procedural), `--min-importance`, `--pinned-only`.
+FTS5 text search by default. **When `--embed-url` + `--embed-model` are supplied (#619), the query text is embedded via `embed_query`** (prefixed with ME's pinned instruction unless `--query-instruction` replaces it; `''` means no prefix) for hybrid FTS + vector retrieval; with no embedder it stays FTS-only. The embedder flags are shared with `batch-ingest` / `bootstrap` / `consolidate` (`--embed-provider`, `--embed-api-key`, `--query-instruction`, `--mrl-dim`, `--native-dim`, `--embed-timeout`, and the served-artifact flags `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`, `--embed-max-input-tokens`, all four or none, with `MEMORY_ENGINE_EMBED_*` variables). Before embedding, `query` checks the declared identity against the store's recorded one and fails with `embedding identity check failed` on a mismatch (#614, #1017). The text it embeds is redacted first, so no embedder receives a known token format; its FTS5 expression stays as typed, since it is neither stored nor sent (#1024, [redaction](redaction.md)). Filters: `--scope`, `--limit`, `--fact-type` (episodic/semantic/procedural), `--min-importance`, `--pinned-only`.
 
-#### `status` — Embedding Queue
+#### `status` — Embedding Queue and Redaction
 
 ```bash
 memory-engine-cli status
@@ -116,6 +116,7 @@ embedding queue: 3 waiting, oldest 2h; 1 failed
 paused: no
 last embed success: 2026-11-17T09:12:03+00:00
 last embed error: 2026-11-17T09:10:41+00:00: embedder: embedding endpoint returned 503 Service Unavailable: …
+redaction: 12 redacted, 3 stubbed
 ```
 
 - `waiting`: items not failed, due now or backing off; `oldest`: the age of the oldest of them, in its largest whole
@@ -123,8 +124,10 @@ last embed error: 2026-11-17T09:10:41+00:00: embedder: embedding endpoint return
 - `failed`: items the embedder refused for good (400, 413 or 422); each stays found by full-text search.
 - `paused`: `no`, or `since <time>: <error>` while the embedder rejects the key (401 or 403): the alarm.
 - `last embed success`, `last embed error`: their times (RFC 3339, UTC) and the last error, or `never`.
+- `redaction`: the store-wide totals of secrets redacted on write and of activities stored as sensitive-path stubs
+  (#1024, [what they count](redaction.md#counters)).
 
-`--format json` prints `{"waiting","oldest_age_secs","failed","paused_since","pause_error","last_success_at","last_error_at","last_error"}`,
+`--format json` prints `{"waiting","oldest_age_secs","failed","paused_since","pause_error","last_success_at","last_error_at","last_error","redacted","stubbed"}`,
 each absent value `null`; `--format plain` prints the same keys as `key=value` lines, an absent value empty. Error
 texts come from the embedder, so their control characters are escaped in the table and plain formats. `status` exits 0
 in every queue state; the alarm is in the output.

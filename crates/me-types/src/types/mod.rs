@@ -23,6 +23,7 @@ pub mod inspect;
 /// resolvable public intra-doc link back to its own contents).
 mod memory_query;
 mod provenance;
+mod redaction;
 mod relation;
 mod retraction;
 mod scope;
@@ -40,6 +41,7 @@ pub use embed_queue::*;
 pub use events::*;
 pub use facts::*;
 pub use provenance::*;
+pub use redaction::*;
 pub use relation::*;
 pub use retraction::*;
 pub use scope::*;

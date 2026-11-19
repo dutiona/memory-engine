@@ -112,6 +112,9 @@ impl MemoryEngine {
     /// the key, so they keep it. A vector whose post-commit index update fails is stored, so
     /// it is `Embedded` (logged), never retried.
     ///
+    /// Redaction (#1024): a recorded error's text is scrubbed before it is stored as the item's
+    /// `last_error`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` on a read-only engine,
@@ -208,9 +211,18 @@ impl MemoryEngine {
                 (EmbeddingFailure::Retry { at, answered }, Settled::Retrying)
             }
         };
+        // #1024: the error can quote an upstream body; it is stored and shown by `status`.
+        let (text, found) =
+            crate::redact::scrub_with(&error.to_string(), &[]).unwrap_or_else(|_| {
+                (
+                    "embedding failed; its error text did not settle redaction".into(),
+                    0,
+                )
+            });
         self.storage
-            .record_embedding_failure(item.fact_id, &error.to_string(), failure, now)
+            .record_embedding_failure(item.fact_id, &text, failure, now)
             .await?;
+        self.tally(found, 0).await;
         Ok(settled)
     }
 }
@@ -264,7 +276,7 @@ pub fn read_embed_queue_status(db: &Path) -> Result<EmbedQueueStatus> {
     crate::store::embed_queue::read_status(&tx)
 }
 
-fn open_status_connection(db: &Path) -> Result<Connection> {
+pub fn open_status_connection(db: &Path) -> Result<Connection> {
     let conn = crate::store::schema::open_connection_read_only(&db.to_string_lossy())?;
     if !conn.is_readonly(MAIN_DB).map_err(StorageError::backend)? {
         return Err(MemoryError::Internal(
