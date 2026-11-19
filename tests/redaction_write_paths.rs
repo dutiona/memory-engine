@@ -1241,6 +1241,50 @@ async fn findings_in_text_never_written_do_not_count() {
 
 /// The report's own metadata reaches the cycle history; an oversized reason is never scanned;
 /// a promotion the tombstone blocks writes nothing and counts nothing.
+/// Merged and scrubbed metadata stays within the limit: a quarantine with no room even for a
+/// marker, and an `AddFact` whose placeholders outgrow its metadata, are skipped as blocked, and
+/// the rest of the report still applies (#641).
+#[tokio::test]
+async fn a_delta_whose_metadata_would_outgrow_the_limit_is_blocked() {
+    let store = Store::new();
+    let recorder = Arc::new(Recorder::default());
+    two_facts(&store, &recorder).await;
+    let max = me_types::limits::MAX_PAYLOAD_BYTES;
+    let full = store
+        .engine
+        .add_fact(
+            &request("full note".into(), json!({ "note": "n".repeat(max - 30) })),
+            Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
+            None,
+        )
+        .await
+        .unwrap();
+    // 100 one-byte URL passwords, each becoming a 38-byte placeholder.
+    let passwords = "https://u:p@h ".repeat(100);
+    let growing = json!({ "note": format!("{passwords}{}", "z".repeat(max - 2000)) });
+    let raw = LlmDreamCycle::new(
+        Arc::new(Merges("plain".into())),
+        Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
+    );
+    let mut report = store.engine.run_dream_cycle(&raw).await.unwrap();
+    report.deltas = vec![
+        CycleDelta::Quarantine {
+            fact_id: full,
+            reason: "short".into(),
+        },
+        CycleDelta::AddFact(
+            NewFact::builder("plain addition", vec![0.5; DIM], FactType::Semantic)
+                .metadata(growing)
+                .build(),
+        ),
+    ];
+    let applied = store.engine.apply_cycle_report(&report).await.unwrap();
+    assert_eq!(
+        (applied.blocked, applied.quarantined, applied.facts_added),
+        (2, 0, 0)
+    );
+}
+
 /// An oversized label is a marker, never a refusal: the report still applies and its window is
 /// still marked (#641).
 #[tokio::test]
