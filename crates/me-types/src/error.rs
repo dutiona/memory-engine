@@ -25,6 +25,12 @@ pub enum ConflictError {
     #[error("the content is forgotten: a forget's tombstone blocks it")]
     Forgotten,
 
+    /// Redaction refused the write (#1024): its text did not settle within the pass limit,
+    /// or a caller-supplied vector sits beside text redaction would change, so the vector
+    /// was computed from a secret. Nothing was stored. The string says which.
+    #[error("{0}")]
+    Redaction(&'static str),
+
     /// A configuration or policy parameter is out of its accepted range — e.g. a
     /// non-positive half-life, a weight below zero, or a ratio/percentile outside
     /// `[0.0, 1.0]`. Raised by `ForgetPolicy::validate`

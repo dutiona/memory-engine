@@ -373,8 +373,8 @@ fn prepare_one_memory(
     // counter is idempotent (a reinforced re-run re-scrubs but does not re-count).
     let mut redactions = 0usize;
     let content = if config.redact {
-        let (clean, findings) = redact::redact_text_with_denylist(&parsed.body, &config.denylist);
-        redactions += findings.len();
+        let (clean, found) = redact::scrub_with(&parsed.body, &config.denylist)?;
+        redactions += usize::try_from(found).unwrap_or(usize::MAX);
         clean
     } else {
         parsed.body.clone()
@@ -389,7 +389,8 @@ fn prepare_one_memory(
     // secret anywhere, not just in the body content.
     let mut metadata = build_metadata(path, parsed, route_kb);
     if config.redact {
-        redactions += redact::redact_json_strings(&mut metadata, &config.denylist);
+        redactions += usize::try_from(redact::scrub_json(&mut metadata, &config.denylist)?)
+            .unwrap_or(usize::MAX);
     }
 
     // Classifiers read only content/fact_type/base_importance/metadata — build the

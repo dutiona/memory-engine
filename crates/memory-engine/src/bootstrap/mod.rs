@@ -24,10 +24,6 @@ use crate::error::Result;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
 use crate::types::{ClassifierInput, EventType, NewEvent, NewFact};
 
-pub use crate::redact::{
-    Finding, RedactionReport, redact_entries, redact_entries_with_denylist, redact_json_strings,
-    redact_text, redact_text_with_denylist, shannon_entropy,
-};
 pub use denylist::{DENYLIST_ENV_VAR, load_secret_denylist};
 pub use extract::{ExtractedFact, KeywordExtractor, SessionExtractor};
 pub use filter::{CandidateEpisode, ConversationTurn, EpisodeCategory, ToolCallRecord};
@@ -211,22 +207,26 @@ pub(crate) fn prepare_session(
 ///
 /// Run BEFORE extraction so the extractor — which may be a caller-supplied
 /// LLM-powered [`SessionExtractor`] reaching an external service — never sees an
-/// unredacted secret. A `[REDACTED:*]` placeholder is never re-matched, so this
-/// is idempotent.
+/// unredacted secret. Each field is scrubbed to a fixpoint; a field whose text does not
+/// settle is emptied, since its secret could not be removed.
 fn redact_turns(turns: &mut [ConversationTurn], denylist: &[String]) -> usize {
-    let redact_field = |s: &mut String, n: &mut usize| {
-        let (clean, findings) = crate::redact::redact_text_with_denylist(s, denylist);
-        if !findings.is_empty() {
+    let redact_field = |s: &mut String, n: &mut usize| match crate::redact::scrub_with(s, denylist)
+    {
+        Ok((clean, found)) => {
             *s = clean;
-            *n += findings.len();
+            *n += usize::try_from(found).unwrap_or(usize::MAX);
         }
+        Err(_) => s.clear(),
     };
     let mut total = 0;
     for turn in turns {
         redact_field(&mut turn.user_text, &mut total);
         redact_field(&mut turn.assistant_text, &mut total);
         for tc in &mut turn.tool_calls {
-            total += crate::redact::redact_json_strings(&mut tc.input, denylist);
+            match crate::redact::scrub_json(&mut tc.input, denylist) {
+                Ok(found) => total += usize::try_from(found).unwrap_or(usize::MAX),
+                Err(_) => tc.input = serde_json::Value::Null,
+            }
             if let Some(s) = tc.stdout.as_mut() {
                 redact_field(s, &mut total);
             }
@@ -263,9 +263,12 @@ fn prepare_extracted_fact(
     // false (library/test callers); the CLI has no bypass.
     let mut redactions = 0usize;
     let content = if ctx.config.redact {
-        let (clean, findings) =
-            crate::redact::redact_text_with_denylist(&fact.content, &ctx.config.denylist);
-        redactions += findings.len();
+        let Ok((clean, found)) = crate::redact::scrub_with(&fact.content, &ctx.config.denylist)
+        else {
+            tracing::warn!("skipping a bootstrap fact whose redaction did not settle");
+            return Ok(None);
+        };
+        redactions += usize::try_from(found).unwrap_or(usize::MAX);
         clean
     } else {
         fact.content.clone()
@@ -276,7 +279,11 @@ fn prepare_extracted_fact(
     // unredacted secret anywhere (not just in content). Keys are left intact.
     let mut metadata = fact.metadata.clone();
     if ctx.config.redact {
-        redactions += crate::redact::redact_json_strings(&mut metadata, &ctx.config.denylist);
+        let Ok(found) = crate::redact::scrub_json(&mut metadata, &ctx.config.denylist) else {
+            tracing::warn!("skipping a bootstrap fact whose redaction did not settle");
+            return Ok(None);
+        };
+        redactions += usize::try_from(found).unwrap_or(usize::MAX);
     }
 
     // Session files are third-party input: a fact whose (redacted) content or
