@@ -112,6 +112,9 @@ impl MemoryEngine {
     /// the key, so they keep it. A vector whose post-commit index update fails is stored, so
     /// it is `Embedded` (logged), never retried.
     ///
+    /// Redaction (#1024): a recorded error's text is scrubbed before it is stored as the item's
+    /// `last_error`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` on a read-only engine,

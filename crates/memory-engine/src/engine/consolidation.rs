@@ -46,6 +46,9 @@ impl MemoryEngine {
     /// the per-phase lock no longer serializes whole runs, so two overlapping runs are a
     /// benign last-writer-wins on derived summaries, not a supported pattern.
     ///
+    /// Redaction (#1024): every summary the generator returns is scrubbed before it is embedded or
+    /// stored.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only. Propagates

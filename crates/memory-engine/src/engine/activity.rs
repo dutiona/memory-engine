@@ -192,6 +192,9 @@ impl MemoryEngine {
     ///
     /// Called by the Stop hook when a session ends or pauses.
     ///
+    /// Redaction (#1024): `summary` and `metadata` are scrubbed and kept whole (no cut); a text
+    /// that does not settle is refused with `Conflict(Redaction)`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.

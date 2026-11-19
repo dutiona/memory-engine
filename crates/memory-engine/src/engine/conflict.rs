@@ -28,6 +28,10 @@ impl MemoryEngine {
     /// the session; the next `open()` recovers the graph via
     /// `MemoryGraph::load_from_db`.
     ///
+    /// Redaction (#1024): the candidate carries a vector computed from its content, so a content
+    /// that redaction would change is refused with `Conflict(Redaction)`; its `metadata` is
+    /// scrubbed.
+    ///
     /// # Errors
     ///
     /// - [`MemoryError::ReadOnly`](crate::error::MemoryError::ReadOnly) — the

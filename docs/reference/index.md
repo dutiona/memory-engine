@@ -8,6 +8,7 @@ glossary
 api
 mcp-server
 cli-inspector
+redaction
 project-management
 issue-authoring-for-agents
 ```

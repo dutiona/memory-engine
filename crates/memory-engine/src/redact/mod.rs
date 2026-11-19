@@ -31,11 +31,30 @@ use crate::error::{ConflictError, MemoryError, Result};
 mod sensitive_path;
 pub use sensitive_path::is_sensitive_path;
 
-/// The top-level event-payload member that holds ADR-0021 MC-9's capture context.
+/// The top-level event-payload member that holds ADR-0021 MC-9's capture context. When it has
+/// the shape the MCP server writes, its strings get the machine-token rule only.
+///
+/// # Examples
+///
+/// ```
+/// use memory_engine::redact::PROVENANCE_KEY;
+///
+/// let payload = serde_json::json!({ PROVENANCE_KEY: { "facts": {}, "dropped": {}, "key": null, "rules": 1 } });
+/// assert!(payload.get("project").is_some());
+/// ```
 pub const PROVENANCE_KEY: &str = "project";
 
 /// ADR-0020 §6's capture cap: tool input, tool result and tool error are cut to 512 bytes
 /// of UTF-8, back to a character boundary, after redaction.
+///
+/// # Examples
+///
+/// ```
+/// use memory_engine::redact::{CAPTURE_CAP, excerpt};
+///
+/// assert_eq!(excerpt(&"é".repeat(300))?.len(), CAPTURE_CAP);
+/// # Ok::<(), memory_engine::MemoryError>(())
+/// ```
 pub const CAPTURE_CAP: usize = 512;
 
 /// What a prefixed token's body may hold after its prefix.

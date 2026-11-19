@@ -11,6 +11,10 @@ impl MemoryEngine {
 
     /// Append an event to the event log. Returns the assigned event id.
     ///
+    /// Redaction (#1024): the payload is scrubbed, but for a genuine capture context under
+    /// `redact::PROVENANCE_KEY`, which gets the machine-token rule only; a payload that does not
+    /// settle is refused with `Conflict(Redaction)`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
@@ -25,6 +29,10 @@ impl MemoryEngine {
     /// Append an event under the scope `path`, creating the path in the event's own
     /// transaction: a failed append leaves no new scope node. `event.scope_id` is replaced
     /// by the path's leaf. Returns the assigned event id.
+    ///
+    /// Redaction (#1024): the payload is scrubbed, but for a genuine capture context under
+    /// `redact::PROVENANCE_KEY`, which gets the machine-token rule only; a payload that does not
+    /// settle is refused with `Conflict(Redaction)`.
     ///
     /// # Errors
     ///
@@ -64,6 +72,9 @@ impl MemoryEngine {
     /// the scope path `record_at`, in one transaction that creates both paths. Only a
     /// live fact (not expired, valid now) still at `from` moves, so of two concurrent
     /// moves the second answers `NotFound`. Returns the record's id.
+    ///
+    /// Redaction (#1024): the move's record payload is scrubbed as [`ingest`](Self::ingest) scrubs
+    /// one.
     ///
     /// # Errors
     ///
@@ -124,6 +135,9 @@ impl MemoryEngine {
     /// Embedding is computed **before** acquiring the write lock, so slow
     /// embedding calls (network API) don't block readers.
     ///
+    /// Redaction (#1024): `content` and `metadata` are scrubbed before the classifier, the embedder
+    /// or the store sees them; a text that does not settle is refused with `Conflict(Redaction)`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
@@ -155,6 +169,10 @@ impl MemoryEngine {
     /// populated one, hard-rejecting a mismatch. This closes the same-dim foreign-vector
     /// hole the old `PassthroughEmbedder` sentinel left open — the caller can no longer
     /// slip a vector from a different model into the store's vector space unchecked.
+    ///
+    /// Redaction (#1024): `embedding` was computed from `content`, so a content that redaction
+    /// would change is refused with `Conflict(Redaction)` and nothing is stored; clean content is
+    /// stored as given, with its `metadata` scrubbed.
     ///
     /// # Errors
     ///
@@ -196,6 +214,10 @@ impl MemoryEngine {
     /// [`add_fact`](Self::add_fact)'s gates and validation, consults no classifier (the
     /// fact is pinned only when `opts.pinned` says so), and records no embedding
     /// identity: there is no vector yet.
+    ///
+    /// Redaction (#1024): `content` and `metadata` are scrubbed before the fact is stored and
+    /// queued, so the drain embeds the scrubbed text; a text that does not settle is refused with
+    /// `Conflict(Redaction)`.
     ///
     /// # Errors
     ///
@@ -278,6 +300,9 @@ impl MemoryEngine {
     /// - Scope resolution inside savepoint for atomicity; `scope_tree`
     ///   cache deferred to after `RELEASE` (two-phase commit).
     ///
+    /// Redaction (#1024): every request's `content` and `metadata` are scrubbed before anything is
+    /// embedded or stored; one that does not settle refuses the batch with `Conflict(Redaction)`.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
@@ -324,6 +349,10 @@ impl MemoryEngine {
     /// forget's tombstone blocks its content (`Conflict(Forgotten)`, #1023). The
     /// **valid** partition is embedded and inserted in one atomic batch, so the
     /// invalid records are simply skipped rather than failing their neighbours.
+    ///
+    /// Redaction (#1024): every request's `content` and `metadata` are scrubbed before anything is
+    /// embedded or stored; one that does not settle fails at its own position with
+    /// `Conflict(Redaction)`.
     ///
     /// # Errors
     ///

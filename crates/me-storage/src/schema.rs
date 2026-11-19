@@ -76,6 +76,8 @@ pub trait SchemaManager: Send + Sync {
     /// Add to the store-wide redaction totals (#1024), both in one transaction; a zero leaves
     /// its total as it is. An absent total reads as 0.
     ///
+    /// # Errors
+    ///
     /// Returns `MemoryError::ReadOnly` if the backend was opened in read-only mode.
     async fn add_redaction_counts(&self, redacted: u64, stubbed: u64) -> Result<()>;
 

@@ -216,6 +216,9 @@ Decoding, per header (`ME-Project-Root` → `root`, `-Dev-Root` → `dev_root`, 
     encoded `/` reads as `host`, `host:` or `host:<digits>` (`https://to%2Fken@host/x`, `https://user:%2Fss@host/x`,
     `https://user:12%2F34@host/x`), the URL gives a key, so the URL, the key and its scope node hold the secret; the
     same holds for an scp-form remote whose user name holds an encoded `/` (`to%2Fken@host:x`, stored, keyless).
+12. A fact that holds a machine token (`me_` plus 32 base62 characters), or a URL whose remote key would hold one (a
+    host is lowercased), is dropped as `machine_token` before the key is derived, so no stored provenance or key
+    carries one (#1024); the key comes from the facts that remain.
 
 Remote key, tried on `upstream_url` then `origin_url`; a URL that gives none is ignored, and the next rule applies:
 
@@ -363,11 +366,13 @@ machine and `project`, the request's facts as decoded with the dropped ones, the
 
 `recall` adds `fact_ids`; `remember` adds `level`; `forget` adds `fact_ids` (the requested id; the memories it
 changed are those whose tombstone names the record); `set_level` adds `fact_ids`, `level`, `from` and `to`; a failure adds
-`error` instead: the message as answered, with the userinfo of every URL it quotes removed: in the scheme form (the
+`error` instead: the message as answered, redacted, then cut to 512 bytes ([redaction](redaction.md)), with the
+userinfo of every URL it quotes removed first: in the scheme form (the
 authority runs to the next `/`, across spaces, and a URL that rule 11 would drop loses everything through its last
 `@`) and in the scp form (per space-delimited token, so an scp user name holding a space keeps its first part).
 A `set_level` record is a move only when it carries `from` and `to`, which is what re-filing replays.
-`remember`'s content is stored as the memory, as written: redacting it is #1024's.
+`remember`'s content is redacted before it is stored or queued for its vector, and `recall` redacts its query before
+it searches or embeds it ([redaction](redaction.md)).
 Records sit under the calling machine's bucket, except a valid `remember`'s, which sits under the Home it wrote to.
 
 ### Embedding queue

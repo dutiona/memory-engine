@@ -22,6 +22,9 @@ impl MemoryEngine {
     /// not know names nothing, and a fact elsewhere answers
     /// [`ForgetOutcome::NotFound`], the same as a missing id.
     ///
+    /// Redaction (#1024): the record payload and the stored reason are scrubbed; either one not
+    /// settling refuses the forget with `Conflict(Redaction)`.
+    ///
     /// # Errors
     ///
     /// `MemoryError::ReadOnly` on a read-only engine; a `PayloadTooLarge` conflict for an

@@ -162,6 +162,9 @@ impl MemoryEngine {
     /// [`Self::apply_cycle_report`]. Verifies write access up front since applying
     /// will require it.
     ///
+    /// Redaction (#1024): the report is applied through
+    /// [`apply_cycle_report`](Self::apply_cycle_report), which skips a delta with unredacted text.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only.
@@ -244,6 +247,9 @@ impl MemoryEngine {
     /// **not** mutual exclusion; concurrent guarded calls can both run (idempotent via the
     /// marker + watermark). True mutual exclusion is #207.
     ///
+    /// Redaction (#1024): the report is applied through
+    /// [`apply_cycle_report`](Self::apply_cycle_report), which skips a delta with unredacted text.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine is read-only, or a store/cycle error.
@@ -268,6 +274,10 @@ impl MemoryEngine {
     /// Concurrency note: this is single-fire safe (a sequential re-run is a near no-op
     /// via the marker + watermark). Mutual exclusion against a concurrent writer is out
     /// of scope here — see #207 / #209.
+    ///
+    /// Redaction (#1024): an `AddFact` or `Synthesize` delta whose text redaction would change
+    /// carries a vector of a secret, so it is skipped and counted in `blocked`; quarantine reasons,
+    /// promotion provenance and every metadata leaf are scrubbed.
     ///
     /// # Errors
     ///

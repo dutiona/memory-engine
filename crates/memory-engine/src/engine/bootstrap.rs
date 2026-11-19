@@ -220,6 +220,10 @@ impl MemoryEngine {
     /// For LLM-powered extraction, provide a custom [`SessionExtractor`].
     /// The default [`KeywordExtractor`](crate::bootstrap::KeywordExtractor) requires no LLM.
     ///
+    /// Redaction (#1024): every turn is scrubbed (with the configured denylist) before extraction,
+    /// and every fact again before it is embedded or stored; the run's `secrets_redacted` is added
+    /// to the store's redaction total.
+    ///
     /// # Errors
     ///
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
@@ -253,6 +257,8 @@ impl MemoryEngine {
     /// Each session is processed independently within its own savepoint; an
     /// unreadable file or a per-session failure is logged and skipped (not fatal),
     /// and reports are aggregated.
+    ///
+    /// Redaction (#1024): as [`bootstrap_session`](Self::bootstrap_session), per session file.
     ///
     /// # Errors
     ///

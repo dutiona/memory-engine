@@ -28,6 +28,15 @@ pub enum ConflictError {
     /// Redaction refused the write (#1024): its text did not settle within the pass limit,
     /// or a caller-supplied vector sits beside text redaction would change, so the vector
     /// was computed from a secret. Nothing was stored. The string says which.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_types::error::{ConflictError, MemoryError};
+    ///
+    /// let refused = MemoryError::Conflict(ConflictError::Redaction("redaction did not settle; nothing was stored"));
+    /// assert!(matches!(refused, MemoryError::Conflict(ConflictError::Redaction(_))));
+    /// ```
     #[error("{0}")]
     Redaction(&'static str),
 
