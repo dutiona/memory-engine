@@ -87,11 +87,11 @@ const GATED: &[(&str, &str)] = &[
     ),
     ("consolidate", "consolidation_summaries_are_redacted"),
     (
-        "impl:consolidate",
+        "impl:DreamCtx::consolidate",
         "consolidation_summaries_are_redacted (DreamCtx delegates)",
     ),
     (
-        "impl:summarize",
+        "impl:SummaryGenerator::summarize",
         "consolidation_summaries_are_redacted (the scrubbing wrapper)",
     ),
     (
@@ -99,7 +99,7 @@ const GATED: &[(&str, &str)] = &[
         "a_caller_vector_beside_unredacted_text_is_refused",
     ),
     (
-        "impl:promote",
+        "impl:DreamCtx::promote",
         "a_caller_vector_beside_unredacted_text_is_refused (DreamCtx delegates)",
     ),
 ];
@@ -122,7 +122,7 @@ const EXEMPT: &[(&str, &str)] = &[
         "reverses a forget; its record holds ids only",
     ),
     ("forget", "decay pruning; no new text"),
-    ("impl:forget", "decay pruning; no new text"),
+    ("impl:DreamCtx::forget", "decay pruning; no new text"),
     (
         "record_insight",
         "the consumer's InsightStream stores it, not this store",
@@ -146,15 +146,15 @@ const EXEMPT: &[(&str, &str)] = &[
     // Reads.
     ("query", "read"),
     ("execute_query", "read"),
-    ("impl:query", "read"),
+    ("impl:DreamCtx::query", "read"),
     ("get_fact", "read"),
-    ("impl:get_fact", "read"),
+    ("impl:DreamCtx::get_fact", "read"),
     ("list_active_facts", "read"),
-    ("impl:list_active_facts", "read"),
+    ("impl:DreamCtx::list_active_facts", "read"),
     ("list_summaries", "read"),
-    ("impl:list_undreamt_in_period", "read"),
-    ("impl:outcome_counts", "read"),
-    ("impl:outcome_counts_batch", "read"),
+    ("impl:DreamCtx::list_undreamt_in_period", "read"),
+    ("impl:DreamCtx::outcome_counts", "read"),
+    ("impl:DreamCtx::outcome_counts_batch", "read"),
     ("get_outcome_counts", "read"),
     ("get_outcome_counts_batch", "read"),
     ("get_provenance", "read"),
@@ -212,9 +212,9 @@ const EXEMPT: &[(&str, &str)] = &[
     ("with_upcaster_registry", "construction"),
     ("close", "lifecycle"),
     ("flush_snapshot", "writes the engine's own projections"),
-    ("impl:drop", "lifecycle"),
-    ("impl:fmt", "Debug"),
-    ("impl:default", "ActivityFilterConfig's default"),
+    ("impl:Drop::drop", "lifecycle"),
+    ("impl:Debug::fmt", "Debug"),
+    ("impl:Default::default", "ActivityFilterConfig's default"),
     ("mem_ctx", "accessor"),
     ("storage", "accessor (test builds only)"),
     ("embed_dim", "accessor"),
@@ -275,6 +275,33 @@ fn fn_name(line: &str) -> Option<&str> {
     Some(&name[..end])
 }
 
+/// The trait of an `impl … for …` header, without its path or generic arguments: methods are
+/// keyed by it, so a same-named method of another trait is classified on its own.
+fn trait_name(header: &str) -> String {
+    let after_impl = header.trim_start().trim_start_matches("impl");
+    // Skip the impl's own generic parameters, `impl<T: X> Trait for …`.
+    let mut rest = after_impl.trim_start();
+    if rest.starts_with('<') {
+        let mut depth = 0;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        rest = &rest[i + 1..];
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let path = rest.split(" for ").next().unwrap_or_default().trim();
+    let path = path.split('<').next().unwrap_or_default();
+    path.rsplit("::").next().unwrap_or_default().to_owned()
+}
+
 /// Every `.rs` file under `dir`, its submodules included.
 fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -301,6 +328,7 @@ fn facade_functions() -> BTreeSet<String> {
         }
         let source = strip_test_modules(std::fs::read_to_string(&path).unwrap());
         let mut impl_for_depth: Option<i32> = None;
+        let mut impl_trait = String::new();
         // An `impl` header, possibly over several lines (a `where` clause), until its `{`.
         let mut header: Option<String> = None;
         let mut depth = 0_i32;
@@ -315,6 +343,7 @@ fn facade_functions() -> BTreeSet<String> {
                 if trimmed.contains('{') || trimmed.ends_with(';') {
                     if h.contains(" for ") && trimmed.contains('{') {
                         impl_for_depth = Some(depth);
+                        impl_trait = trait_name(h);
                     }
                     header = None;
                 }
@@ -328,7 +357,7 @@ fn facade_functions() -> BTreeSet<String> {
             let in_impl_for = impl_for_depth.is_some_and(|d| depth == d + 1);
             if let Some(name) = fn_name(trimmed).filter(|_| trimmed.contains("fn ")) {
                 if in_impl_for && (trimmed.starts_with("fn ") || trimmed.starts_with("async fn ")) {
-                    names.insert(format!("impl:{name}"));
+                    names.insert(format!("impl:{impl_trait}::{name}"));
                 } else if public {
                     names.insert(name.to_owned());
                 }
@@ -341,6 +370,24 @@ fn facade_functions() -> BTreeSet<String> {
         }
     }
     names
+}
+
+/// A same-named method of two traits gets two keys, so one's exemption never covers the other.
+#[test]
+fn impl_methods_are_keyed_by_their_trait() {
+    for (header, want) in [
+        (" impl DreamCtx for EngineDreamCtx<'_> {", "DreamCtx"),
+        (
+            " impl<T: Send> crate::traits::AuditSink for Logger<T> {",
+            "AuditSink",
+        ),
+        (
+            " impl SummaryGenerator for ScrubbingSummaries where Self: Sized {",
+            "SummaryGenerator",
+        ),
+    ] {
+        assert_eq!(trait_name(header), want, "{header}");
+    }
 }
 
 #[test]
