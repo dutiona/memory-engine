@@ -1283,12 +1283,10 @@ async fn a_delta_whose_metadata_would_outgrow_the_limit_is_blocked() {
         (applied.blocked, applied.quarantined, applied.facts_added),
         (1, 1, 0)
     );
-    // The quarantine applies even to a fact already at the limit, with a marker for a reason.
+    // The quarantine applies even to a fact already at the limit; a reason shorter than its
+    // marker is kept.
     let quarantined = store.engine.get_fact(full).await.unwrap();
-    assert_eq!(
-        quarantined.metadata["quarantine"]["reason"],
-        "[omitted: 5 bytes]"
-    );
+    assert_eq!(quarantined.metadata["quarantine"]["reason"], "short");
 }
 
 /// An oversized label is a marker, never a refusal: the report still applies and its window is

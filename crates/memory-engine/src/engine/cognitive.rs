@@ -400,7 +400,13 @@ impl MemoryEngine {
                     if fits(&reason) {
                         *found += n;
                     } else {
-                        reason = marker(&reason);
+                        // Only a shorter marker helps: a short reason is kept as it is.
+                        let short = marker(&reason);
+                        if short.len() < reason.len() {
+                            reason = short;
+                        } else {
+                            *found += n;
+                        }
                     }
                 } else {
                     *found += n;
