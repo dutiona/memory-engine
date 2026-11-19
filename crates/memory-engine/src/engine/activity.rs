@@ -7,6 +7,7 @@ use chrono::Utc;
 
 use crate::engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, apply_filter};
 use crate::error::{MemoryError, Result};
+use crate::limits::{check_json_size, check_str_size};
 use crate::traits::EmbeddingProvider;
 use crate::types::{
     ActivityStatus, AddFactOptions, AddFactRequest, NewActivity, ProjectContext,
@@ -175,6 +176,22 @@ impl MemoryEngine {
         metadata: Option<serde_json::Value>,
     ) -> Result<()> {
         self.ensure_writable()?; // #972: fail fast before the activity read + the checkpoint write
+        // #1024: redact what is kept in full, after the raw size checks and before the write.
+        let mut found = 0;
+        let summary = match summary {
+            Some(text) => {
+                check_str_size(text, "checkpoint summary")?;
+                let (clean, n) = crate::redact::scrub_with(text, &[])?;
+                check_str_size(&clean, "checkpoint summary")?;
+                found += n;
+                Some(clean)
+            }
+            None => None,
+        };
+        let mut metadata = metadata.unwrap_or_else(|| serde_json::json!({}));
+        check_json_size(&metadata, "checkpoint metadata")?;
+        found += crate::redact::scrub_json(&mut metadata, &[])?;
+        check_json_size(&metadata, "checkpoint metadata")?;
         // Find last activity_id for this session. `list_activities_by_session`
         // orders by `last_seen DESC`, so the first row of a 1-row page is the
         // most-recent activity — same row the old raw SQL `ORDER BY last_seen
@@ -189,12 +206,14 @@ impl MemoryEngine {
         let checkpoint = SessionCheckpoint {
             session_id: session_id.to_string(),
             scope_path: scope_path.map(String::from),
-            summary: summary.map(String::from),
+            summary,
             last_activity_id,
             checkpoint_at: Utc::now(),
-            metadata: metadata.unwrap_or_else(|| serde_json::json!({})),
+            metadata,
         };
-        self.storage.upsert_checkpoint(&checkpoint).await
+        self.storage.upsert_checkpoint(&checkpoint).await?;
+        self.tally(found, 0).await;
+        Ok(())
     }
 
     /// Load project context for session bootstrap.

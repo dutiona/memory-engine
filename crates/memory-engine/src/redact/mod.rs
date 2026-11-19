@@ -750,21 +750,9 @@ pub(crate) fn scrub_json(value: &mut Value, denylist: &[String]) -> Result<u64> 
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the write-path gate wires it in (#1024)")
-)]
 const FACT_NAMES: &[&str] = &["root", "dev_root", "upstream_url", "origin_url", "branch"];
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the write-path gate wires it in (#1024)")
-)]
 const MAX_KEY_BYTES: usize = 256;
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the write-path gate wires it in (#1024)")
-)]
 /// Exactly the shape MCP's `ProjectFacts::provenance` writes.
 fn is_provenance(value: &Value) -> bool {
     let Value::Object(map) = value else {
@@ -785,10 +773,6 @@ fn is_provenance(value: &Value) -> bool {
         && map.get("rules").is_some_and(Value::is_number)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the write-path gate wires it in (#1024)")
-)]
 fn scrub_provenance_value(value: &mut Value) -> u64 {
     match value {
         Value::String(s) => {
@@ -801,10 +785,6 @@ fn scrub_provenance_value(value: &mut Value) -> u64 {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the write-path gate wires it in (#1024)")
-)]
 /// Scrub an event payload: its genuine capture context (`PROVENANCE_KEY`, in MC-9's exact
 /// shape) gets the machine-token rule only, everything else every rule.
 pub(crate) fn scrub_payload(payload: &mut Value) -> Result<u64> {

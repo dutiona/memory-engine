@@ -3,7 +3,7 @@
 //! resolves the Homes, bounds the inputs and caches the scope paths it created.
 
 use chrono::Utc;
-use me_types::limits::{check_json_size, check_str_size};
+use me_types::limits::check_str_size;
 
 use crate::error::Result;
 use crate::types::{EraseReport, EraseTarget, ForgetOutcome, NewEvent, UnforgetOutcome};
@@ -80,7 +80,9 @@ impl MemoryEngine {
         self.ensure_open()?;
         self.ensure_writable()?;
         check_str_size(reason, "forget reason")?;
-        check_json_size(&record.payload, "event payload")?;
+        let (record, record_found) = self.scrubbed_event(record)?;
+        let (reason, reason_found) = crate::redact::scrub_with(reason, &[])?;
+        check_str_size(&reason, "forget reason")?;
         let homes: Vec<i64> = {
             let tree = self.scope_tree.read();
             homes
@@ -90,9 +92,16 @@ impl MemoryEngine {
         };
         let (outcome, written) = self
             .storage
-            .forget_fact(id, &homes, reason, Utc::now(), record_at, record)
+            .forget_fact(id, &homes, &reason, Utc::now(), record_at, &record)
             .await?;
         me_index::insert_scope_chain(&self.scope_tree, written.chain);
+        // The record is written whatever the outcome; the reason only with a new tombstone.
+        let stored_reason = if outcome == ForgetOutcome::Forgotten {
+            reason_found
+        } else {
+            0
+        };
+        self.tally(record_found + stored_reason, 0).await;
         Ok((outcome, written.id))
     }
 

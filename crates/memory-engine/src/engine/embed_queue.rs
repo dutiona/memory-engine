@@ -208,9 +208,18 @@ impl MemoryEngine {
                 (EmbeddingFailure::Retry { at, answered }, Settled::Retrying)
             }
         };
+        // #1024: the error can quote an upstream body; it is stored and shown by `status`.
+        let (text, found) =
+            crate::redact::scrub_with(&error.to_string(), &[]).unwrap_or_else(|_| {
+                (
+                    "embedding failed; its error text did not settle redaction".into(),
+                    0,
+                )
+            });
         self.storage
-            .record_embedding_failure(item.fact_id, &error.to_string(), failure, now)
+            .record_embedding_failure(item.fact_id, &text, failure, now)
             .await?;
+        self.tally(found, 0).await;
         Ok(settled)
     }
 }

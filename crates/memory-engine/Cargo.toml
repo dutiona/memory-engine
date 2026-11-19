@@ -122,6 +122,10 @@ name = "eval"
 path = "../../tests/eval/main.rs"
 
 [[test]]
+name = "redaction_write_paths"
+path = "../../tests/redaction_write_paths.rs"
+
+[[test]]
 name = "redaction_conformance"
 path = "../../tests/redaction_conformance.rs"
 

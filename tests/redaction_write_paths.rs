@@ -1,0 +1,802 @@
+//! Every `MemoryEngine` write path redacts before it stores, classifies or embeds (#1024).
+//!
+//! The tripwire reads the facade's sources and fails until each public function, and each method
+//! of a trait it implements, is listed here as gated (with the test that covers it) or exempt
+//! (with the reason). A new write method therefore cannot land unclassified.
+#![allow(clippy::unwrap_used)] // test code: panic-on-unwrap is the intended failure signal (#725)
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use memory_engine::engine::MemoryEngine;
+use memory_engine::error::{EmbedderError, MemoryError, Result};
+use memory_engine::traits::{EmbeddingProvider, PersistenceClassifier};
+use memory_engine::types::{
+    AddFactOptions, AddFactRequest, ClassifierInput, EventType, FactType, ForgetOutcome, NewEvent,
+    NextEmbedding,
+};
+use memory_engine::{
+    Backoff, EmbeddingFingerprint, read_embed_queue_status, read_redaction_counts,
+};
+use serde_json::{Value, json};
+
+const DIM: usize = 4;
+
+// ── The tripwire ─────────────────────────────────────────────────────────────
+
+/// Gated: each name, and the test (here unless named) that proves it redacts.
+const GATED: &[(&str, &str)] = &[
+    (
+        "add_fact",
+        "add_fact_redacts_before_classifier_embedder_and_store",
+    ),
+    (
+        "add_fact_deferred",
+        "a_deferred_fact_queues_its_redacted_text",
+    ),
+    ("add_facts_batch", "batches_redact_every_entry"),
+    ("add_facts_batch_partial", "batches_redact_every_entry"),
+    ("ingest", "event_payloads_redact_all_but_genuine_provenance"),
+    (
+        "ingest_at",
+        "event_payloads_redact_all_but_genuine_provenance",
+    ),
+    ("move_fact", "forget_and_move_records_redact"),
+    ("forget_fact", "forget_and_move_records_redact"),
+    ("checkpoint_session", "checkpoints_redact_and_stay_whole"),
+    ("settle_embedding", "a_recorded_embedder_error_is_redacted"),
+    ("record_activity", "tests/activity_stream_test.rs"),
+    (
+        "bootstrap_session",
+        "tests/bootstrap_test.rs (bootstrap's own pipeline)",
+    ),
+    (
+        "bootstrap_directory",
+        "tests/bootstrap_test.rs (bootstrap's own pipeline)",
+    ),
+    (
+        "bootstrap_memory_directory",
+        "tests/bootstrap_memory_dir.rs (bootstrap's own pipeline)",
+    ),
+    (
+        "add_fact_precomputed",
+        "a_caller_vector_beside_unredacted_text_is_refused",
+    ),
+    (
+        "resolve_conflict",
+        "a_caller_vector_beside_unredacted_text_is_refused",
+    ),
+    ("apply_cycle_report", "tests/dream_cycle_test.rs"),
+    (
+        "run_dream_cycle",
+        "tests/dream_cycle_test.rs (applies its report)",
+    ),
+    (
+        "run_dream_cycle_guarded",
+        "tests/dream_cycle_test.rs (applies its report)",
+    ),
+    ("consolidate", "consolidation_summaries_are_redacted"),
+    (
+        "impl:consolidate",
+        "consolidation_summaries_are_redacted (DreamCtx delegates)",
+    ),
+    (
+        "promote_with_lineage",
+        "a_caller_vector_beside_unredacted_text_is_refused",
+    ),
+    (
+        "impl:promote",
+        "a_caller_vector_beside_unredacted_text_is_refused (DreamCtx delegates)",
+    ),
+];
+
+/// Exempt: each name, and why it stores no caller text.
+const EXEMPT: &[(&str, &str)] = &[
+    // Identifiers, configuration or numbers, not content.
+    ("set_config", "operator configuration"),
+    ("ensure_scope_path", "a scope path is an identifier"),
+    ("record_outcome", "an outcome is an enum"),
+    ("link_session_facts", "edges between existing facts"),
+    ("expire_edge", "no text"),
+    ("pin_fact", "no text"),
+    ("unpin_fact", "no text"),
+    ("record_lineage", "ids of existing facts"),
+    ("delete_lineage", "deletes"),
+    ("erase", "deletes"),
+    (
+        "unforget_fact",
+        "reverses a forget; its record holds ids only",
+    ),
+    ("forget", "decay pruning; no new text"),
+    ("impl:forget", "decay pruning; no new text"),
+    (
+        "record_insight",
+        "the consumer's InsightStream stores it, not this store",
+    ),
+    // Text read back from this store or one of its own snapshots (plan decision 13).
+    (
+        "restore_json",
+        "restores an operator-supplied snapshot of an ME store",
+    ),
+    (
+        "restore_json_memory",
+        "restores an operator-supplied snapshot of an ME store",
+    ),
+    (
+        "restore_sqlite",
+        "restores an operator-supplied backup of an ME store",
+    ),
+    ("reconstruct", "re-embeds stored text"),
+    ("archive", "moves stored rows to cold storage"),
+    ("next_embedding", "reads the queue"),
+    // Reads.
+    ("query", "read"),
+    ("execute_query", "read"),
+    ("impl:query", "read"),
+    ("get_fact", "read"),
+    ("impl:get_fact", "read"),
+    ("list_active_facts", "read"),
+    ("impl:list_active_facts", "read"),
+    ("list_summaries", "read"),
+    ("impl:list_undreamt_in_period", "read"),
+    ("impl:outcome_counts", "read"),
+    ("impl:outcome_counts_batch", "read"),
+    ("get_outcome_counts", "read"),
+    ("get_outcome_counts_batch", "read"),
+    ("get_provenance", "read"),
+    ("get_full_lineage", "read"),
+    ("load_context", "read"),
+    ("resume_context", "read"),
+    ("sample_dormant", "read"),
+    ("list_due", "read"),
+    ("next_due_time", "read"),
+    ("list_archives", "read"),
+    ("verify_archives", "read"),
+    ("search_archives_fallback", "read"),
+    ("statistics", "read"),
+    ("list_recent_insights", "read"),
+    ("replay_events", "read"),
+    ("explain_fact", "read"),
+    ("fact_history", "read"),
+    (
+        "dump_state",
+        "writes a snapshot file of the store, not to it",
+    ),
+    ("graph_degree", "read"),
+    ("graph_component", "read"),
+    ("graph_neighbors", "read"),
+    ("graph_stats", "read"),
+    ("graph_has_node", "read"),
+    ("get_config", "read"),
+    ("resolve_scope_path", "read"),
+    ("read_embed_queue_status", "read"),
+    ("read_redaction_counts", "read"),
+    ("open_status_connection", "read"),
+    ("load_graph_from_db", "read"),
+    ("load_scope_tree", "read"),
+    ("verify_embedding_identity", "read"),
+    ("verify_embedding_fingerprint", "read"),
+    ("embed_work_arrived", "a wake-up"),
+    // Construction, lifecycle and accessors.
+    ("builder", "construction"),
+    ("build", "construction"),
+    ("new", "construction"),
+    ("path", "construction"),
+    ("into_config", "construction"),
+    ("backup_dir", "construction"),
+    ("reranker", "construction"),
+    ("upcaster_registry", "construction"),
+    ("read_only", "construction"),
+    ("read_pool_size", "construction"),
+    ("search_config", "construction"),
+    ("open_from_config", "construction"),
+    ("with_backend", "construction"),
+    ("with_backup_dir", "construction"),
+    ("with_read_only", "construction"),
+    ("with_read_pool_size", "construction"),
+    ("with_search_config", "construction"),
+    ("with_upcaster_registry", "construction"),
+    ("close", "lifecycle"),
+    ("flush_snapshot", "writes the engine's own projections"),
+    ("impl:drop", "lifecycle"),
+    ("impl:fmt", "Debug"),
+    ("impl:default", "ActivityFilterConfig's default"),
+    ("mem_ctx", "accessor"),
+    ("storage", "accessor (test builds only)"),
+    ("embed_dim", "accessor"),
+    ("is_file_backed", "accessor"),
+    ("is_read_only", "accessor"),
+    ("reopen_required", "accessor"),
+    ("reranker_name", "accessor"),
+    ("delay", "Backoff arithmetic"),
+    (
+        "apply_filter",
+        "the activity filter's decision; record_activity stores",
+    ),
+    ("ignore_patterns", "accessor"),
+    ("promote_patterns", "accessor"),
+];
+
+/// Test-only files: the engine's tests and the equivalence harness's test doubles.
+const TEST_FILES: &[&str] = &["tests.rs", "equivalence.rs"];
+
+fn strip_test_modules(mut s: String) -> String {
+    while let Some(at) = s.find("#[cfg(test)]") {
+        let rest = &s[at..];
+        let Some(open) = rest.find('{') else { break };
+        let head = &rest[..open];
+        if !head.contains("mod ") || head.contains(';') {
+            // An attribute on something else (or `mod x;`): drop the attribute only.
+            s.replace_range(at..at + "#[cfg(test)]".len(), "");
+            continue;
+        }
+        let mut depth = 0;
+        let mut end = at + open;
+        for (i, c) in s[at + open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = at + open + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        s.replace_range(at..end, "");
+    }
+    s
+}
+
+fn fn_name(line: &str) -> Option<&str> {
+    let at = line.find("fn ")?;
+    let name: &str = &line[at + 3..];
+    let end = name.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
+    Some(&name[..end])
+}
+
+fn facade_functions() -> BTreeSet<String> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/engine");
+    let mut names = BTreeSet::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        if path.extension().is_none_or(|e| e != "rs") || TEST_FILES.contains(&file.as_str()) {
+            continue;
+        }
+        let source = strip_test_modules(std::fs::read_to_string(&path).unwrap());
+        let mut impl_for_depth: Option<i32> = None;
+        let mut depth = 0_i32;
+        for line in source.lines() {
+            let trimmed = line.trim_start();
+            if impl_for_depth.is_none()
+                && trimmed.starts_with("impl")
+                && trimmed.contains(" for ")
+                && trimmed.ends_with('{')
+            {
+                impl_for_depth = Some(depth);
+            }
+            let public = trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("pub async fn ")
+                || trimmed.starts_with("pub const fn ")
+                || trimmed.starts_with("pub(crate) fn ")
+                || trimmed.starts_with("pub(crate) async fn ")
+                || trimmed.starts_with("pub(crate) const fn ");
+            let in_impl_for = impl_for_depth.is_some_and(|d| depth == d + 1);
+            if let Some(name) = fn_name(trimmed).filter(|_| trimmed.contains("fn ")) {
+                if in_impl_for && (trimmed.starts_with("fn ") || trimmed.starts_with("async fn ")) {
+                    names.insert(format!("impl:{name}"));
+                } else if public {
+                    names.insert(name.to_owned());
+                }
+            }
+            depth += i32::try_from(line.matches('{').count()).unwrap()
+                - i32::try_from(line.matches('}').count()).unwrap();
+            if impl_for_depth.is_some_and(|d| depth <= d) {
+                impl_for_depth = None;
+            }
+        }
+    }
+    names
+}
+
+#[test]
+fn every_facade_function_is_classified() {
+    let classified: BTreeSet<&str> = GATED.iter().chain(EXEMPT).map(|(n, _)| *n).collect();
+    let unclassified: Vec<String> = facade_functions()
+        .into_iter()
+        .filter(|n| !classified.contains(n.as_str()))
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "classify each as gated (and test it) or exempt (with its reason): {unclassified:?}"
+    );
+}
+
+// ── Canaries ─────────────────────────────────────────────────────────────────
+
+/// Synthetic secrets, assembled at run time.
+struct Canaries {
+    aws: String,
+    machine_token: String,
+    password: String,
+    hex: String,
+}
+
+impl Canaries {
+    fn new() -> Self {
+        Self {
+            aws: format!("AKIA{}", "IOSFODNN7EXAMPLE"),
+            machine_token: format!("me_{}", "Zq7Xw3Rt9Lp2Vb6Nm4Kc8Hd1Fs5Gj0Ay"),
+            password: format!("s3cr3t{}", "PassW0rdq"),
+            hex: "a3f1b2c4d5e6f7a8".repeat(2),
+        }
+    }
+
+    fn text(&self) -> String {
+        format!(
+            "note {} and {} via postgres://svc:{}@db.internal/x and api_key={} end",
+            self.aws, self.machine_token, self.password, self.hex
+        )
+    }
+
+    fn secrets(&self) -> [&str; 4] {
+        [&self.aws, &self.machine_token, &self.password, &self.hex]
+    }
+}
+
+const SCRUBBED: &str = "note [REDACTED:aws-access-key] and [REDACTED:machine-token] via \
+     postgres://svc:[REDACTED:connection-string-password]@db.internal/x and \
+     api_key=[REDACTED:hex-secret] end";
+
+fn assert_no_canary_in(text: &str, c: &Canaries) {
+    for s in c.secrets() {
+        assert!(!text.contains(s), "a canary leaked: {text}");
+    }
+}
+
+/// No file of the store's directory (database, WAL, sidecars) holds a canary or 12 bytes of one.
+fn assert_store_files_clean(dir: &Path, c: &Canaries) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        for secret in c.secrets() {
+            for window in secret.as_bytes().windows(12) {
+                assert!(
+                    !bytes.windows(12).any(|w| w == window),
+                    "a fragment of a canary is on disk"
+                );
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct Recorder(Mutex<Vec<String>>);
+
+impl Recorder {
+    fn seen(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+struct RecordingEmbedder(Arc<Recorder>);
+
+impl EmbeddingProvider for RecordingEmbedder {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        self.0.0.lock().unwrap().push(text.to_owned());
+        Ok(vec![0.5; DIM])
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("test", "test", DIM)
+    }
+}
+
+struct RecordingClassifier(Arc<Recorder>);
+
+impl PersistenceClassifier for RecordingClassifier {
+    fn should_pin(&self, input: &ClassifierInput) -> bool {
+        self.0
+            .0
+            .lock()
+            .unwrap()
+            .push(format!("{} {}", input.content, input.metadata));
+        false
+    }
+}
+
+struct Store {
+    dir: tempfile::TempDir,
+    db: PathBuf,
+    engine: MemoryEngine,
+}
+
+impl Store {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        let engine = MemoryEngine::builder(DIM).path(&db).build().unwrap();
+        Self { dir, db, engine }
+    }
+
+    async fn close(mut self) -> (tempfile::TempDir, PathBuf) {
+        self.engine.close().await.unwrap();
+        (self.dir, self.db)
+    }
+}
+
+fn request(content: String, metadata: Value) -> AddFactRequest {
+    AddFactRequest {
+        content,
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: Some("unscoped:laptop".into()),
+        opts: Some(AddFactOptions {
+            metadata: Some(metadata),
+            ..Default::default()
+        }),
+    }
+}
+
+fn event(payload: Value) -> NewEvent {
+    NewEvent {
+        timestamp: chrono::Utc::now(),
+        event_type: EventType::MemoryOp,
+        payload,
+        source: "test".into(),
+        session_id: None,
+        scope_id: 1,
+        origin_node_id: "test".into(),
+        sequence_id: 0,
+        created_at: None,
+    }
+}
+
+async fn events(engine: &MemoryEngine) -> Vec<Value> {
+    engine
+        .replay_events(&memory_engine::inspect::ReplayFilter::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.payload)
+        .collect()
+}
+
+// ── The write paths ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn add_fact_redacts_before_classifier_embedder_and_store() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let recorder = Arc::new(Recorder::default());
+    let id = store
+        .engine
+        .add_fact(
+            &request(c.text(), json!({ "note": c.text(), "api_key": c.hex })),
+            Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
+            Some(Arc::new(RecordingClassifier(Arc::clone(&recorder)))),
+        )
+        .await
+        .unwrap();
+    let fact = store.engine.get_fact(id).await.unwrap();
+    assert_eq!(fact.content, SCRUBBED);
+    assert_eq!(fact.metadata["note"], SCRUBBED);
+    assert_eq!(fact.metadata["api_key"], "[REDACTED:hex-secret]");
+    let seen = recorder.seen();
+    assert_eq!(
+        seen.len(),
+        2,
+        "the embedder and the classifier each saw the fact once"
+    );
+    for s in &seen {
+        assert_no_canary_in(s, &c);
+    }
+    let (_dir, db) = store.close().await;
+    assert_eq!(read_redaction_counts(&db).unwrap().redacted, 9);
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+#[tokio::test]
+async fn a_deferred_fact_queues_its_redacted_text() {
+    let c = Canaries::new();
+    let store = Store::new();
+    store
+        .engine
+        .add_fact_deferred(&request(c.text(), json!({})))
+        .await
+        .unwrap();
+    let NextEmbedding::Due(item) = store.engine.next_embedding().await.unwrap() else {
+        panic!("the fact is queued")
+    };
+    assert_eq!(item.content, SCRUBBED);
+    let (_dir, db) = store.close().await;
+    assert_eq!(read_redaction_counts(&db).unwrap().redacted, 4);
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+#[tokio::test]
+async fn batches_redact_every_entry() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let recorder = Arc::new(Recorder::default());
+    let embedder = || Arc::new(RecordingEmbedder(Arc::clone(&recorder)));
+    let ids = store
+        .engine
+        .add_facts_batch(
+            &[
+                request(c.text(), json!({})),
+                request(format!("b {}", c.aws), json!({})),
+            ],
+            embedder(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.engine.get_fact(ids[1]).await.unwrap().content,
+        "b [REDACTED:aws-access-key]"
+    );
+    let oversized = "x".repeat(me_types::limits::MAX_PAYLOAD_BYTES + 1);
+    let results = store
+        .engine
+        .add_facts_batch_partial(
+            &[
+                request(oversized, json!({})),
+                request(format!("c {}", c.machine_token), json!({})),
+            ],
+            embedder(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(results[0].is_err(), "the oversized entry alone fails");
+    let id = *results[1].as_ref().unwrap();
+    assert_eq!(
+        store.engine.get_fact(id).await.unwrap().content,
+        "c [REDACTED:machine-token]"
+    );
+    for s in &recorder.seen() {
+        assert_no_canary_in(s, &c);
+    }
+    let (_dir, db) = store.close().await;
+    assert_eq!(read_redaction_counts(&db).unwrap().redacted, 4 + 1 + 1);
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+fn provenance(root: &str, branch: &str, key: &Value) -> Value {
+    json!({ "facts": { "root": root, "branch": branch }, "dropped": {}, "key": key, "rules": 1 })
+}
+
+#[tokio::test]
+async fn event_payloads_redact_all_but_genuine_provenance() {
+    let c = Canaries::new();
+    let store = Store::new();
+    // A dot-free root holding a UUID scores above the entropy threshold: genuine provenance keeps
+    // it, while the same string anywhere else is redacted.
+    let root = "/srv/work/9932fd5f-1a85-4237-809b-5e6ae329dda1/scratchpad/cache";
+    store
+        .engine
+        .ingest(&event(json!({ "project": provenance(root, "main", &json!(null)), "error": root, "text": c.text() })))
+        .await
+        .unwrap();
+    store
+        .engine
+        .ingest_at(
+            "unscoped:laptop",
+            &event(
+                json!({ "project": provenance(root, &c.machine_token, &json!(c.machine_token)) }),
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .engine
+        .ingest(&event(json!({ "project": { "note": c.text() } })))
+        .await
+        .unwrap();
+    let payloads = events(&store.engine).await;
+    assert_eq!(payloads[0]["project"]["facts"]["root"], root);
+    assert_eq!(payloads[0]["error"], "[REDACTED:high-entropy]");
+    assert_eq!(payloads[0]["text"], SCRUBBED);
+    assert_eq!(payloads[1]["project"]["facts"]["root"], root);
+    assert_eq!(
+        payloads[1]["project"]["facts"]["branch"],
+        "[REDACTED:machine-token]"
+    );
+    assert_eq!(payloads[1]["project"]["key"], "[REDACTED:machine-token]");
+    assert_eq!(payloads[2]["project"]["note"], SCRUBBED);
+    let long = format!("{} {}", "word ".repeat(820), c.aws);
+    store
+        .engine
+        .ingest(&event(json!({ "text": long })))
+        .await
+        .unwrap();
+    let kept = events(&store.engine).await[3]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        kept,
+        format!("{} [REDACTED:aws-access-key]", "word ".repeat(820)),
+        "a 4 KiB leaf is kept whole"
+    );
+    let (_dir, db) = store.close().await;
+    assert_eq!(
+        read_redaction_counts(&db).unwrap().redacted,
+        1 + 4 + 2 + 4 + 1
+    );
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+#[tokio::test]
+async fn forget_and_move_records_redact() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let homes = vec!["unscoped:laptop".to_owned()];
+    let recorder = Arc::new(Recorder::default());
+    let id = store
+        .engine
+        .add_fact(
+            &request("plain fact".into(), json!({})),
+            Arc::new(RecordingEmbedder(recorder)),
+            None,
+        )
+        .await
+        .unwrap();
+    let record = event(json!({ "why": c.text() }));
+    let moved = store
+        .engine
+        .add_fact_deferred(&request("another plain fact".into(), json!({})))
+        .await
+        .unwrap();
+    let from = store.engine.resolve_scope_path("unscoped:laptop").unwrap();
+    store
+        .engine
+        .move_fact(moved, from, "user:alice", "unscoped:laptop", &record)
+        .await
+        .unwrap();
+    // A forget of a fact that does not exist stores its record only, never its reason.
+    let (outcome, _) = store
+        .engine
+        .forget_fact(
+            9_999,
+            &homes,
+            &format!("because {}", c.aws),
+            "unscoped:laptop",
+            &record,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, ForgetOutcome::NotFound);
+    let (outcome, _) = store
+        .engine
+        .forget_fact(
+            id,
+            &homes,
+            &format!("because {}", c.aws),
+            "unscoped:laptop",
+            &record,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, ForgetOutcome::Forgotten);
+    let explained = format!("{:?}", store.engine.explain_fact(id).await.unwrap());
+    assert!(
+        explained.contains("because [REDACTED:aws-access-key]"),
+        "{explained}"
+    );
+    assert!(
+        events(&store.engine)
+            .await
+            .iter()
+            .all(|p| p["why"] == SCRUBBED || p.get("why").is_none())
+    );
+    let (_dir, db) = store.close().await;
+    // Three records of 4 secrets each (a move, a forget that found nothing, a forget), and one
+    // stored reason.
+    assert_eq!(read_redaction_counts(&db).unwrap().redacted, 4 + 4 + 4 + 1);
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+#[tokio::test]
+async fn checkpoints_redact_and_stay_whole() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let summary = format!("{} {}", "step ".repeat(820), c.text());
+    store
+        .engine
+        .checkpoint_session(
+            "s1",
+            Some("unscoped:laptop"),
+            Some(&summary),
+            Some(json!({ "note": c.text() })),
+        )
+        .await
+        .unwrap();
+    store
+        .engine
+        .ensure_scope_path("unscoped:laptop")
+        .await
+        .unwrap();
+    let context = store
+        .engine
+        .load_context("unscoped:laptop", 5, 5)
+        .await
+        .unwrap();
+    let checkpoint = context.last_checkpoint.unwrap();
+    assert_eq!(
+        checkpoint.summary.unwrap(),
+        format!("{} {SCRUBBED}", "step ".repeat(820))
+    );
+    assert_eq!(checkpoint.metadata["note"], SCRUBBED);
+    let (_dir, db) = store.close().await;
+    assert_eq!(read_redaction_counts(&db).unwrap().redacted, 8);
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+#[tokio::test]
+async fn a_recorded_embedder_error_is_redacted() {
+    let c = Canaries::new();
+    let store = Store::new();
+    store
+        .engine
+        .add_fact_deferred(&request("plain".into(), json!({})))
+        .await
+        .unwrap();
+    let NextEmbedding::Due(item) = store.engine.next_embedding().await.unwrap() else {
+        panic!("queued")
+    };
+    let error = MemoryError::from(EmbedderError::Failed(format!("upstream said {}", c.aws)));
+    let fingerprint = EmbeddingFingerprint::new("test", "test", DIM);
+    store
+        .engine
+        .settle_embedding(&item, Err(error), &fingerprint, Backoff::DEFAULT)
+        .await
+        .unwrap();
+    let (_dir, db) = store.close().await;
+    let last = read_embed_queue_status(&db).unwrap().last_error.unwrap();
+    assert!(last.contains("[REDACTED:aws-access-key]"), "{last}");
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+#[tokio::test]
+async fn a_read_only_engine_refuses_first_and_oversize_stores_nothing() {
+    let store = Store::new();
+    let (dir, db) = store.close().await;
+    let oversized = "x".repeat(me_types::limits::MAX_PAYLOAD_BYTES + 1);
+    let read_only = MemoryEngine::builder(DIM)
+        .path(&db)
+        .read_only(true)
+        .build()
+        .unwrap();
+    let err = read_only
+        .add_fact_deferred(&request(oversized.clone(), json!({})))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MemoryError::ReadOnly), "{err}");
+    drop(read_only);
+    let engine = MemoryEngine::builder(DIM).path(&db).build().unwrap();
+    for err in [
+        engine
+            .add_fact_deferred(&request(oversized.clone(), json!({})))
+            .await
+            .unwrap_err(),
+        engine
+            .ingest(&event(json!({ "text": oversized })))
+            .await
+            .unwrap_err(),
+        engine
+            .checkpoint_session("s", None, Some(&oversized), None)
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            err.to_string().contains("too large") || format!("{err:?}").contains("PayloadTooLarge"),
+            "{err:?}"
+        );
+    }
+    assert_eq!(events(&engine).await, Vec::<Value>::new());
+    drop(dir);
+}
