@@ -50,7 +50,8 @@ Never redacted:
 - Link contents (`scheme://` and the RFC 3986 characters but `'(),;`), query keys included: only rules 0, 1 and 3
   apply to a match that starts in a link's body, after its `://`, and its userinfo is not part of it (owner ruling,
   2026-11-17). A token glued to a URL with no separator (`AKIA…https://`, `ghp_…/https://`) starts before the body,
-  so it is redacted; its placeholder then keeps the link, so a later pass leaves the link's content alone.
+  so it is redacted; its placeholder then keeps the link, so a later pass leaves the link's content alone (only a
+  placeholder of a rule the engine emits does; any other bracketed text opens no link).
 - JSON keys: only string values are scanned.
 - An event's capture context (`redact::PROVENANCE_KEY`, `project`) when it has exactly the shape the MCP server writes:
   its strings get the machine-token rule only, because the other rules misread ordinary paths (a dot-free root holding

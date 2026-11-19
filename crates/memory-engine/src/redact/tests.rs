@@ -233,13 +233,10 @@ fn an_excerpt_is_settled_and_within_the_cap() {
 
 #[test]
 fn every_placeholder_is_a_fixpoint() {
-    let rules = SECRET_PREFIXES.iter().map(|&(rule, _, _)| rule).chain([
-        "denylist",
-        "machine-token",
-        "connection-string-password",
-        "hex-secret",
-        "high-entropy",
-    ]);
+    let rules = SECRET_PREFIXES
+        .iter()
+        .map(|&(rule, _, _)| rule)
+        .chain(FIXED_RULES.iter().copied());
     for rule in rules {
         let text = format!("x [REDACTED:{rule}] y");
         assert_eq!(scrub_with(&text, &[]).unwrap(), (text.clone(), 0), "{rule}");

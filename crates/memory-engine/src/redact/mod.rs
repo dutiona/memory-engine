@@ -357,18 +357,30 @@ fn detect_denylist(text: &str, denylist: &[String], spans: &mut Spans) {
     spans.flush();
 }
 
-/// The start of a `[REDACTED:<rule>]` placeholder ending at byte `end`, looked for within the
-/// longest placeholder's length, so the test stays constant-time.
+/// The rules whose placeholders the engine emits beside the provider prefixes'.
+const FIXED_RULES: &[&str] = &[
+    "denylist",
+    "machine-token",
+    "connection-string-password",
+    "hex-secret",
+    "high-entropy",
+];
+
+/// The start of a placeholder this engine emits, `[REDACTED:<rule>]` for one of its own rules,
+/// ending at byte `end`. Any other bracketed text opens no link: the test is a fixed set of
+/// ASCII suffixes, constant-time and the same in every engine whatever its string units.
 fn placeholder_ending_at(text: &str, end: usize) -> Option<usize> {
-    if !text[..end].ends_with(']') {
-        return None;
-    }
-    let mut lo = end.saturating_sub(64);
-    while !text.is_char_boundary(lo) {
-        lo += 1;
-    }
-    let start = lo + text[lo..end].rfind("[REDACTED:")?;
-    (!text[start..end - 1].contains(']')).then_some(start)
+    let head = &text[..end];
+    let rest = head.strip_suffix(']')?;
+    SECRET_PREFIXES
+        .iter()
+        .map(|&(rule, _, _)| rule)
+        .chain(FIXED_RULES.iter().copied())
+        .find_map(|rule| {
+            rest.strip_suffix(rule)?
+                .strip_suffix("[REDACTED:")
+                .map(str::len)
+        })
 }
 
 fn placeholder_spans(text: &str) -> Vec<(usize, usize)> {
