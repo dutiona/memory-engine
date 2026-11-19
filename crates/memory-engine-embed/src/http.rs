@@ -483,7 +483,7 @@ impl HttpEmbeddingProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let bytes = read_body_capped(resp).unwrap_or_default();
+            let bytes = read_body_capped(resp, "embedding response").unwrap_or_default();
             let body = truncate_on_char_boundary(&String::from_utf8_lossy(&bytes), 1000);
             let message = format!("embedding endpoint returned {status}: {body}");
             let error = match status.as_u16() {
@@ -497,7 +497,7 @@ impl HttpEmbeddingProvider {
             });
         }
 
-        Ok(read_body_capped(resp)?)
+        Ok(read_body_capped(resp, "embedding response")?)
     }
 
     /// POST one embed request for `input` (a string or an array of them) and parse its body.
@@ -928,15 +928,18 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 /// how slowly it trickles the body — the `+ 1` byte is the over-limit sentinel.
 /// This is the genuine resource-exhaustion guard: `Content-Length` can be
 /// absent or spoofed, so the cap is enforced on bytes actually read.
-fn read_body_capped(resp: reqwest::blocking::Response) -> Result<Vec<u8>, MemoryError> {
+pub fn read_body_capped(
+    resp: reqwest::blocking::Response,
+    what: &str,
+) -> Result<Vec<u8>, MemoryError> {
     let mut buf = Vec::new();
     let read = resp
         .take(MAX_BODY + 1)
         .read_to_end(&mut buf)
-        .map_err(|e| EmbedderError::NoAnswer(format!("embedding response read failed: {e}")))?;
+        .map_err(|e| EmbedderError::NoAnswer(format!("{what} read failed: {e}")))?;
     if read as u64 > MAX_BODY {
         return Err(MemoryError::Internal(format!(
-            "embedding response too large: exceeds {MAX_BODY}-byte cap"
+            "{what} too large: exceeds {MAX_BODY}-byte cap"
         )));
     }
     Ok(buf)
