@@ -198,14 +198,37 @@ fn the_cut_keeps_whole_characters() {
 #[test]
 fn a_long_tool_input_becomes_a_string_of_its_first_bytes() {
     let small = json!({ "path": "src/lib.rs" });
-    assert_eq!(cut_json(small.clone(), &small.to_string()), small);
+    assert_eq!(cut_json(small.clone(), &small.to_string()).unwrap(), small);
     let big = json!({ "content": "x".repeat(600) });
     let compact = big.to_string();
-    let Value::String(s) = cut_json(big, &compact) else {
+    let Value::String(s) = cut_json(big, &compact).unwrap() else {
         panic!("expected a string")
     };
     assert_eq!(s.len(), CAPTURE_CAP);
     assert!(s.starts_with("{\"content\":\"xxx"));
+}
+
+/// A word whose whole entropy is low but whose first 20 characters are all distinct (4.32
+/// bits): a cut inside it exposes a match the uncut text does not hold.
+fn entropy_trap() -> String {
+    format!("{}{}", "Ab3dE5fG7hI9jK1lM2nO", "a".repeat(300))
+}
+
+#[test]
+fn an_excerpt_is_settled_and_within_the_cap() {
+    let text = format!("{} {}", "w".repeat(491), entropy_trap());
+    assert_eq!(
+        scrub(&text).unwrap(),
+        text,
+        "precondition: the whole text is clean"
+    );
+    let out = excerpt(&text).unwrap();
+    assert!(out.len() <= CAPTURE_CAP, "{}", out.len());
+    assert_eq!(
+        scrub(&out).unwrap(),
+        out,
+        "a later scrub of the excerpt changes nothing"
+    );
 }
 
 #[test]
@@ -225,12 +248,19 @@ fn every_placeholder_is_a_fixpoint() {
 
 proptest::proptest! {
     #[test]
-    fn an_excerpt_is_a_short_prefix_of_the_scrubbed_text(
+    fn an_excerpt_is_a_settled_short_prefix_of_the_scrubbed_text(
         text in proptest::string::string_regex(&format!("(.|{}){{0,700}}", ghp())).unwrap()
     ) {
         let out = excerpt(&text).unwrap();
         let settled = scrub(&text).unwrap();
         proptest::prop_assert!(out.len() <= CAPTURE_CAP);
-        proptest::prop_assert!(settled.starts_with(&out));
+        let rescrubbed = scrub(&out).unwrap();
+        proptest::prop_assert_eq!(rescrubbed.as_str(), out.as_str());
+        // It is the scrubbed text's prefix, but where settling the cut placed a placeholder.
+        let same = out.bytes().zip(settled.bytes()).take_while(|(a, b)| a == b).count();
+        proptest::prop_assert!(
+            same == out.len() || out[same..].starts_with("[REDACTED:") || out[..same].ends_with('['),
+            "{out:?} vs {settled:?}"
+        );
     }
 }

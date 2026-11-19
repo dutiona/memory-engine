@@ -100,7 +100,8 @@ refuses to store them.
 `record_activity` applies ADR-0020 §6's capture contract:
 
 - **Redact, then cut.** The input and the result are scrubbed, then cut to 512 bytes of UTF-8, back to a character
-  boundary (`redact::cut`). An input whose compact JSON fits stays JSON; a longer one is stored as a JSON string of its
+  boundary (`redact::cut`). The cut is then settled: a cut inside a word can expose a match the whole word did not
+  hold, so it is scrubbed and cut again until nothing changes, and a later scrub can never grow it past the cap. An input whose compact JSON fits stays JSON; a longer one is stored as a JSON string of its
   first 512 bytes. The cap applies to the decoded text; its JSON encoding may be longer. A promotion is built from the
   scrubbed result, so its own 200-byte cut also follows redaction. An `OutcomeClass::Other` text is redacted, then
   cut, like the result, on a stub too.

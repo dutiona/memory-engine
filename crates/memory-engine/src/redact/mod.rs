@@ -853,14 +853,31 @@ pub(crate) fn cut(text: &str) -> &str {
     &text[..end]
 }
 
+/// Already-scrubbed `text` cut to [`CAPTURE_CAP`] and settled. A cut inside a word can expose a
+/// match the whole word did not hold (its first 20 characters alone can score as high-entropy),
+/// so the cut is scrubbed and cut again until a scrub changes nothing: a later scrub of the
+/// stored excerpt can then never grow it past the cap. Such a match is an artefact of the cut,
+/// not a secret of the text, so it is not counted.
+pub(crate) fn settled_cut(text: &str) -> Result<String> {
+    let mut out = cut(text).to_owned();
+    for _ in 0..MAX_SCRUB_PASSES {
+        let next = scrub(&out)?;
+        if next == out {
+            return Ok(out);
+        }
+        cut(&next).clone_into(&mut out);
+    }
+    Err(MemoryError::Conflict(ConflictError::Redaction(UNSETTLED)))
+}
+
 /// A scrubbed tool input: kept as JSON when its compact form fits the cap, else a JSON string
-/// holding the first [`CAPTURE_CAP`] bytes of that form (`compact`, which the caller already has).
-pub(crate) fn cut_json(value: Value, compact: &str) -> Value {
-    if compact.len() <= CAPTURE_CAP {
+/// holding the settled cut of that form (`compact`, which the caller already has).
+pub(crate) fn cut_json(value: Value, compact: &str) -> Result<Value> {
+    Ok(if compact.len() <= CAPTURE_CAP {
         value
     } else {
-        Value::String(cut(compact).to_owned())
-    }
+        Value::String(settled_cut(compact)?)
+    })
 }
 
 /// ADR-0020 §6's excerpt: `text` redacted, then cut to [`CAPTURE_CAP`] bytes. Redacting first
@@ -882,7 +899,7 @@ pub(crate) fn cut_json(value: Value, compact: &str) -> Value {
 /// # Ok::<(), memory_engine::MemoryError>(())
 /// ```
 pub fn excerpt(text: &str) -> Result<String> {
-    Ok(cut(&scrub(text)?).to_owned())
+    settled_cut(&scrub(text)?)
 }
 
 // ── Tool calls (ADR-0020 §6) ─────────────────────────────────────────────────
@@ -935,7 +952,7 @@ pub(crate) fn capture_tool_use(
     if let Some(token) = touched_paths.iter().find(|t| sensitive(t)) {
         let (token, found) = scrub_with(token, &[])?;
         return Ok(ToolCapture {
-            args: serde_json::json!({ "sensitive_path": cut(&token) }),
+            args: serde_json::json!({ "sensitive_path": settled_cut(&token)? }),
             result: None,
             full_result: None,
             hash_input: format!("stub\0{token}"),
@@ -962,7 +979,7 @@ pub(crate) fn capture_tool_use(
             let mut args = args.clone();
             let found = scrub_json(&mut args, &[])?;
             let hash_input = args.to_string();
-            (cut_json(args, &hash_input), hash_input, found)
+            (cut_json(args, &hash_input)?, hash_input, found)
         };
     let (result, full_result, result_found) = match result {
         None => (None, None, 0),
@@ -971,7 +988,7 @@ pub(crate) fn capture_tool_use(
         }
         Some(r) => {
             let (clean, found) = scrub_with(r, &[])?;
-            (Some(cut(&clean).to_owned()), Some(clean), found)
+            (Some(settled_cut(&clean)?), Some(clean), found)
         }
     };
     Ok(ToolCapture {
@@ -993,7 +1010,7 @@ fn capture_text(text: &str) -> Result<(std::borrow::Cow<'static, str>, u64)> {
         return Ok((format!("[omitted: {} bytes]", text.len()).into(), 0));
     }
     let (clean, found) = scrub_with(text, &[])?;
-    Ok((cut(&clean).to_owned().into(), found))
+    Ok((settled_cut(&clean)?.into(), found))
 }
 
 // ── Derived text a consumer embeds itself ────────────────────────────────────

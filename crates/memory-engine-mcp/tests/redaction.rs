@@ -327,3 +327,34 @@ async fn a_recall_quoting_a_token_searches_its_placeholder() {
         "the embedder saw the placeholder: {bodies:?}"
     );
 }
+
+/// A cut inside a long low-entropy word can expose a match the whole word does not hold; the
+/// stored reason is settled, so the facade's own scrub never grows it past 512 bytes.
+#[tokio::test]
+async fn a_stored_reason_stays_within_the_cap() {
+    let server = TestServer::start().await;
+    let id = stored_id(
+        &server
+            .tool("laptop", "remember", json!({ "content": "kestrel kept" }))
+            .await,
+    );
+    let reason = format!(
+        "{} {}{}",
+        " ".repeat(491),
+        "Ab3dE5fG7hI9jK1lM2nO",
+        "a".repeat(300)
+    );
+    let reply = server
+        .tool("laptop", "forget", json!({ "id": id, "reason": reason }))
+        .await;
+    assert!(!reply.is_error, "{reply:?}");
+    let state = server.engine.explain_fact(id).await.unwrap().state;
+    let memory_engine::inspect::FactState::Expired {
+        reason: memory_engine::inspect::ExpiredReason::Forgotten { reason, .. },
+    } = state
+    else {
+        panic!("explained as forgotten: {state:?}");
+    };
+    let reason = reason.unwrap();
+    assert!(reason.len() <= 512, "{} bytes: {reason}", reason.len());
+}
