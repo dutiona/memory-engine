@@ -208,3 +208,13 @@ fn every_placeholder_is_a_fixpoint() {
         assert_eq!(scrub_with(&text, &[]).unwrap(), (text.clone(), 0), "{rule}");
     }
 }
+
+proptest::proptest! {
+    #[test]
+    fn an_excerpt_is_a_short_prefix_of_the_scrubbed_text(text in "(.|ghp_0123456789abcdefghij){0,700}") {
+        let out = excerpt(&text).unwrap();
+        let settled = scrub(&text).unwrap();
+        proptest::prop_assert!(out.len() <= CAPTURE_CAP);
+        proptest::prop_assert!(settled.starts_with(&out));
+    }
+}

@@ -227,6 +227,10 @@ const EXEMPT: &[(&str, &str)] = &[
         "apply_filter",
         "the activity filter's decision; record_activity stores",
     ),
+    (
+        "format_promote_content",
+        "formats the already redacted result; record_activity stores",
+    ),
     ("ignore_patterns", "accessor"),
     ("promote_patterns", "accessor"),
 ];

@@ -184,6 +184,11 @@ pub struct RecordActivityRequest {
     /// Outcome class of the activity. `None` defaults to
     /// [`OutcomeClass::Success`] (the DB column default).
     pub outcome_class: Option<OutcomeClass>,
+    /// The path tokens the call touches, as the harness adapter found them and as the call
+    /// spelled them (ADR-0020 §11). One that names a secret makes the activity a stub (#1024).
+    pub touched_paths: Vec<String>,
+    /// The call's working directory, against which a relative token is also judged.
+    pub cwd: Option<String>,
 }
 
 /// Result of recording an activity.

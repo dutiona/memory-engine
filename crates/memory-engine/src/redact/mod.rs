@@ -827,10 +827,6 @@ pub(crate) fn cut(text: &str) -> &str {
     &text[..end]
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the write-path gate wires it in (#1024)")
-)]
 /// A scrubbed tool input: kept as JSON when its compact form fits the cap, else a JSON string
 /// holding the first [`CAPTURE_CAP`] bytes of that form.
 pub(crate) fn cut_json(value: Value) -> Value {
@@ -862,6 +858,94 @@ pub(crate) fn cut_json(value: Value) -> Value {
 /// ```
 pub fn excerpt(text: &str) -> Result<String> {
     Ok(cut(&scrub(text)?).to_owned())
+}
+
+// ── Tool calls (ADR-0020 §6) ─────────────────────────────────────────────────
+
+/// What of a tool call is stored, under the capture contract (#1024).
+pub(crate) struct ToolCapture {
+    /// The stored input: scrubbed and cut, a stub's path, or an omission marker.
+    pub args: Value,
+    /// The stored result: scrubbed and cut, or an omission marker; `None` for a stub.
+    pub result: Option<String>,
+    /// The scrubbed, uncut result a promotion may quote; `None` for a stub or an omitted one.
+    pub full_result: Option<String>,
+    /// What deduplication hashes: the scrubbed uncut input, or a domain-separated stand-in.
+    pub hash_input: String,
+    /// Secrets removed from the input and from the result, apart: a deduplicated call rewrites
+    /// its row's result but its input only matched the row.
+    pub input_found: u64,
+    pub result_found: u64,
+    /// Whether the call touched a sensitive path.
+    pub stub: bool,
+}
+
+/// Apply the capture contract to one tool call: a call touching a sensitive path is a stub that
+/// keeps its token and nothing of its input or result; otherwise the input and result are
+/// scrubbed, then cut to [`CAPTURE_CAP`]. A field over the write limit is never scanned: it is
+/// stored as a marker, and an omitted input never deduplicates.
+pub(crate) fn capture_tool_use(
+    args: &Value,
+    result: Option<&str>,
+    touched_paths: &[String],
+    cwd: Option<&str>,
+) -> Result<ToolCapture> {
+    let sensitive = |token: &String| {
+        is_sensitive_path(token)
+            || cwd.is_some_and(|cwd| {
+                !token.starts_with(['/', '~']) && is_sensitive_path(&format!("{cwd}/{token}"))
+            })
+    };
+    if let Some(token) = touched_paths.iter().find(|t| sensitive(t)) {
+        let (token, found) = scrub_with(token, &[])?;
+        return Ok(ToolCapture {
+            args: serde_json::json!({ "sensitive_path": cut(&token) }),
+            result: None,
+            full_result: None,
+            hash_input: format!("stub\0{token}"),
+            input_found: found,
+            result_found: 0,
+            stub: true,
+        });
+    }
+    let (args, hash_input, input_found) =
+        if crate::limits::check_json_size(args, "tool input").is_err() {
+            // A per-call nonce from the standard library's OS-seeded hasher keys: no digest of the
+            // unscanned content is kept, and the row never matches another call or a replay.
+            let nonce = std::hash::BuildHasher::hash_one(
+                &std::collections::hash_map::RandomState::new(),
+                std::time::SystemTime::now(),
+            );
+            (
+                Value::String("[omitted: over 1 MiB]".to_owned()),
+                format!("omitted\0{nonce}"),
+                0,
+            )
+        } else {
+            let mut args = args.clone();
+            let found = scrub_json(&mut args, &[])?;
+            let hash_input = args.to_string();
+            (cut_json(args), hash_input, found)
+        };
+    let (result, full_result, result_found) = match result {
+        None => (None, None, 0),
+        Some(r) if crate::limits::check_str_size(r, "tool result").is_err() => {
+            (Some(format!("[omitted: {} bytes]", r.len())), None, 0)
+        }
+        Some(r) => {
+            let (clean, found) = scrub_with(r, &[])?;
+            (Some(cut(&clean).to_owned()), Some(clean), found)
+        }
+    };
+    Ok(ToolCapture {
+        args,
+        result,
+        full_result,
+        hash_input,
+        input_found,
+        result_found,
+        stub: false,
+    })
 }
 
 // ── Derived text a consumer embeds itself ────────────────────────────────────
