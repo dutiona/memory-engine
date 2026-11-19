@@ -17,7 +17,9 @@
 //! 5. `high-entropy`: a token of 20+ characters of the secret charset at 4.3 bits or more.
 //!
 //! A link (`scheme://` and RFC 3986 characters but `'(),;`) is exempt from every rule but
-//! 0, 1 and 3, and its userinfo is not part of it (owner ruling, 2026-11-17). An email
+//! 0, 1 and 3, and its userinfo is not part of it (owner ruling, 2026-11-17). The exemption
+//! covers a match that starts in the link's body, after its `://`: a token glued to a URL
+//! (`AKIA…https://`, `ghp_…/https://`) is not the link's content. An email
 //! address is not a secret. Each scan is one pass plus binary searches, so no input can
 //! stall a write.
 //!
@@ -173,6 +175,12 @@ impl Spans {
             .is_some_and(|&(s, e, _)| e > start && s < end)
     }
 
+    /// Whether a flushed span holds byte `pos`.
+    fn holds(&self, pos: usize) -> bool {
+        let i = self.starts.partition_point(|&s| s <= pos);
+        i > 0 && self.ends[i - 1] > pos
+    }
+
     fn add(&mut self, start: usize, end: usize, rule: &'static str) {
         self.pending.push((start, end, rule));
     }
@@ -265,11 +273,14 @@ const fn is_link_byte(b: u8) -> bool {
         )
 }
 
-/// `scheme://` plus link characters. The userinfo up to the authority's last `@` is left out,
-/// so it stays subject to every rule.
-fn links(text: &str) -> Spans {
+/// `scheme://` plus link characters, and each link's body: what follows its `://`, or its
+/// userinfo's last `@`. The userinfo is left out of both, so it stays subject to every rule. Only
+/// a match that starts in a body is exempt: one that starts before it, in the scheme or glued to
+/// it (`AKIA…https://`, `ghp_…/https://`), is not the link's content.
+fn links(text: &str) -> (Spans, Spans) {
     let b = text.as_bytes();
     let mut links = Spans::default();
+    let mut bodies = Spans::default();
     let mut pos = 0;
     while let Some(rel) = text[pos..].find("://") {
         let sep = pos + rel;
@@ -290,18 +301,20 @@ fn links(text: &str) -> Spans {
             let authority_end = (sep + 3..end)
                 .find(|&k| matches!(b[k], b'/' | b'?' | b'#'))
                 .unwrap_or(end);
-            match text[sep + 3..authority_end].rfind('@') {
-                Some(at) => {
-                    links.add(start, sep + 3, "link");
-                    links.add(sep + 3 + at, end, "link");
-                }
-                None => links.add(start, end, "link"),
+            if let Some(at) = text[sep + 3..authority_end].rfind('@') {
+                links.add(start, sep + 3, "link");
+                links.add(sep + 3 + at, end, "link");
+                bodies.add(sep + 3 + at, end, "link");
+            } else {
+                links.add(start, end, "link");
+                bodies.add(sep + 3, end, "link");
             }
         }
         pos = end.max(sep + 3);
     }
     links.flush();
-    links
+    bodies.flush();
+    (links, bodies)
 }
 
 // ── Detectors ────────────────────────────────────────────────────────────────
@@ -382,7 +395,7 @@ fn detect_machine_token(text: &str, spans: &mut Spans) {
     spans.flush();
 }
 
-fn detect_provider_prefix(text: &str, spans: &mut Spans, links: &Spans) {
+fn detect_provider_prefix(text: &str, spans: &mut Spans, links: &Spans, link_bodies: &Spans) {
     let b = text.as_bytes();
     let bodies = Runs::new(text, |c| {
         c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '/' | '=')
@@ -432,7 +445,7 @@ fn detect_provider_prefix(text: &str, spans: &mut Spans, links: &Spans) {
                 }
                 end
             };
-            if !spans.overlaps(start, end) && !links.overlaps(start, end) {
+            if !spans.overlaps(start, end) && !link_bodies.holds(start) {
                 spans.add(start, end, rule);
             }
         }
@@ -536,7 +549,7 @@ fn has_hex_context_key(text: &str, hex_start: usize, line_start: usize, words: &
             .is_some_and(|(start, _)| words.ends_with_key(start.max(line_start), p))
 }
 
-fn detect_hex_in_context(text: &str, spans: &mut Spans, links: &Spans) {
+fn detect_hex_in_context(text: &str, spans: &mut Spans, link_bodies: &Spans) {
     let b = text.as_bytes();
     let words = Words::new(text);
     let newlines = positions(text, '\n');
@@ -557,7 +570,7 @@ fn detect_hex_in_context(text: &str, spans: &mut Spans, links: &Spans) {
         let line_start = if j > 0 { newlines[j - 1] + 1 } else { 0 };
         if has_hex_context_key(text, start, line_start, &words)
             && !spans.overlaps(start, i)
-            && !links.overlaps(start, i)
+            && !link_bodies.holds(start)
         {
             spans.add(start, i, "hex-secret");
         }
@@ -590,7 +603,7 @@ const fn is_secret_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-')
 }
 
-fn detect_high_entropy(text: &str, spans: &mut Spans, links: &Spans) {
+fn detect_high_entropy(text: &str, spans: &mut Spans, link_bodies: &Spans) {
     let tokens = Runs::new(text, |c| {
         !(c.is_whitespace() || ENTROPY_SPLIT_CHARS.contains(&c))
     });
@@ -603,7 +616,7 @@ fn detect_high_entropy(text: &str, spans: &mut Spans, links: &Spans) {
                 .any(|&b| b.is_ascii_digit() || matches!(b, b'+' | b'/' | b'=' | b'_' | b'-'))
             && shannon_entropy(token) >= HIGH_ENTROPY_BITS
             && !spans.overlaps(start, end)
-            && !links.overlaps(start, end)
+            && !link_bodies.holds(start)
         {
             spans.add(start, end, "high-entropy");
         }
@@ -614,19 +627,19 @@ fn detect_high_entropy(text: &str, spans: &mut Spans, links: &Spans) {
 // ── Passes ───────────────────────────────────────────────────────────────────
 
 fn collect(text: &str, denylist: &[String]) -> Spans {
-    let links = links(text);
+    let (links, link_bodies) = links(text);
     let mut spans = Spans::default();
     if !denylist.is_empty() {
         detect_denylist(text, denylist, &mut spans);
     }
     detect_machine_token(text, &mut spans);
-    detect_provider_prefix(text, &mut spans, &links);
+    detect_provider_prefix(text, &mut spans, &links, &link_bodies);
     for (start, end) in detect_url_credential(text, &spans) {
         spans.add(start, end, "connection-string-password");
     }
     spans.flush();
-    detect_hex_in_context(text, &mut spans, &links);
-    detect_high_entropy(text, &mut spans, &links);
+    detect_hex_in_context(text, &mut spans, &link_bodies);
+    detect_high_entropy(text, &mut spans, &link_bodies);
     spans
 }
 
