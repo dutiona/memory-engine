@@ -75,6 +75,9 @@ async fn search(ctx: &CallContext<'_>, args: Value) -> Result<(String, Vec<i64>)
             query.len()
         ));
     }
+    // #1024: a query quoting a secret searches for its placeholder, which is what a stored
+    // fact holds, and the embedder never receives the secret.
+    let query = memory_engine::redact::scrub(&query).map_err(|e| e.to_string())?;
 
     let user_home = Home::User.path(ctx.user);
     // The context Home is resolved, never created: an unminted own project is skipped by

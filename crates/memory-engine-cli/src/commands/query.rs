@@ -116,7 +116,10 @@ pub async fn run(db: &Path, args: &QueryArgs, format: OutputFormat) -> anyhow::R
             .map_err(|e| anyhow::anyhow!("embedding identity check failed: {e}"))?;
         // Each blocking request also builds and drops a runtime in debug builds: embed (and
         // drop the provider) off the executor too.
-        let text = args.text.clone();
+        // #1024 (decision 12): no embedder receives a known token format; the FTS5 expression
+        // above stays as typed, since it is neither stored nor sent anywhere.
+        let text = memory_engine::redact::scrub(&args.text)
+            .map_err(|e| anyhow::anyhow!("cannot redact the query: {e}"))?;
         let embedding = tokio::task::spawn_blocking(move || provider.embed_query(&text))
             .await
             .map_err(|e| anyhow::anyhow!("join error embedding the query: {e}"))?

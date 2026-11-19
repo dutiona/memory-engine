@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::TestServer;
+use common::{TestServer, holds, store_bytes};
 use serde_json::json;
 
 /// `ME-Project-*` headers as a test sends them: name and raw value.
@@ -18,25 +18,6 @@ const BRANCH: &str = "ME-Project-Branch";
 
 const LAPTOP_DEV: &str = "/home/alice/perso/dev";
 const DESKTOP_DEV: &str = "/home/alice/dev";
-
-/// Every file of the server's directory, as bytes.
-fn store_bytes(server: &TestServer) -> Vec<(String, Vec<u8>)> {
-    std::fs::read_dir(server.dir.path())
-        .unwrap()
-        .map(Result::unwrap)
-        .filter(|e| e.file_type().unwrap().is_file())
-        .map(|e| {
-            (
-                e.file_name().to_string_lossy().into_owned(),
-                std::fs::read(e.path()).unwrap(),
-            )
-        })
-        .collect()
-}
-
-fn holds(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|w| w == needle)
-}
 
 fn project_nodes(server: &TestServer) -> usize {
     let conn = rusqlite::Connection::open(server.dir.path().join("memory.db")).unwrap();

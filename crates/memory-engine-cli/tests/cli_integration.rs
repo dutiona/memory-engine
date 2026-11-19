@@ -1171,3 +1171,45 @@ fn help_never_prints_the_embedding_api_key_from_the_environment() {
     assert!(help.contains("MEMORY_ENGINE_EMBED_API_KEY"), "{help}");
     assert!(!help.contains("embed-key-sentinel"), "{help}");
 }
+
+/// #1024 (decision 12): the text a query embeds is redacted; its FTS5 expression is kept as typed.
+#[tokio::test]
+async fn query_embeds_the_redacted_text() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let (_dir, db_path) = create_test_db().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "data": [{ "embedding": [0.1, 0.2, 0.3, 0.4] }] }),
+            ),
+        )
+        .mount(&server)
+        .await;
+    let token = format!("ghp_{}", "0123456789abcdefghij".repeat(2));
+    let url = format!("{}/v1/embeddings", server.uri());
+    let output = cli()
+        .args(["--db", db_path.to_str().unwrap(), "query"])
+        .arg(format!("blue {token}"))
+        .args(["--embed-url", &url, "--embed-model", "mock"])
+        .args(["--embed-provider", "test"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let bodies: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| String::from_utf8_lossy(&r.body).into_owned())
+        .collect();
+    assert!(!bodies.is_empty(), "the query was embedded");
+    for body in &bodies {
+        assert!(
+            !body.contains(&token) && body.contains("blue [REDACTED:github-pat]"),
+            "{body}"
+        );
+    }
+}

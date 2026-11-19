@@ -154,3 +154,35 @@ async fn an_over_cap_error_response_is_refused_unread() {
         message.len()
     );
 }
+
+#[tokio::test]
+async fn a_proposer_error_body_is_redacted_before_it_is_cut() {
+    let token = format!("ghp_{}", "0123456789abcdefghij".repeat(2));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/generate"))
+        .respond_with(ResponseTemplate::new(500).set_body_string(format!(
+            "{} {token} {}",
+            "x".repeat(969),
+            "y".repeat(500)
+        )))
+        .mount(&server)
+        .await;
+    let url = format!("{}/api/generate", server.uri());
+    let err = tokio::task::spawn_blocking(move || {
+        let proposer =
+            HttpDeltaProposer::new(url, "gemma4:26b".to_string(), None, 10).expect("client build");
+        proposer.propose(&[], &[])
+    })
+    .await
+    .expect("spawn_blocking join")
+    .expect_err("a 500 must surface as an error");
+    let text = err.to_string();
+    assert!(
+        text.contains("500")
+            && text.contains("[REDACTED:github-pat]")
+            && !text.contains(&token[..12]),
+        "{text}"
+    );
+    assert!(text.len() < 1200, "the body is cut: {} bytes", text.len());
+}

@@ -605,6 +605,26 @@ impl Reply {
     }
 }
 
+/// Every file of the server's directory, as bytes.
+pub fn store_bytes(server: &TestServer) -> Vec<(String, Vec<u8>)> {
+    std::fs::read_dir(server.dir.path())
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|e| e.file_type().unwrap().is_file())
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn holds(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// Write the binary's TOML config for a store in `dir` and return its path.
 pub fn write_config(dir: &Path, extra: &str) -> PathBuf {
     let file = dir.join("config.toml");

@@ -484,7 +484,7 @@ impl HttpEmbeddingProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let bytes = read_body_capped(resp, "embedding response").unwrap_or_default();
-            let body = truncate_on_char_boundary(&String::from_utf8_lossy(&bytes), 1000);
+            let body = body_diagnostic(&String::from_utf8_lossy(&bytes));
             let message = format!("embedding endpoint returned {status}: {body}");
             let error = match status.as_u16() {
                 401 | 403 => EmbedderError::KeyRejected(message),
@@ -645,7 +645,7 @@ impl HttpEmbeddingProvider {
         let no_format = || {
             MemoryError::Internal(format!(
                 "cannot extract embedding from response: {}",
-                serde_json::to_string(&body).unwrap_or_default()
+                body_diagnostic(&serde_json::to_string(&body).unwrap_or_default())
             ))
         };
 
@@ -713,10 +713,9 @@ impl HttpEmbeddingProvider {
                 vec![emb]
             }
             None => {
-                let body_str = serde_json::to_string(&body).unwrap_or_default();
-                let truncated = truncate_on_char_boundary(&body_str, 1000);
+                let body = body_diagnostic(&serde_json::to_string(&body).unwrap_or_default());
                 return Err(MemoryError::Internal(format!(
-                    "cannot extract embeddings from batch response: {truncated}"
+                    "cannot extract embeddings from batch response: {body}"
                 ))
                 .into());
             }
@@ -943,6 +942,21 @@ pub fn read_body_capped(
         )));
     }
     Ok(buf)
+}
+
+/// The largest upstream body a diagnostic scans.
+const DIAGNOSTIC_SCAN: usize = 8 * 1024;
+
+/// An upstream body as an error message quotes it (#1024): one of at most 8 KiB is redacted
+/// whole, then cut to 1,000 bytes; a longer one is named by its size only, so the scan stays
+/// bounded and no cut can split a secret before redaction.
+pub fn body_diagnostic(body: &str) -> String {
+    if body.len() <= DIAGNOSTIC_SCAN
+        && let Ok(clean) = memory_engine::redact::scrub(body)
+    {
+        return truncate_on_char_boundary(&clean, 1000);
+    }
+    format!("a {}-byte body, not shown", body.len())
 }
 
 /// Truncate `s` to at most `max` bytes for an error message, snapping the cut

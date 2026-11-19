@@ -204,7 +204,7 @@ impl DeltaProposer for HttpDeltaProposer {
         let status = resp.status();
         let bytes = crate::http::read_body_capped(resp, "proposer response")?;
         if !status.is_success() {
-            let body = String::from_utf8_lossy(&bytes);
+            let body = crate::http::body_diagnostic(&String::from_utf8_lossy(&bytes));
             return Err(MemoryError::Internal(format!(
                 "proposer endpoint returned {status}: {body}"
             )));
