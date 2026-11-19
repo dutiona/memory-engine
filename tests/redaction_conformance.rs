@@ -14,7 +14,7 @@ use proptest::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-const FIXTURE_SHA256: &str = "04fcc1b23d17e889551181aaa81b53b22136374f35a26cda77f0b9ae58a1d5e7";
+const FIXTURE_SHA256: &str = "c4fb2a1f41e6dfeea4dfbeaea1cb28145c8d04390003dc04440061c868e22c7d";
 
 fn fixture() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

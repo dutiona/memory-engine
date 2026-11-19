@@ -448,10 +448,9 @@ fn detect_url_credential(text: &str, spans: &Spans) -> Vec<(usize, usize)> {
             break;
         };
         let auth_start = pos + rel + 3;
-        let (auth_end, terminator) = text[auth_start..]
-            .char_indices()
-            .find(|&(_, c)| matches!(c, '/' | '?' | '#') || c.is_whitespace())
-            .map_or((text.len(), 1), |(i, c)| (auth_start + i, c.len_utf8()));
+        let auth_end = text[auth_start..]
+            .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
+            .map_or(text.len(), |i| auth_start + i);
         let authority = &text[auth_start..auth_end];
         if let Some(at) = authority.rfind('@')
             && let Some(colon) = authority[..at].find(':')
@@ -461,7 +460,11 @@ fn detect_url_credential(text: &str, spans: &Spans) -> Vec<(usize, usize)> {
                 found.push((start, end));
             }
         }
-        pos = auth_end + terminator;
+        // Resume inside the authority, not past it: an authority without a path runs to the `/`
+        // of the next `://` (`"https://a.com","db":"postgres://u:p@h"`), whose password the
+        // next search must still reach. Each search starts past the last `://`, so the scan
+        // stays linear.
+        pos = auth_start;
     }
     found
 }
