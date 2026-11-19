@@ -5,7 +5,6 @@ use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
 use crate::commands::types::CliFactType;
 use crate::db::open_engine_writable_with_dim;
-use crate::embedding::PassthroughEmbedder;
 use crate::output::{self, OutputFormat, parse_datetime};
 
 #[derive(clap::Args)]
@@ -118,9 +117,13 @@ pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow:
         }),
     };
 
-    let embedder = PassthroughEmbedder::new(embedding);
+    // The operator computed `embedding` from `--content`, so the precomputed path refuses a
+    // content that redaction would change (#1024). TODO(#615): a pre-computed embedding has no
+    // declared model identity; the sentinel names the hole #615 will enforce against.
+    let declared =
+        memory_engine::EmbeddingFingerprint::new("precomputed", "passthrough", embedding.len());
     let fact_id = engine
-        .add_fact(&req, std::sync::Arc::new(embedder), None)
+        .add_fact_precomputed(&req, embedding, &declared, None)
         .await?;
 
     match format {

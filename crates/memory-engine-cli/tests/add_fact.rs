@@ -442,3 +442,33 @@ fn add_fact_invalid_datetime() {
         .failure()
         .stderr(predicate::str::contains("invalid"));
 }
+
+/// #1024 (decision 7): the operator's vector was computed from `--content`, so a content that
+/// redaction would change is refused and nothing is stored; clean content still goes in.
+#[test]
+fn add_fact_refuses_a_vector_beside_unredacted_content() {
+    let (_dir, db_path) = create_empty_db();
+    let aws = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+    let add = |content: &str| {
+        cli()
+            .args([
+                "--db",
+                db_path.to_str().unwrap(),
+                "--format",
+                "plain",
+                "add-fact",
+            ])
+            .args(["--content", content, "--fact-type", "semantic"])
+            .args(["--embedding", EMBEDDING_JSON])
+            .assert()
+    };
+    add(&format!("deploy key {aws}"))
+        .failure()
+        .stderr(predicate::str::contains("redaction would change the text"));
+    add("deploy key rotated").success();
+    let count = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get::<_, i64>(0))
+        .unwrap();
+    assert_eq!(count, 1);
+}

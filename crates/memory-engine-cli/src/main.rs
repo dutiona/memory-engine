@@ -1,6 +1,5 @@
 mod commands;
 mod db;
-mod embedding;
 mod output;
 
 use std::path::PathBuf;
