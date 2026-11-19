@@ -27,6 +27,7 @@
 use serde_json::Value;
 
 use crate::error::{ConflictError, MemoryError, Result};
+use crate::types::OutcomeClass;
 
 mod sensitive_path;
 pub use sensitive_path::is_sensitive_path;
@@ -853,13 +854,12 @@ pub(crate) fn cut(text: &str) -> &str {
 }
 
 /// A scrubbed tool input: kept as JSON when its compact form fits the cap, else a JSON string
-/// holding the first [`CAPTURE_CAP`] bytes of that form.
-pub(crate) fn cut_json(value: Value) -> Value {
-    let compact = value.to_string();
+/// holding the first [`CAPTURE_CAP`] bytes of that form (`compact`, which the caller already has).
+pub(crate) fn cut_json(value: Value, compact: &str) -> Value {
     if compact.len() <= CAPTURE_CAP {
         value
     } else {
-        Value::String(cut(&compact).to_owned())
+        Value::String(cut(compact).to_owned())
     }
 }
 
@@ -897,8 +897,10 @@ pub(crate) struct ToolCapture {
     pub full_result: Option<String>,
     /// What deduplication hashes: the scrubbed uncut input, or a domain-separated stand-in.
     pub hash_input: String,
-    /// Secrets removed from the input and from the result, apart: a deduplicated call rewrites
-    /// its row's result but its input only matched the row.
+    /// The stored outcome: an `Other` text is scrubbed and cut like the result.
+    pub outcome: OutcomeClass,
+    /// Secrets removed from the input (with the outcome) and from the result, apart: a
+    /// deduplicated call rewrites its row's result but its input and outcome only matched it.
     pub input_found: u64,
     pub result_found: u64,
     /// Whether the call touched a sensitive path.
@@ -906,15 +908,24 @@ pub(crate) struct ToolCapture {
 }
 
 /// Apply the capture contract to one tool call: a call touching a sensitive path is a stub that
-/// keeps its token and nothing of its input or result; otherwise the input and result are
-/// scrubbed, then cut to [`CAPTURE_CAP`]. A field over the write limit is never scanned: it is
-/// stored as a marker, and an omitted input never deduplicates.
+/// keeps its token and outcome and nothing of its input or result; otherwise the input and
+/// result are scrubbed, then cut to [`CAPTURE_CAP`]. An `Other` outcome text is scrubbed and cut
+/// on both branches. A field over the write limit is never scanned: it is stored as a marker,
+/// and an omitted input never deduplicates.
 pub(crate) fn capture_tool_use(
     args: &Value,
     result: Option<&str>,
+    outcome: OutcomeClass,
     touched_paths: &[String],
     cwd: Option<&str>,
 ) -> Result<ToolCapture> {
+    let (outcome, outcome_found) = match outcome {
+        OutcomeClass::Other(text) => {
+            let (text, found) = capture_text(&text)?;
+            (OutcomeClass::Other(text.into_owned()), found)
+        }
+        named => (named, 0),
+    };
     let sensitive = |token: &String| {
         is_sensitive_path(token)
             || cwd.is_some_and(|cwd| {
@@ -928,7 +939,8 @@ pub(crate) fn capture_tool_use(
             result: None,
             full_result: None,
             hash_input: format!("stub\0{token}"),
-            input_found: found,
+            outcome,
+            input_found: found + outcome_found,
             result_found: 0,
             stub: true,
         });
@@ -950,7 +962,7 @@ pub(crate) fn capture_tool_use(
             let mut args = args.clone();
             let found = scrub_json(&mut args, &[])?;
             let hash_input = args.to_string();
-            (cut_json(args), hash_input, found)
+            (cut_json(args, &hash_input), hash_input, found)
         };
     let (result, full_result, result_found) = match result {
         None => (None, None, 0),
@@ -967,10 +979,21 @@ pub(crate) fn capture_tool_use(
         result,
         full_result,
         hash_input,
-        input_found,
+        outcome,
+        input_found: input_found + outcome_found,
         result_found,
         stub: false,
     })
+}
+
+/// A tool text as stored: scrubbed, then cut; over the write limit, never scanned and stored as
+/// an omission marker. Returns the text and its findings.
+fn capture_text(text: &str) -> Result<(std::borrow::Cow<'static, str>, u64)> {
+    if crate::limits::check_str_size(text, "tool text").is_err() {
+        return Ok((format!("[omitted: {} bytes]", text.len()).into(), 0));
+    }
+    let (clean, found) = scrub_with(text, &[])?;
+    Ok((cut(&clean).to_owned().into(), found))
 }
 
 // ── Derived text a consumer embeds itself ────────────────────────────────────

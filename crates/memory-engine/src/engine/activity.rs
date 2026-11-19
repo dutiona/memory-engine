@@ -13,7 +13,7 @@ use crate::error::{MemoryError, Result};
 use crate::limits::{check_json_size, check_str_size};
 use crate::traits::EmbeddingProvider;
 use crate::types::{
-    ActivityStatus, AddFactOptions, AddFactRequest, NewActivity, OutcomeClass, ProjectContext,
+    ActivityStatus, AddFactOptions, AddFactRequest, NewActivity, ProjectContext,
     RecordActivityRequest, RecordActivityResult, SessionCheckpoint,
 };
 
@@ -65,6 +65,8 @@ impl MemoryEngine {
         let capture = crate::redact::capture_tool_use(
             &req.args,
             req.result.as_deref(),
+            // `None` defaults to `OutcomeClass::Success` (the DB column default).
+            req.outcome_class.clone().unwrap_or_default(),
             &req.touched_paths,
             req.cwd.as_deref(),
         )?;
@@ -73,16 +75,7 @@ impl MemoryEngine {
             action.fact_content =
                 format_promote_content(&req.tool_name, capture.full_result.as_deref());
         }
-        // `None` defaults to `OutcomeClass::Success` (the DB column default).
-        let mut input_found = capture.input_found;
-        let outcome = match req.outcome_class.clone().unwrap_or_default() {
-            OutcomeClass::Other(text) => {
-                let (clean, found) = crate::redact::scrub_with(&text, &[])?;
-                input_found += found;
-                OutcomeClass::Other(clean)
-            }
-            named => named,
-        };
+        let input_found = capture.input_found;
 
         // Step 3: Compute args hash.
         let hash = args_hash(&capture.hash_input);
@@ -99,7 +92,7 @@ impl MemoryEngine {
             args_hash: hash,
             args: capture.args,
             result_summary: capture.result,
-            outcome_class: outcome,
+            outcome_class: capture.outcome,
             timestamp: req.timestamp,
             scope_id,
         };

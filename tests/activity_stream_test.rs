@@ -698,4 +698,33 @@ mod capture {
         );
         drop(dir);
     }
+
+    /// An `Other` outcome is tool text like the result: redacted, then cut, and never scanned
+    /// over the write limit.
+    #[tokio::test]
+    async fn an_other_outcome_is_redacted_then_cut() {
+        let s = store();
+        let config = ActivityFilterConfig::default();
+        let token = ghp();
+        let long = format!("{} {token} {}", "o".repeat(497), "p".repeat(600));
+        let huge = "q".repeat(2 * 1024 * 1024);
+        for outcome in [long, huge] {
+            let mut req = request(
+                "Bash",
+                json!({ "command": outcome.len().to_string() }),
+                None,
+            );
+            req.outcome_class = Some(OutcomeClass::Other(outcome));
+            s.engine.record_activity(&req, None, &config).await.unwrap();
+        }
+        let rows = activities(&s.engine).await;
+        let OutcomeClass::Other(cut) = &rows[0].outcome_class else {
+            panic!("{:?}", rows[0].outcome_class)
+        };
+        assert!(cut.len() <= 512 && holds_no_fragment(cut, &token), "{cut}");
+        assert_eq!(
+            rows[1].outcome_class,
+            OutcomeClass::Other("[omitted: 2097152 bytes]".into())
+        );
+    }
 }

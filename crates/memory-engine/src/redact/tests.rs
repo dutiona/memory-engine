@@ -198,9 +198,10 @@ fn the_cut_keeps_whole_characters() {
 #[test]
 fn a_long_tool_input_becomes_a_string_of_its_first_bytes() {
     let small = json!({ "path": "src/lib.rs" });
-    assert_eq!(cut_json(small.clone()), small);
+    assert_eq!(cut_json(small.clone(), &small.to_string()), small);
     let big = json!({ "content": "x".repeat(600) });
-    let Value::String(s) = cut_json(big) else {
+    let compact = big.to_string();
+    let Value::String(s) = cut_json(big, &compact) else {
         panic!("expected a string")
     };
     assert_eq!(s.len(), CAPTURE_CAP);

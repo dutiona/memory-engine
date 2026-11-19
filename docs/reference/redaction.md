@@ -102,12 +102,14 @@ refuses to store them.
 - **Redact, then cut.** The input and the result are scrubbed, then cut to 512 bytes of UTF-8, back to a character
   boundary (`redact::cut`). An input whose compact JSON fits stays JSON; a longer one is stored as a JSON string of its
   first 512 bytes. The cap applies to the decoded text; its JSON encoding may be longer. A promotion is built from the
-  scrubbed result, so its own 200-byte cut also follows redaction. `OutcomeClass::Other` text is scrubbed.
+  scrubbed result, so its own 200-byte cut also follows redaction. An `OutcomeClass::Other` text is redacted, then
+  cut, like the result, on a stub too.
 - **Deduplication** hashes the scrubbed, uncut input: two calls that differ only by a secret merge, and two long inputs
   that share their first 512 bytes stay two rows.
 - **Over 1 MiB.** A raw input or result over the write limit is never scanned: an input is stored as
   `[omitted: over 1 MiB]` and never deduplicates (its hash is a per-call random stand-in, so no digest of the content
-  is kept), and a result is stored as `[omitted: <N> bytes]` and never promoted. The call is still recorded.
+  is kept), and a result or an `Other` outcome is stored as `[omitted: <N> bytes]`; such a result is never promoted.
+  The call is still recorded.
 - **Stubs.** A call whose `touched_paths` names a secret is stored as a stub: its input becomes
   `{"sensitive_path": "<token>"}` (the token as spelled, scrubbed and cut), it keeps no result, is never promoted and
   never deduplicates with an ordinary call. Session, scope, time and outcome are kept.
