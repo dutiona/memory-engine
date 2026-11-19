@@ -1162,6 +1162,89 @@ async fn findings_in_text_never_written_do_not_count() {
     assert_eq!(read_redaction_counts(&db).unwrap().redacted, 0);
 }
 
+/// The report's own metadata reaches the cycle history; an oversized reason is never scanned;
+/// a promotion the tombstone blocks writes nothing and counts nothing.
+#[tokio::test]
+async fn cycle_history_and_oversized_deltas() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let recorder = Arc::new(Recorder::default());
+    two_facts(&store, &recorder).await;
+    let kept = store.engine.list_active_facts(None).await.unwrap()[0].id;
+    // The same text in two Homes; a forget in one keeps the other active, but its text is
+    // tombstoned, so a promotion of the other is blocked (#1023).
+    let embedder =
+        || Arc::new(RecordingEmbedder(Arc::clone(&recorder))) as Arc<dyn EmbeddingProvider>;
+    let mut there = request("shared words".into(), json!({}));
+    there.scope = Some("unscoped:desktop".into());
+    let copy = store
+        .engine
+        .add_fact(&there, embedder(), None)
+        .await
+        .unwrap();
+    let here = store
+        .engine
+        .add_fact(&request("shared words".into(), json!({})), embedder(), None)
+        .await
+        .unwrap();
+    store
+        .engine
+        .forget_fact(
+            here,
+            &["unscoped:laptop".into()],
+            "wrong",
+            "unscoped:laptop",
+            &event(json!({})),
+        )
+        .await
+        .unwrap();
+    let gone = copy;
+    let raw = LlmDreamCycle::new(
+        Arc::new(Merges("plain".into())),
+        Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
+    );
+    let mut report = store.engine.run_dream_cycle(&raw).await.unwrap();
+    report.metadata.method_version = format!("v1 {}", c.aws);
+    let now = chrono::Utc::now();
+    report.deltas = vec![
+        CycleDelta::Quarantine {
+            fact_id: kept,
+            reason: "q".repeat(me_types::limits::MAX_PAYLOAD_BYTES + 1),
+        },
+        CycleDelta::Promote {
+            fact_id: gone,
+            provenance: memory_engine::types::PromotionProvenance {
+                source_count: 1,
+                session_count: 1,
+                date_range_start: now,
+                date_range_end: now,
+                confidence: 0.9,
+                method_version: format!("v1 {}", c.aws),
+                representative_ids: vec![gone],
+            },
+        },
+    ];
+    let applied = store.engine.apply_cycle_report(&report).await.unwrap();
+    assert_eq!((applied.blocked, applied.quarantined), (2, 0));
+    let history = store
+        .engine
+        .get_config("dream_cycle_history")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        history.contains("v1 [REDACTED:aws-access-key]"),
+        "{history}"
+    );
+    let (_dir, db) = store.close().await;
+    assert_eq!(
+        read_redaction_counts(&db).unwrap().redacted,
+        1,
+        "the history's key only"
+    );
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
 #[tokio::test]
 async fn a_scrubbing_proposer_hands_the_cycle_redacted_summaries() {
     let c = Canaries::new();

@@ -72,7 +72,11 @@ impl MemoryEngine {
             config,
         )
         .await?;
-        self.tally(scrubbing.found.load(Ordering::Relaxed), 0).await;
+        // The summaries are written only when the apply kept them: a concurrent writer that
+        // expired a dedup survivor makes it discard them (#409), and then nothing counts.
+        if stats.clusters_created + stats.global_summaries > 0 {
+            self.tally(scrubbing.found.load(Ordering::Relaxed), 0).await;
+        }
         Ok(stats)
     }
 }

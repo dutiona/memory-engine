@@ -290,47 +290,89 @@ impl MemoryEngine {
         &self,
         report: &crate::cognitive::CycleReport,
     ) -> Result<crate::cognitive::ApplyResult> {
+        use crate::cognitive::CycleDelta;
+        use crate::limits::{check_json_size, check_str_size};
         self.ensure_writable()?;
         // #1024: a delta whose embedded text redaction would change carries a vector of a
         // secret; it is skipped and counted as blocked, like a tombstone-blocked delta (#1023),
         // so the window is still marked and a deterministic proposer cannot livelock on it.
-        // Text that is not embedded (reasons, metadata, provenance) is scrubbed.
-        let mut report = report.clone();
+        // Text that is not embedded (reasons, metadata, provenance, the report's own
+        // `method_version`, which the cycle history keeps) is scrubbed. Every raw bound is
+        // checked before a delta is copied or scanned; an oversized delta is skipped too.
+        check_str_size(&report.metadata.method_version, "cycle method version")?;
+        let mut metadata = report.metadata.clone();
+        let (method, mut found) = crate::redact::scrub_with(&metadata.method_version, &[])?;
+        metadata.method_version = method;
         let mut blocked = 0;
-        let mut found = 0;
         let mut deltas = Vec::with_capacity(report.deltas.len());
-        for mut delta in std::mem::take(&mut report.deltas) {
-            match &mut delta {
-                crate::cognitive::CycleDelta::AddFact(fact)
-                | crate::cognitive::CycleDelta::Synthesize { new_fact: fact, .. } => {
-                    if crate::limits::check_str_size(&fact.content, "fact content").is_err()
+        for delta in &report.deltas {
+            let delta = match delta {
+                CycleDelta::AddFact(fact) | CycleDelta::Synthesize { new_fact: fact, .. } => {
+                    if check_str_size(&fact.content, "fact content").is_err()
+                        || check_json_size(&fact.metadata, "fact metadata").is_err()
                         || crate::redact::require_clean(&fact.content).is_err()
                     {
                         blocked += 1;
                         continue;
                     }
-                    let n = crate::redact::scrub_json(&mut fact.metadata, &[])?;
-                    // A forgotten text is blocked when the report applies (#1023), so its
-                    // metadata is never written and does not count.
-                    if !self.storage.is_forgotten(&fact.content).await? {
-                        found += n;
+                    let mut delta = delta.clone();
+                    if let CycleDelta::AddFact(fact)
+                    | CycleDelta::Synthesize { new_fact: fact, .. } = &mut delta
+                    {
+                        let n = crate::redact::scrub_json(&mut fact.metadata, &[])?;
+                        // A forgotten text is blocked when the report applies (#1023), so its
+                        // metadata is never written and does not count.
+                        if !self.storage.is_forgotten(&fact.content).await? {
+                            found += n;
+                        }
+                    }
+                    delta
+                }
+                CycleDelta::Quarantine { fact_id, reason } => {
+                    if check_str_size(reason, "quarantine reason").is_err() {
+                        blocked += 1;
+                        continue;
+                    }
+                    let (reason, n) = crate::redact::scrub_with(reason, &[])?;
+                    found += n;
+                    CycleDelta::Quarantine {
+                        fact_id: *fact_id,
+                        reason,
                     }
                 }
-                crate::cognitive::CycleDelta::Quarantine { reason, .. } => {
-                    let (clean, n) = crate::redact::scrub_with(reason, &[])?;
-                    *reason = clean;
-                    found += n;
+                CycleDelta::Promote {
+                    fact_id,
+                    provenance,
+                } => {
+                    if check_str_size(&provenance.method_version, "promotion provenance").is_err() {
+                        blocked += 1;
+                        continue;
+                    }
+                    let mut provenance = provenance.clone();
+                    let (method, n) = crate::redact::scrub_with(&provenance.method_version, &[])?;
+                    provenance.method_version = method;
+                    // A promotion copies its source row; one whose text is forgotten is blocked
+                    // when the report applies (#1023) and writes nothing.
+                    let source = self.storage.get_fact(*fact_id).await.ok();
+                    if let Some(source) = source
+                        && !self.storage.is_forgotten(&source.content).await?
+                    {
+                        found += n;
+                    }
+                    CycleDelta::Promote {
+                        fact_id: *fact_id,
+                        provenance,
+                    }
                 }
-                crate::cognitive::CycleDelta::Promote { provenance, .. } => {
-                    let (clean, n) = crate::redact::scrub_with(&provenance.method_version, &[])?;
-                    provenance.method_version = clean;
-                    found += n;
-                }
-                _ => {}
-            }
+                other => other.clone(),
+            };
             deltas.push(delta);
         }
-        report.deltas = deltas;
+        let report = crate::cognitive::CycleReport {
+            deltas,
+            identity: report.identity.clone(),
+            metadata,
+        };
         let mut result = crate::cognitive::apply_cycle_report(
             self.mem_ctx(),
             &self.graph,
@@ -360,6 +402,8 @@ impl MemoryEngine {
         // #1024: the vector was computed from `content`, which must be clean; the metadata and
         // the provenance, which are not embedded, are scrubbed.
         crate::limits::check_str_size(&req.content, "fact content")?;
+        crate::limits::check_json_size(&req.metadata, "fact metadata")?;
+        crate::limits::check_str_size(&req.provenance.method_version, "promotion provenance")?;
         crate::redact::require_clean(&req.content)?;
         let mut found = 0;
         let mut req = req.clone();
@@ -941,6 +985,13 @@ mod tests {
             ),
             "{err:?}"
         );
+        // Raw bounds come before the scan: an oversized metadata or provenance is refused as
+        // too large, never scanned.
+        let mut oversized = request("plain wisdom".into());
+        oversized.metadata =
+            serde_json::json!({ "note": "m".repeat(me_types::limits::MAX_PAYLOAD_BYTES + 1) });
+        let err = engine.promote_with_lineage(&oversized).await.unwrap_err();
+        assert!(err.to_string().contains("exceeding"), "{err}");
         let result = engine
             .promote_with_lineage(&request("plain wisdom".into()))
             .await
