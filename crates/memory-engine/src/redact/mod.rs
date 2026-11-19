@@ -28,6 +28,9 @@ use serde_json::Value;
 
 use crate::error::{ConflictError, MemoryError, Result};
 
+mod sensitive_path;
+pub use sensitive_path::is_sensitive_path;
+
 /// The top-level event-payload member that holds ADR-0021 MC-9's capture context.
 pub const PROVENANCE_KEY: &str = "project";
 
