@@ -1,6 +1,6 @@
 # ADR 0015: Cross-layer embedding-identity & mismatch parity policy
 
-**Status:** Accepted (2026-06-16); amended 2026-11-16 (dutiona/memory-engine#1017: served artifact, pinned identity, per-store query instructions)
+**Status:** Accepted (2026-06-16); amended 2026-11-16 (dutiona/memory-engine#1017: served artifact, pinned identity, per-store query instructions); amended 2026-11-19 (dutiona/memory-engine#1078, dutiona/knowledge-base#607: measured serving facts, per-space query instructions)
 **Date:** 2026-06-16
 **Scope:** Cross-layer — **Memory** layer and **Knowledge** layer
 
@@ -148,17 +148,39 @@ Both layers serve and record this identity:
 The served file is `Qwen3-Embedding-0.6B-Q8_0.gguf` (639,150,592 bytes) from the official
 Hugging Face repository `Qwen/Qwen3-Embedding-0.6B-GGUF` at commit
 `370f27d7550e0def9b39c1f16d3fbaa13aa67728`, the Q8_0 file the 2026-11-02 benchmark used.
-The deployment verifies the installed file's SHA-256 against this value. 2,048 tokens is
-well above the benchmark's 538-token chunks; dutiona/infra#77 confirms it fits in the
-Mac's memory with the chosen `--parallel`.
+The deployment verifies the installed file's SHA-256 against `artifact_sha256` above.
+
+2,048 tokens is well above the benchmark's 538-token chunks. dutiona/infra#77 serves it
+with 4 parallel slots: the server embeds an input of up to 2,048 tokens as it counts them
+(`usage.prompt_tokens`, which includes the end-of-sequence token it appends) and refuses
+a longer one with HTTP 400 `exceed_context_size_error`; its memory footprint was 1,158 MB
+while the Mac served a 27B model, with llama.cpp build b12048. dutiona/infra#140 reported
+these measurements on 2026-11-17.
 
 ### 6. Query instructions
 
-Asymmetric models embed queries with an instruction and documents without one. Each store
-pins its own instruction, verbatim below, and its embedding client prepends it to every
-query automatically; callers never build it. Documents never carry an instruction, so
-document vectors stay comparable across stores. The instruction is policy, not identity:
-it is not recorded in the store, and changing it re-embeds nothing.
+Asymmetric models embed queries with an instruction and documents without one. The query
+instruction is per-space configuration recorded with the space (owner's decision,
+2026-11-17, on dutiona/knowledge-base#573's plan dutiona/knowledge-base#606): a
+Qwen3-Embedding space carries its store's pinned instruction, verbatim below, unless
+configured otherwise, and a space of another model carries none or its own. The Memory
+layer departs from this rule as its paragraph states. The embedding client prepends the
+instruction, if any, to each query; callers never build it. Documents never carry an
+instruction, so document vectors under one identity stay comparable across stores. The
+instruction is policy, not identity: the identity tuple (§1) leaves it out, so no
+mismatch check compares it, and changing it re-embeds nothing.
+
+**Memory layer.** Each embedding client reads `query_instruction` from its own
+configuration, and the store does not record it. A deployment therefore gives every
+client of one store (the MCP server, the CLI) the same instruction and revisits it when a
+reconstruction (§4) changes the model. Unset, the HTTP client uses the pinned instruction
+whatever the model, so a deployment of another model sets it to `""` (none) or to its
+own.
+
+**Knowledge layer.** Each space records its instruction in
+`embed_spaces.query_instruction`: NULL means its model's default, the pinned instruction
+when the model name contains `qwen3-embedding` (ignoring case) and none otherwise; `""`
+means none; any other text is the space's own.
 
 Notation: `\n` below is one line feed (U+000A), never the two characters `\` and `n`, and
 each string ends with one space after `Query:`.
