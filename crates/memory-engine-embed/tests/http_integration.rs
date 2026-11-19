@@ -1021,3 +1021,18 @@ async fn an_error_body_over_8_kib_is_named_by_its_size_only() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_token_behind_a_json_escape_is_redacted() {
+    // In the body's JSON text the token follows the `n` of a `\n` escape, a word character, so
+    // only the decoded string shows the line break that makes it a machine token.
+    let token = format!("me_{}", "Zq7Xw3Rt9Lp2Vb6Nm4Kc8Hd1Fs5Gj0Ay");
+    let body = format!(r#"{{"error":{{"message":"bad key\n{token}"}}}}"#);
+    for err in errors_for(ResponseTemplate::new(500).set_body_string(body)).await {
+        let text = err.to_string();
+        assert!(
+            text.contains("[REDACTED:machine-token]") && !text.contains(&token),
+            "{text}"
+        );
+    }
+}

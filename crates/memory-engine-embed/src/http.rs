@@ -949,14 +949,35 @@ const DIAGNOSTIC_SCAN: usize = 8 * 1024;
 
 /// An upstream body as an error message quotes it (#1024): one of at most 8 KiB is redacted
 /// whole, then cut to 1,000 bytes; a longer one is named by its size only, so the scan stays
-/// bounded and no cut can split a secret before redaction.
+/// bounded and no cut can split a secret before redaction. A JSON body is redacted in its
+/// decoded strings: in its text an escape (`\n`) can sit against a token and hide it.
 pub fn body_diagnostic(body: &str) -> String {
     if body.len() <= DIAGNOSTIC_SCAN
-        && let Ok(clean) = memory_engine::redact::scrub(body)
+        && let Ok(clean) = scrub_body(body)
     {
         return truncate_on_char_boundary(&clean, 1000);
     }
     format!("a {}-byte body, not shown", body.len())
+}
+
+fn scrub_body(body: &str) -> Result<String, MemoryError> {
+    fn walk(value: &mut serde_json::Value) -> Result<(), MemoryError> {
+        match value {
+            serde_json::Value::String(s) => *s = memory_engine::redact::scrub(s)?,
+            serde_json::Value::Array(items) => items.iter_mut().try_for_each(walk)?,
+            serde_json::Value::Object(members) => members.values_mut().try_for_each(walk)?,
+            _ => {}
+        }
+        Ok(())
+    }
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(mut value) => {
+            walk(&mut value)?;
+            // The serialized form is scanned too, as a whole body is, for what spans values.
+            memory_engine::redact::scrub(&value.to_string())
+        }
+        Err(_) => memory_engine::redact::scrub(body),
+    }
 }
 
 /// Truncate `s` to at most `max` bytes for an error message, snapping the cut
