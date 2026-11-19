@@ -160,9 +160,9 @@ impl HttpDeltaProposer {
             })?;
         let cleaned = strip_code_fence(response);
         serde_json::from_str(cleaned).map_err(|e| {
-            let preview: String = cleaned.chars().take(500).collect();
             MemoryError::Internal(format!(
-                "proposer returned malformed merge JSON ({e}): {preview}"
+                "proposer returned malformed merge JSON ({e}): {}",
+                crate::http::body_diagnostic(cleaned)
             ))
         })
     }

@@ -186,3 +186,33 @@ async fn a_proposer_error_body_is_redacted_before_it_is_cut() {
     );
     assert!(text.len() < 1200, "the body is cut: {} bytes", text.len());
 }
+
+#[tokio::test]
+async fn a_malformed_merge_preview_is_redacted_before_it_is_cut() {
+    // The token starts at byte 480: the old 500-character preview would keep 20 bytes of it.
+    let token = format!("ghp_{}", "0123456789abcdefghij".repeat(2));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/generate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "model": "gemma4:26b",
+            "response": format!("{} {token} {{{{", "x".repeat(479)),
+            "done": true,
+        })))
+        .mount(&server)
+        .await;
+    let url = format!("{}/api/generate", server.uri());
+    let err = tokio::task::spawn_blocking(move || {
+        let proposer =
+            HttpDeltaProposer::new(url, "gemma4:26b".to_string(), None, 10).expect("client build");
+        proposer.propose(&[], &[])
+    })
+    .await
+    .expect("spawn_blocking join")
+    .expect_err("malformed merge JSON is an error");
+    let text = err.to_string();
+    assert!(
+        text.contains("[REDACTED:github-pat]") && !text.contains(&token[..12]),
+        "{text}"
+    );
+}
