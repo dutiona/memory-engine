@@ -72,8 +72,12 @@ impl MemoryEngine {
         )?;
         let omitted_result = req.result.is_some() && capture.full_result.is_none();
         if let ActivityFilterDecision::Promote(action) = &mut decision {
-            action.fact_content =
-                format_promote_content(&req.tool_name, capture.full_result.as_deref());
+            // Scrubbed again after its own 200-byte cut, which can expose a match the result did
+            // not hold: the tombstone check below must read the text `add_fact` stores.
+            action.fact_content = crate::redact::scrub(&format_promote_content(
+                &req.tool_name,
+                capture.full_result.as_deref(),
+            ))?;
         }
         let input_found = capture.input_found;
 

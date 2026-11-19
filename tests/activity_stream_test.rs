@@ -641,6 +641,57 @@ mod capture {
         );
     }
 
+    /// The promotion's 200-byte cut can expose a match its result did not hold; the tombstone
+    /// check reads the text `add_fact` stores, so a forgotten promotion stays forgotten.
+    #[tokio::test]
+    async fn a_forgotten_promotion_cut_into_a_match_stays_forgotten() {
+        let s = store();
+        let promote = ActivityFilterConfig::new(0, [] as [&str; 0], ["commit"]);
+        let result = format!(
+            "{} {}{}",
+            "x".repeat(177),
+            "Ab3dE5fG7hI9jK1lM2nO",
+            "a".repeat(300)
+        );
+        let call = |session: &str| RecordActivityRequest {
+            session_id: session.into(),
+            scope_path: None,
+            ..request("git_commit", json!({ "m": "x" }), Some(result.clone()))
+        };
+        let first = s
+            .engine
+            .record_activity(&call("s1"), Some(embedder()), &promote)
+            .await
+            .unwrap();
+        let id = first.promoted_fact_id.unwrap();
+        let record = memory_engine::types::NewEvent {
+            timestamp: Utc::now(),
+            event_type: memory_engine::types::EventType::MemoryOp,
+            payload: json!({}),
+            source: "test".into(),
+            session_id: None,
+            scope_id: 1,
+            origin_node_id: "test".into(),
+            sequence_id: 0,
+            created_at: None,
+        };
+        let (outcome, _) = s
+            .engine
+            .forget_fact(id, &["/".into()], "wrong", "unscoped:test", &record)
+            .await
+            .unwrap();
+        assert_eq!(outcome, memory_engine::types::ForgetOutcome::Forgotten);
+        let again = s
+            .engine
+            .record_activity(&call("s2"), Some(embedder()), &promote)
+            .await
+            .unwrap();
+        assert_eq!(
+            (again.status, again.promoted_fact_id),
+            (ActivityStatus::Recorded, None)
+        );
+    }
+
     #[tokio::test]
     async fn an_oversized_input_or_result_is_omitted_not_refused() {
         let s = store();
