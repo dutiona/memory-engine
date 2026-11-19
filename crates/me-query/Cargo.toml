@@ -1,6 +1,6 @@
 [package]
 name = "me-query"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 edition = "2024"
 rust-version.workspace = true
 description = "Query primitive: hybrid FTS5 + vector + RRF retrieval over MemoryCtx (Wave 2 #816 / S4, sub-PR 2)"
