@@ -91,7 +91,8 @@ in `ApplyResult.blocked`, like a tombstone-blocked delta (#1023): the window is 
 proposer cannot livelock on it. Quarantine reasons, promotion provenance, the report's own `method_version` (kept in
 the cycle history) and every metadata leaf are scrubbed. Every raw bound is checked before a delta is read: an
 oversized delta is skipped as blocked, while an oversized quarantine reason or report label becomes an omission
-marker, so the action still applies.
+marker, so the action still applies. The 1 MiB bound admits caller text: the engine's own annotations (a quarantine's
+envelope, the cycle's `dream_cycle` stamp) may take a fact already at the limit a few dozen bytes past it.
 Consolidation scrubs its `SummaryGenerator`'s output before embedding it. `LlmDreamCycle` embeds its proposer's
 summaries below the facade, so `redact::ScrubbingProposer` wraps a proposer and scrubs each summary (dropping a group
 whose summary exceeds the write limit or does not settle); `memory-engine-cli consolidate --backend llm` uses it. A

@@ -1241,9 +1241,9 @@ async fn findings_in_text_never_written_do_not_count() {
 
 /// The report's own metadata reaches the cycle history; an oversized reason is never scanned;
 /// a promotion the tombstone blocks writes nothing and counts nothing.
-/// Merged and scrubbed metadata stays within the limit: a quarantine with no room even for a
-/// marker, and an `AddFact` whose placeholders outgrow its metadata, are skipped as blocked, and
-/// the rest of the report still applies (#641).
+/// Scrubbed metadata stays within the limit: an `AddFact` whose placeholders outgrow it is skipped
+/// as blocked and the rest of the report still applies (#641); a quarantine always applies, with a
+/// marker when its reason has no room.
 #[tokio::test]
 async fn a_delta_whose_metadata_would_outgrow_the_limit_is_blocked() {
     let store = Store::new();
@@ -1281,7 +1281,13 @@ async fn a_delta_whose_metadata_would_outgrow_the_limit_is_blocked() {
     let applied = store.engine.apply_cycle_report(&report).await.unwrap();
     assert_eq!(
         (applied.blocked, applied.quarantined, applied.facts_added),
-        (2, 0, 0)
+        (1, 1, 0)
+    );
+    // The quarantine applies even to a fact already at the limit, with a marker for a reason.
+    let quarantined = store.engine.get_fact(full).await.unwrap();
+    assert_eq!(
+        quarantined.metadata["quarantine"]["reason"],
+        "[omitted: 5 bytes]"
     );
 }
 

@@ -384,8 +384,9 @@ impl MemoryEngine {
                     crate::redact::scrub_with(reason, &[])?
                 };
                 // The reason is merged into the fact's metadata, as the store merges it; one that
-                // would overflow it is stored as a marker, and a fact with no room even for the
-                // marker is not quarantined.
+                // would overflow it is stored as a marker. A quarantine always applies: the
+                // marker's envelope is an engine annotation of bounded size, like the cycle's own
+                // stamp, so it may take a fact already at the limit a few dozen bytes past it.
                 let quarantine =
                     |reason: &str| serde_json::json!({ "reason": reason, "at": LONGEST_RFC3339 });
                 if let Ok(fact) = self.storage.get_fact(*fact_id).await {
@@ -400,9 +401,6 @@ impl MemoryEngine {
                         *found += n;
                     } else {
                         reason = marker(&reason);
-                        if !fits(&reason) {
-                            return Ok(None);
-                        }
                     }
                 } else {
                     *found += n;
