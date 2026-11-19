@@ -773,3 +773,38 @@ async fn bootstrap_mixed_session_fixture() {
         "every fact's content must come from reconstructed turn text"
     );
 }
+
+/// #1024 (decision 6): a session bootstrap adds its reported `secrets_redacted`, turns scrubbed
+/// before extraction included, to the store's redaction total.
+#[tokio::test]
+async fn a_session_bootstrap_adds_its_redactions_to_the_store_total() {
+    let planted = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+    let jsonl = multi_turn_session(
+        "redact-count",
+        &[(
+            "Fix the bug in parser.rs",
+            &format!(
+                "Found the root cause and applied the fix; tests pass. Token {planted} leaked."
+            ),
+        )],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.db");
+    let mut engine = MemoryEngine::builder(4).path(&db).build().unwrap();
+    let report = engine
+        .bootstrap_session(
+            Cursor::new(jsonl),
+            std::sync::Arc::new(TestEmbedder),
+            std::sync::Arc::new(KeywordExtractor),
+            &BootstrapConfig::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(report.secrets_redacted >= 1, "{}", report.secrets_redacted);
+    engine.close().await.unwrap();
+    assert_eq!(
+        memory_engine::read_redaction_counts(&db).unwrap().redacted,
+        u64::try_from(report.secrets_redacted).unwrap()
+    );
+}

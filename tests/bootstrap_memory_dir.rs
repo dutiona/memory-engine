@@ -307,3 +307,38 @@ async fn frontmatter_secret_in_description_is_redacted() {
         "description value should be scrubbed, got {desc:?}"
     );
 }
+
+/// #1024 (decision 6): a bootstrap run adds its reported `secrets_redacted` to the store's
+/// redaction total, once: a re-run that creates nothing adds nothing.
+#[tokio::test]
+async fn a_bootstrap_run_adds_its_redactions_to_the_store_total() {
+    let tmp = tempfile::tempdir().unwrap();
+    let notes = tmp.path().join("notes");
+    fs::create_dir(&notes).unwrap();
+    write_file(
+        &notes,
+        "incident.md",
+        &format!(
+            "---\nname: incident-note\ndescription: \"leaked key {PLANTED_SECRET}\"\nmetadata:\n  type: project\n---\nThe key {PLANTED_SECRET} is rotated.\n"
+        ),
+    );
+    let db = tmp.path().join("memory.db");
+    let mut engine = MemoryEngine::builder(4).path(&db).build().unwrap();
+    let embedder = || std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>;
+    let config = BootstrapConfig::default();
+    let first = engine
+        .bootstrap_memory_directory(&notes, embedder(), &config, None)
+        .await
+        .unwrap();
+    assert_eq!(first.secrets_redacted, 2);
+    let again = engine
+        .bootstrap_memory_directory(&notes, embedder(), &config, None)
+        .await
+        .unwrap();
+    assert_eq!(again.secrets_redacted, 0);
+    engine.close().await.unwrap();
+    assert_eq!(
+        memory_engine::read_redaction_counts(&db).unwrap().redacted,
+        2
+    );
+}

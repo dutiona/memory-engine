@@ -197,6 +197,13 @@ impl MemoryEngine {
             }
         }
         report.sessions_processed = 1;
+        // #1024 (decision 6): the store total takes bootstrap's audited count, which also
+        // holds turns scrubbed before extraction.
+        self.tally(
+            u64::try_from(report.secrets_redacted).unwrap_or(u64::MAX),
+            0,
+        )
+        .await;
         Ok(report)
     }
 
@@ -455,6 +462,11 @@ impl MemoryEngine {
                 report.prewarm_metrics.avg_importance = importance_sum / total as f64;
             }
         }
+        self.tally(
+            u64::try_from(report.secrets_redacted).unwrap_or(u64::MAX),
+            0,
+        )
+        .await;
         Ok(report)
     }
 }
