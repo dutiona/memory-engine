@@ -44,6 +44,19 @@ fn scrub_counts_only_new_secrets() {
     assert_eq!(scrub_with(&once, &[]).unwrap(), (once, 0));
 }
 
+#[test]
+fn a_relabelled_placeholder_is_not_a_new_secret() {
+    // Pass 1 redacts the token as `github-pat`; pass 2 relabels that placeholder as the URL's
+    // password. One secret was found, not two.
+    let text = format!("clone https://x-access-token:{}@github.com/o/r.git", ghp());
+    let (out, found) = scrub_with(&text, &[]).unwrap();
+    assert_eq!(
+        out,
+        "clone https://x-access-token:[REDACTED:connection-string-password]@github.com/o/r.git"
+    );
+    assert_eq!(found, 1);
+}
+
 // ── The author denylist ──────────────────────────────────────────────────────
 
 #[test]

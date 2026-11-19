@@ -110,7 +110,10 @@ impl MemoryEngine {
             Utc::now(),
         )
         .await?;
-        self.tally(found, 0).await;
+        // The candidate's metadata is written only when the arbiter stores it.
+        if resolution.new_fact_id.is_some() {
+            self.tally(found, 0).await;
+        }
         Ok(resolution)
     }
 }

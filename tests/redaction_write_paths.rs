@@ -1013,6 +1013,61 @@ async fn cycle_deltas_with_unredacted_text_are_skipped_and_counted() {
     assert_store_files_clean(db.parent().unwrap(), &c);
 }
 
+struct Noops;
+
+impl ConflictArbiter for Noops {
+    fn arbitrate(&self, _old: &Fact, _new: &Fact) -> Result<CrudDecision> {
+        Ok(CrudDecision::Noop)
+    }
+}
+
+/// Decision 6: a finding counts only when the text holding it is written.
+#[tokio::test]
+async fn findings_in_text_never_written_do_not_count() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let recorder = Arc::new(Recorder::default());
+    two_facts(&store, &recorder).await;
+    let facts = store.engine.list_active_facts(None).await.unwrap();
+    let (kept, gone) = (facts[0].id, facts[1].clone());
+    // A candidate the arbiter declines stores nothing of its metadata.
+    let candidate = NewFact::builder("plain candidate", vec![0.5; DIM], FactType::Semantic)
+        .metadata(json!({ "note": c.text() }))
+        .build();
+    let resolution = store
+        .engine
+        .resolve_conflict(&Noops, kept, &candidate)
+        .await
+        .unwrap();
+    assert_eq!(resolution.new_fact_id, None);
+    // A delta whose text was forgotten is blocked (#1023), so its metadata is never written.
+    store
+        .engine
+        .forget_fact(
+            gone.id,
+            &["/".into(), "unscoped:laptop".into()],
+            "wrong",
+            "unscoped:laptop",
+            &event(json!({})),
+        )
+        .await
+        .unwrap();
+    let raw = LlmDreamCycle::new(
+        Arc::new(Merges("plain".into())),
+        Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
+    );
+    let mut report = store.engine.run_dream_cycle(&raw).await.unwrap();
+    report.deltas = vec![CycleDelta::AddFact(
+        NewFact::builder(gone.content.clone(), vec![0.5; DIM], FactType::Semantic)
+            .metadata(json!({ "note": c.text() }))
+            .build(),
+    )];
+    let applied = store.engine.apply_cycle_report(&report).await.unwrap();
+    assert_eq!((applied.blocked, applied.facts_added), (1, 0));
+    let (_dir, db) = store.close().await;
+    assert_eq!(read_redaction_counts(&db).unwrap().redacted, 0);
+}
+
 #[tokio::test]
 async fn a_scrubbing_proposer_hands_the_cycle_redacted_summaries() {
     let c = Canaries::new();

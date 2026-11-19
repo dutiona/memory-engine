@@ -639,7 +639,10 @@ fn one_pass(text: &str, denylist: &[String]) -> (String, Vec<&'static str>, u64)
     for ((&start, &end), &rule) in spans.starts.iter().zip(&spans.ends).zip(&spans.rules) {
         out.push_str(&text[cursor..start]);
         let placeholder = format!("[REDACTED:{rule}]");
-        if text[start..end] != placeholder {
+        // A match that is already a placeholder is a relabel (a token's placeholder becoming the
+        // URL password it sits in), not a new secret.
+        let matched = &text[start..end];
+        if !(matched.starts_with("[REDACTED:") && matched.ends_with(']')) {
             found += 1;
         }
         out.push_str(&placeholder);

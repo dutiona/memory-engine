@@ -309,7 +309,12 @@ impl MemoryEngine {
                         blocked += 1;
                         continue;
                     }
-                    found += crate::redact::scrub_json(&mut fact.metadata, &[])?;
+                    let n = crate::redact::scrub_json(&mut fact.metadata, &[])?;
+                    // A forgotten text is blocked when the report applies (#1023), so its
+                    // metadata is never written and does not count.
+                    if !self.storage.is_forgotten(&fact.content).await? {
+                        found += n;
+                    }
                 }
                 crate::cognitive::CycleDelta::Quarantine { reason, .. } => {
                     let (clean, n) = crate::redact::scrub_with(reason, &[])?;
