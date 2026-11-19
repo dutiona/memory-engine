@@ -349,6 +349,9 @@ impl MemoryEngine {
         &self,
         req: &PromoteRequest,
     ) -> Result<PromotionResult> {
+        // #972 first: `ReadOnly` wins over any refusal of the input.
+        self.ensure_open()?;
+        self.ensure_writable()?;
         // #1024: the vector was computed from `content`, which must be clean; the metadata and
         // the provenance, which are not embedded, are scrubbed.
         crate::limits::check_str_size(&req.content, "fact content")?;

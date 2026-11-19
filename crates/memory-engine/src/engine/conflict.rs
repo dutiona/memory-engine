@@ -91,6 +91,9 @@ impl MemoryEngine {
         old_id: i64,
         new_fact: &NewFact,
     ) -> Result<ConflictResolution> {
+        // #972 first: `ReadOnly` wins over any refusal of the input.
+        self.ensure_open()?;
+        self.ensure_writable()?;
         // #1024: the candidate carries a vector computed from its content, which must be clean;
         // its metadata is scrubbed.
         check_str_size(&new_fact.content, "fact content")?;

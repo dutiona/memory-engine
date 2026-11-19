@@ -788,11 +788,59 @@ async fn a_read_only_engine_refuses_first_and_oversize_stores_nothing() {
         .read_only(true)
         .build()
         .unwrap();
-    let err = read_only
-        .add_fact_deferred(&request(oversized.clone(), json!({})))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, MemoryError::ReadOnly), "{err}");
+    // #972: `ReadOnly` wins over an oversized or a secret-bearing input on every gated write.
+    let c = Canaries::new();
+    let embedder = || Arc::new(RecordingEmbedder(Arc::default())) as Arc<dyn EmbeddingProvider>;
+    let fingerprint = EmbeddingFingerprint::new("test", "test", DIM);
+    for text in [oversized.clone(), c.text()] {
+        let refusals = [
+            read_only
+                .add_fact(&request(text.clone(), json!({})), embedder(), None)
+                .await,
+            read_only
+                .add_fact_deferred(&request(text.clone(), json!({})))
+                .await,
+            read_only
+                .add_fact_precomputed(
+                    &request(text.clone(), json!({})),
+                    vec![0.5; DIM],
+                    &fingerprint,
+                    None,
+                )
+                .await,
+            read_only
+                .add_facts_batch(&[request(text.clone(), json!({}))], embedder(), None)
+                .await
+                .map(|_| 0),
+            read_only.ingest(&event(json!({ "text": text }))).await,
+            read_only
+                .resolve_conflict(
+                    &Adds,
+                    1,
+                    &NewFact::builder(text.clone(), vec![0.5; DIM], FactType::Semantic).build(),
+                )
+                .await
+                .map(|_| 0),
+            read_only
+                .forget_fact(
+                    1,
+                    &["/".into()],
+                    &text,
+                    "unscoped:laptop",
+                    &event(json!({})),
+                )
+                .await
+                .map(|_| 0),
+            read_only
+                .checkpoint_session("s", None, Some(&text), None)
+                .await
+                .map(|()| 0),
+        ];
+        for (i, refusal) in refusals.into_iter().enumerate() {
+            let err = refusal.unwrap_err();
+            assert!(matches!(err, MemoryError::ReadOnly), "write {i}: {err}");
+        }
+    }
     drop(read_only);
     let engine = MemoryEngine::builder(DIM).path(&db).build().unwrap();
     for err in [
