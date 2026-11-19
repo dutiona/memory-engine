@@ -225,7 +225,9 @@ fn every_placeholder_is_a_fixpoint() {
 
 proptest::proptest! {
     #[test]
-    fn an_excerpt_is_a_short_prefix_of_the_scrubbed_text(text in "(.|ghp_0123456789abcdefghij){0,700}") {
+    fn an_excerpt_is_a_short_prefix_of_the_scrubbed_text(
+        text in proptest::string::string_regex(&format!("(.|{}){{0,700}}", ghp())).unwrap()
+    ) {
         let out = excerpt(&text).unwrap();
         let settled = scrub(&text).unwrap();
         proptest::prop_assert!(out.len() <= CAPTURE_CAP);

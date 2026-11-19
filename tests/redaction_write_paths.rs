@@ -515,6 +515,23 @@ async fn add_fact_redacts_before_classifier_embedder_and_store() {
     assert_store_files_clean(db.parent().unwrap(), &c);
 }
 
+/// A fact is kept whole, never cut: only its secrets change.
+#[tokio::test]
+async fn a_long_fact_comes_back_whole() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let prose = "word ".repeat(820);
+    let id = store
+        .engine
+        .add_fact_deferred(&request(format!("{prose}{}", c.aws), json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.engine.get_fact(id).await.unwrap().content,
+        format!("{prose}[REDACTED:aws-access-key]")
+    );
+}
+
 #[tokio::test]
 async fn a_deferred_fact_queues_its_redacted_text() {
     let c = Canaries::new();
@@ -854,6 +871,16 @@ async fn a_read_only_engine_refuses_first_and_oversize_stores_nothing() {
             .unwrap_err(),
         engine
             .checkpoint_session("s", None, Some(&oversized), None)
+            .await
+            .unwrap_err(),
+        engine
+            .forget_fact(
+                1,
+                &["/".into()],
+                &oversized,
+                "unscoped:laptop",
+                &event(json!({})),
+            )
             .await
             .unwrap_err(),
     ] {
