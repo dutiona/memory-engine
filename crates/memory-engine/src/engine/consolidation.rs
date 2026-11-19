@@ -9,9 +9,13 @@
 //! `try_write()`. See `me_consolidate::consolidate`'s own doc.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::Result;
-use crate::traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
+use crate::traits::{
+    ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummarizableContent,
+    SummaryGenerator,
+};
 
 use super::MemoryEngine;
 
@@ -53,6 +57,34 @@ impl MemoryEngine {
         embedder: Arc<dyn EmbeddingProvider>,
         config: &ConsolidationConfig,
     ) -> Result<ConsolidationStats> {
-        me_consolidate::consolidate(self.mem_ctx(), &self.graph, generator, embedder, config).await
+        let scrubbing = Arc::new(ScrubbingSummaries {
+            inner: generator,
+            found: AtomicU64::new(0),
+        });
+        let stats = me_consolidate::consolidate(
+            self.mem_ctx(),
+            &self.graph,
+            Arc::clone(&scrubbing) as Arc<dyn SummaryGenerator>,
+            embedder,
+            config,
+        )
+        .await?;
+        self.tally(scrubbing.found.load(Ordering::Relaxed), 0).await;
+        Ok(stats)
+    }
+}
+
+/// The caller's generator with its summaries scrubbed before consolidation embeds and stores
+/// them (#1024): a generator may be an LLM, and nothing it writes is trusted.
+struct ScrubbingSummaries {
+    inner: Arc<dyn SummaryGenerator>,
+    found: AtomicU64,
+}
+
+impl SummaryGenerator for ScrubbingSummaries {
+    fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String> {
+        let (clean, found) = crate::redact::scrub_with(&self.inner.summarize(items)?, &[])?;
+        self.found.fetch_add(found, Ordering::Relaxed);
+        Ok(clean)
     }
 }

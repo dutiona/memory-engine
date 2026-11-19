@@ -280,13 +280,52 @@ impl MemoryEngine {
         &self,
         report: &crate::cognitive::CycleReport,
     ) -> Result<crate::cognitive::ApplyResult> {
-        crate::cognitive::apply_cycle_report(
+        self.ensure_writable()?;
+        // #1024: a delta whose embedded text redaction would change carries a vector of a
+        // secret; it is skipped and counted as blocked, like a tombstone-blocked delta (#1023),
+        // so the window is still marked and a deterministic proposer cannot livelock on it.
+        // Text that is not embedded (reasons, metadata, provenance) is scrubbed.
+        let mut report = report.clone();
+        let mut blocked = 0;
+        let mut found = 0;
+        let mut deltas = Vec::with_capacity(report.deltas.len());
+        for mut delta in std::mem::take(&mut report.deltas) {
+            match &mut delta {
+                crate::cognitive::CycleDelta::AddFact(fact)
+                | crate::cognitive::CycleDelta::Synthesize { new_fact: fact, .. } => {
+                    if crate::limits::check_str_size(&fact.content, "fact content").is_err()
+                        || crate::redact::require_clean(&fact.content).is_err()
+                    {
+                        blocked += 1;
+                        continue;
+                    }
+                    found += crate::redact::scrub_json(&mut fact.metadata, &[])?;
+                }
+                crate::cognitive::CycleDelta::Quarantine { reason, .. } => {
+                    let (clean, n) = crate::redact::scrub_with(reason, &[])?;
+                    *reason = clean;
+                    found += n;
+                }
+                crate::cognitive::CycleDelta::Promote { provenance, .. } => {
+                    let (clean, n) = crate::redact::scrub_with(&provenance.method_version, &[])?;
+                    provenance.method_version = clean;
+                    found += n;
+                }
+                _ => {}
+            }
+            deltas.push(delta);
+        }
+        report.deltas = deltas;
+        let mut result = crate::cognitive::apply_cycle_report(
             self.mem_ctx(),
             &self.graph,
             &self.upcaster_registry,
-            report,
+            &report,
         )
-        .await
+        .await?;
+        result.blocked += blocked;
+        self.tally(found, 0).await;
+        Ok(result)
     }
 
     /// Atomic promotion: insert promoted fact + lineage record in one savepoint.
@@ -300,6 +339,17 @@ impl MemoryEngine {
         &self,
         req: &PromoteRequest,
     ) -> Result<PromotionResult> {
+        // #1024: the vector was computed from `content`, which must be clean; the metadata and
+        // the provenance, which are not embedded, are scrubbed.
+        crate::limits::check_str_size(&req.content, "fact content")?;
+        crate::redact::require_clean(&req.content)?;
+        let mut found = 0;
+        let mut req = req.clone();
+        found += crate::redact::scrub_json(&mut req.metadata, &[])?;
+        let (method, n) = crate::redact::scrub_with(&req.provenance.method_version, &[])?;
+        req.provenance.method_version = method;
+        found += n;
+        let req = &req;
         // Validate embedding dimension up-front.
         if req.embedding.len() != self.embed_dim {
             return Err(MemoryError::EmbeddingDimension {
@@ -360,6 +410,7 @@ impl MemoryEngine {
         for sid in scope_ids_to_cache {
             self.cache_scope_chain(sid).await?;
         }
+        self.tally(found, 0).await;
 
         Ok(result)
     }
@@ -838,6 +889,50 @@ mod tests {
         assert!(
             prov.is_some(),
             "metadata should contain promotion_provenance"
+        );
+    }
+
+    /// #1024: a promotion brings its own vector, so its content must already be clean; its
+    /// metadata and provenance are scrubbed, and a clean promotion still goes through.
+    #[tokio::test]
+    async fn promote_refuses_unredacted_text() {
+        let engine = MemoryEngine::builder(4).build().unwrap();
+        let source_ids = add_source_facts(&engine, &[1, 2]).await;
+        let aws = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+        let request = |content: String| PromoteRequest {
+            content,
+            fact_type: FactType::Semantic,
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            importance: 0.9,
+            metadata: serde_json::json!({ "note": format!("key {aws}") }),
+            scope: None,
+            source_fact_ids: source_ids.clone(),
+            provenance: PromotionProvenance {
+                method_version: format!("v1 {aws}"),
+                ..stub_provenance()
+            },
+        };
+        let err = engine
+            .promote_with_lineage(&request(format!("wisdom {aws}")))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MemoryError::Conflict(crate::error::ConflictError::Redaction(_))
+            ),
+            "{err:?}"
+        );
+        let result = engine
+            .promote_with_lineage(&request("plain wisdom".into()))
+            .await
+            .unwrap();
+        let fact = engine.get_fact(result.fact_id).await.unwrap();
+        assert_eq!(fact.content, "plain wisdom");
+        assert_eq!(fact.metadata["note"], "key [REDACTED:aws-access-key]");
+        assert_eq!(
+            fact.metadata["promotion_provenance"]["method_version"],
+            "v1 [REDACTED:aws-access-key]"
         );
     }
 

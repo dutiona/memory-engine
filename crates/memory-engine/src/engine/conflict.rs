@@ -1,6 +1,7 @@
 use chrono::Utc;
 
 use crate::error::Result;
+use crate::limits::{check_json_size, check_str_size};
 use crate::traits::{ConflictArbiter, ConflictResolution};
 use crate::types::NewFact;
 
@@ -86,14 +87,23 @@ impl MemoryEngine {
         old_id: i64,
         new_fact: &NewFact,
     ) -> Result<ConflictResolution> {
-        me_resolve::resolve_conflict(
+        // #1024: the candidate carries a vector computed from its content, which must be clean;
+        // its metadata is scrubbed.
+        check_str_size(&new_fact.content, "fact content")?;
+        check_json_size(&new_fact.metadata, "fact metadata")?;
+        crate::redact::require_clean(&new_fact.content)?;
+        let mut candidate = new_fact.clone();
+        let found = crate::redact::scrub_json(&mut candidate.metadata, &[])?;
+        let resolution = me_resolve::resolve_conflict(
             self.mem_ctx(),
             &self.graph,
             arbiter,
             old_id,
-            new_fact,
+            &candidate,
             Utc::now(),
         )
-        .await
+        .await?;
+        self.tally(found, 0).await;
+        Ok(resolution)
     }
 }

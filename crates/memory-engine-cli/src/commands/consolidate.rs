@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use clap::ValueEnum;
+use memory_engine::redact::ScrubbingProposer;
 use memory_engine::{
     CycleOutcome, DefaultDreamCycle, DreamCycle, LlmDreamCycle, MemoryEngine, SkipReason,
 };
@@ -135,9 +136,9 @@ pub async fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> any
                     .await
                     .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))??,
             );
+            // #1024: the cycle embeds its proposer's summaries, so they are scrubbed first.
             let cycle = LlmDreamCycle::new(
-                std::sync::Arc::clone(&proposer)
-                    as std::sync::Arc<dyn memory_engine::DeltaProposer>,
+                std::sync::Arc::new(ScrubbingProposer(std::sync::Arc::clone(&proposer) as _)),
                 std::sync::Arc::clone(&embedder)
                     as std::sync::Arc<dyn memory_engine::EmbeddingProvider>,
             );

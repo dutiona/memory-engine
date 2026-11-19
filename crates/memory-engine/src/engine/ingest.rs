@@ -168,15 +168,23 @@ impl MemoryEngine {
         declared: &EmbeddingFingerprint,
         classifier: Option<Arc<dyn PersistenceClassifier>>,
     ) -> Result<i64> {
-        me_ingest::add_fact_precomputed(
+        // #1024: the caller computed `embedding` from `req.content`, so that text must already
+        // be clean; the metadata, which is not embedded, is scrubbed.
+        let (scrubbed, found) = self.scrubbed_request(req)?;
+        if scrubbed.content != req.content {
+            crate::redact::require_clean(&req.content)?;
+        }
+        let id = me_ingest::add_fact_precomputed(
             self.mem_ctx(),
             &self.scope_tree,
-            req,
+            &scrubbed,
             embedding,
             declared,
             classifier,
         )
-        .await
+        .await?;
+        self.tally(found, 0).await;
+        Ok(id)
     }
 
     /// Add a fact now and queue its vector (#1021): the write never waits on an embedder.

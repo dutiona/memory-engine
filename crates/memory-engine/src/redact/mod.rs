@@ -114,6 +114,20 @@ const DENYLIST_MIN_LEN: usize = 4;
 const MAX_SCRUB_PASSES: usize = 8;
 
 const UNSETTLED: &str = "redaction did not settle; nothing was stored";
+const CALLER_VECTOR: &str =
+    "redaction would change the text this vector was computed from; scrub the text, then embed it";
+
+/// Refuse a caller-supplied vector computed from text that redaction would change (plan decision
+/// 7 of #1024): a vector of a secret must never be stored. Clean text passes unchanged.
+pub(crate) fn require_clean(text: &str) -> Result<()> {
+    if scrub(text)? == text {
+        Ok(())
+    } else {
+        Err(MemoryError::Conflict(ConflictError::Redaction(
+            CALLER_VECTOR,
+        )))
+    }
+}
 
 // ── Spans ────────────────────────────────────────────────────────────────────
 
@@ -848,6 +862,55 @@ pub(crate) fn cut_json(value: Value) -> Value {
 /// ```
 pub fn excerpt(text: &str) -> Result<String> {
     Ok(cut(&scrub(text)?).to_owned())
+}
+
+// ── Derived text a consumer embeds itself ────────────────────────────────────
+
+/// A [`DeltaProposer`](me_traits::DeltaProposer) whose summaries are scrubbed (#1024).
+///
+/// `LlmDreamCycle` embeds its proposer's summaries inside me-cognitive, below the facade's
+/// gate. A group whose summary exceeds the write limit, or does not settle, is dropped: it
+/// could never be stored.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+/// use memory_engine::redact::ScrubbingProposer;
+/// use memory_engine::traits::DeltaProposer;
+/// use memory_engine::types::{ConsolidationProposal, Fact, MergeGroup};
+///
+/// struct One;
+/// impl DeltaProposer for One {
+///     fn propose(&self, _: &[Fact], _: &[Fact]) -> memory_engine::error::Result<ConsolidationProposal> {
+///         let summary = format!("merged, key AKIA{}", "IOSFODNN7EXAMPLE");
+///         Ok(ConsolidationProposal { merges: vec![MergeGroup { source_ids: vec![1, 2], summary }] })
+///     }
+/// }
+///
+/// let proposal = ScrubbingProposer(Arc::new(One)).propose(&[], &[])?;
+/// assert_eq!(proposal.merges[0].summary, "merged, key [REDACTED:aws-access-key]");
+/// # Ok::<(), memory_engine::MemoryError>(())
+/// ```
+pub struct ScrubbingProposer(pub std::sync::Arc<dyn me_traits::DeltaProposer>);
+
+impl me_traits::DeltaProposer for ScrubbingProposer {
+    fn propose(
+        &self,
+        window: &[me_types::types::Fact],
+        prior_wisdom: &[me_types::types::Fact],
+    ) -> Result<me_types::types::ConsolidationProposal> {
+        let mut proposal = self.0.propose(window, prior_wisdom)?;
+        proposal.merges.retain_mut(|group| {
+            if group.summary.len() > crate::limits::MAX_PAYLOAD_BYTES {
+                return false;
+            }
+            scrub(&group.summary)
+                .map(|clean| group.summary = clean)
+                .is_ok()
+        });
+        Ok(proposal)
+    }
 }
 
 #[cfg(test)]

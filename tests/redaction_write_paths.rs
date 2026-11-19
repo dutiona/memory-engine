@@ -11,13 +11,19 @@ use std::sync::{Arc, Mutex};
 
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::{EmbedderError, MemoryError, Result};
-use memory_engine::traits::{EmbeddingProvider, PersistenceClassifier};
+use memory_engine::redact::ScrubbingProposer;
+use memory_engine::traits::{
+    ConflictArbiter, CrudDecision, DeltaProposer, EmbeddingProvider, PersistenceClassifier,
+    SummaryGenerator,
+};
 use memory_engine::types::{
     AddFactOptions, AddFactRequest, ClassifierInput, EventType, FactType, ForgetOutcome, NewEvent,
     NextEmbedding,
 };
+use memory_engine::types::{ConsolidationLevel, ConsolidationProposal, Fact, MergeGroup, NewFact};
 use memory_engine::{
-    Backoff, EmbeddingFingerprint, read_embed_queue_status, read_redaction_counts,
+    Backoff, ConsolidationConfig, CycleDelta, EmbeddingFingerprint, LlmDreamCycle,
+    read_embed_queue_status, read_redaction_counts,
 };
 use serde_json::{Value, json};
 
@@ -67,7 +73,10 @@ const GATED: &[(&str, &str)] = &[
         "resolve_conflict",
         "a_caller_vector_beside_unredacted_text_is_refused",
     ),
-    ("apply_cycle_report", "tests/dream_cycle_test.rs"),
+    (
+        "apply_cycle_report",
+        "cycle_deltas_with_unredacted_text_are_skipped_and_counted",
+    ),
     (
         "run_dream_cycle",
         "tests/dream_cycle_test.rs (applies its report)",
@@ -80,6 +89,10 @@ const GATED: &[(&str, &str)] = &[
     (
         "impl:consolidate",
         "consolidation_summaries_are_redacted (DreamCtx delegates)",
+    ),
+    (
+        "impl:summarize",
+        "consolidation_summaries_are_redacted (the scrubbing wrapper)",
     ),
     (
         "promote_with_lineage",
@@ -799,4 +812,243 @@ async fn a_read_only_engine_refuses_first_and_oversize_stores_nothing() {
     }
     assert_eq!(events(&engine).await, Vec::<Value>::new());
     drop(dir);
+}
+
+// ── Caller vectors and derived text (plan decision 7) ────────────────────────
+
+const fn is_redaction_refusal(err: &MemoryError) -> bool {
+    matches!(
+        err,
+        MemoryError::Conflict(memory_engine::error::ConflictError::Redaction(_))
+    )
+}
+
+struct Adds;
+
+impl ConflictArbiter for Adds {
+    fn arbitrate(&self, _old: &Fact, _new: &Fact) -> Result<CrudDecision> {
+        Ok(CrudDecision::Add)
+    }
+}
+
+#[tokio::test]
+async fn a_caller_vector_beside_unredacted_text_is_refused() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let fingerprint = EmbeddingFingerprint::new("test", "test", DIM);
+    let vector = vec![0.5; DIM];
+    let err = store
+        .engine
+        .add_fact_precomputed(
+            &request(c.text(), json!({})),
+            vector.clone(),
+            &fingerprint,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(is_redaction_refusal(&err), "{err}");
+    // The API stays open: a precomputed write with nothing to redact in its embedded text is
+    // stored, and its metadata, which is not embedded, is scrubbed.
+    let id = store
+        .engine
+        .add_fact_precomputed(
+            &request("plain wisdom".into(), json!({ "note": c.text() })),
+            vector.clone(),
+            &fingerprint,
+            None,
+        )
+        .await
+        .unwrap();
+    let fact = store.engine.get_fact(id).await.unwrap();
+    assert_eq!(
+        (fact.content.as_str(), &fact.metadata["note"]),
+        ("plain wisdom", &json!(SCRUBBED))
+    );
+    let candidate = NewFact::builder(c.text(), vector, FactType::Semantic).build();
+    let err = store
+        .engine
+        .resolve_conflict(&Adds, id, &candidate)
+        .await
+        .unwrap_err();
+    assert!(is_redaction_refusal(&err), "{err}");
+    assert_eq!(
+        store.engine.list_active_facts(None).await.unwrap().len(),
+        1,
+        "nothing else was stored"
+    );
+    let (_dir, db) = store.close().await;
+    assert_eq!(read_redaction_counts(&db).unwrap().redacted, 4);
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+/// A proposer that always proposes merging every fact of its window under one summary.
+struct Merges(String);
+
+impl DeltaProposer for Merges {
+    fn propose(&self, window: &[Fact], _prior: &[Fact]) -> Result<ConsolidationProposal> {
+        let source_ids = window.iter().map(|f| f.id).collect();
+        Ok(ConsolidationProposal {
+            merges: vec![MergeGroup {
+                source_ids,
+                summary: self.0.clone(),
+            }],
+        })
+    }
+}
+
+async fn two_facts(store: &Store, recorder: &Arc<Recorder>) {
+    for text in ["fact one", "fact two"] {
+        store
+            .engine
+            .add_fact(
+                &request(text.into(), json!({})),
+                Arc::new(RecordingEmbedder(Arc::clone(recorder))),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn cycle_deltas_with_unredacted_text_are_skipped_and_counted() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let recorder = Arc::new(Recorder::default());
+    two_facts(&store, &recorder).await;
+    // Without the wrapper the cycle embeds and submits the raw summary: the core refuses to
+    // store it, counts it as blocked like a tombstone-blocked delta, and the window is still
+    // dream-marked, so the deterministic proposer cannot livelock on it (#641).
+    let raw = LlmDreamCycle::new(
+        Arc::new(Merges(c.text())),
+        Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
+    );
+    let mut report = store.engine.run_dream_cycle(&raw).await.unwrap();
+    let target = store.engine.list_active_facts(None).await.unwrap()[0].id;
+    report.deltas.push(CycleDelta::AddFact(
+        NewFact::builder(c.text(), vec![0.5; DIM], FactType::Semantic).build(),
+    ));
+    report.deltas.push(CycleDelta::Quarantine {
+        fact_id: target,
+        reason: format!("because {}", c.aws),
+    });
+    let applied = store.engine.apply_cycle_report(&report).await.unwrap();
+    assert_eq!(
+        (
+            applied.blocked,
+            applied.synthesized,
+            applied.facts_added,
+            applied.quarantined
+        ),
+        (2, 0, 0, 1)
+    );
+    let quarantined = store.engine.get_fact(target).await.unwrap();
+    assert_eq!(
+        quarantined.metadata["quarantine"]["reason"],
+        "because [REDACTED:aws-access-key]"
+    );
+    let again = store.engine.run_dream_cycle(&raw).await.unwrap();
+    assert!(
+        !again
+            .deltas
+            .iter()
+            .any(|d| matches!(d, CycleDelta::Synthesize { .. })),
+        "the marked window proposes nothing"
+    );
+    let (_dir, db) = store.close().await;
+    assert_eq!(read_redaction_counts(&db).unwrap().redacted, 1);
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+#[tokio::test]
+async fn a_scrubbing_proposer_hands_the_cycle_redacted_summaries() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let recorder = Arc::new(Recorder::default());
+    two_facts(&store, &recorder).await;
+    let cycle = LlmDreamCycle::new(
+        Arc::new(ScrubbingProposer(Arc::new(Merges(c.text())))),
+        Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
+    );
+    let report = store.engine.run_dream_cycle(&cycle).await.unwrap();
+    let applied = store.engine.apply_cycle_report(&report).await.unwrap();
+    assert_eq!(applied.synthesized, 1);
+    let merged = store
+        .engine
+        .get_fact(applied.synthesized_fact_ids[0])
+        .await
+        .unwrap();
+    assert_eq!(merged.content, SCRUBBED);
+    for s in &recorder.seen() {
+        assert_no_canary_in(s, &c);
+    }
+    // A summary over the write limit could never be stored: the wrapper drops its group.
+    let oversized = "x".repeat(me_types::limits::MAX_PAYLOAD_BYTES + 1);
+    let proposal = ScrubbingProposer(Arc::new(Merges(oversized)))
+        .propose(&[], &[])
+        .unwrap();
+    assert_eq!(proposal.merges.len(), 0);
+    let (_dir, db) = store.close().await;
+    assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+struct Echoes(String);
+
+impl SummaryGenerator for Echoes {
+    fn summarize(&self, _items: &[memory_engine::SummarizableContent<'_>]) -> Result<String> {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn consolidation_summaries_are_redacted() {
+    let c = Canaries::new();
+    let store = Store::new();
+    let recorder = Arc::new(Recorder::default());
+    // A single-linkage chain that forms one cluster: adjacent cosines of about 0.883 sit between
+    // the 0.85 cluster and 0.90 dedup thresholds (the fixture of the engine's own test).
+    let fingerprint = EmbeddingFingerprint::new("test", "test", DIM);
+    for (text, vector) in [
+        ("note a", vec![1.0, 0.0, 0.0, 0.0]),
+        ("note b", vec![0.8829, 0.4695, 0.0, 0.0]),
+        ("note c", vec![0.5592, 0.829, 0.0, 0.0]),
+    ] {
+        store
+            .engine
+            .add_fact_precomputed(&request(text.into(), json!({})), vector, &fingerprint, None)
+            .await
+            .unwrap();
+    }
+    let before = recorder.seen().len();
+    store
+        .engine
+        .consolidate(
+            Arc::new(Echoes(c.text())),
+            Arc::new(RecordingEmbedder(Arc::clone(&recorder))),
+            &ConsolidationConfig::default(),
+        )
+        .await
+        .unwrap();
+    let mut summaries = Vec::new();
+    for level in [
+        ConsolidationLevel::Local,
+        ConsolidationLevel::Cluster,
+        ConsolidationLevel::Global,
+    ] {
+        summaries.extend(store.engine.list_summaries(&level).await.unwrap());
+    }
+    assert!(
+        !summaries.is_empty(),
+        "the identical vectors cluster into a summary"
+    );
+    assert!(
+        summaries.iter().all(|s| s.content == SCRUBBED),
+        "{summaries:?}"
+    );
+    for s in &recorder.seen()[before..] {
+        assert_no_canary_in(s, &c);
+    }
+    let (_dir, db) = store.close().await;
+    assert_store_files_clean(db.parent().unwrap(), &c);
 }
