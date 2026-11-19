@@ -275,26 +275,49 @@ fn fn_name(line: &str) -> Option<&str> {
     Some(&name[..end])
 }
 
-fn facade_functions() -> BTreeSet<String> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/engine");
-    let mut names = BTreeSet::new();
+/// Every `.rs` file under `dir`, its submodules included.
+fn rust_files(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(&path, files);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            files.push(path);
+        }
+    }
+}
+
+fn facade_functions() -> BTreeSet<String> {
+    let mut files = Vec::new();
+    rust_files(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/engine"),
+        &mut files,
+    );
+    let mut names = BTreeSet::new();
+    for path in files {
         let file = path.file_name().unwrap().to_string_lossy().into_owned();
-        if path.extension().is_none_or(|e| e != "rs") || TEST_FILES.contains(&file.as_str()) {
+        if TEST_FILES.contains(&file.as_str()) {
             continue;
         }
         let source = strip_test_modules(std::fs::read_to_string(&path).unwrap());
         let mut impl_for_depth: Option<i32> = None;
+        // An `impl` header, possibly over several lines (a `where` clause), until its `{`.
+        let mut header: Option<String> = None;
         let mut depth = 0_i32;
         for line in source.lines() {
             let trimmed = line.trim_start();
-            if impl_for_depth.is_none()
-                && trimmed.starts_with("impl")
-                && trimmed.contains(" for ")
-                && trimmed.ends_with('{')
-            {
-                impl_for_depth = Some(depth);
+            if impl_for_depth.is_none() && header.is_none() && trimmed.starts_with("impl") {
+                header = Some(String::new());
+            }
+            if let Some(h) = header.as_mut() {
+                h.push(' ');
+                h.push_str(trimmed);
+                if trimmed.contains('{') || trimmed.ends_with(';') {
+                    if h.contains(" for ") && trimmed.contains('{') {
+                        impl_for_depth = Some(depth);
+                    }
+                    header = None;
+                }
             }
             let public = trimmed.starts_with("pub fn ")
                 || trimmed.starts_with("pub async fn ")
