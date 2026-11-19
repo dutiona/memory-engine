@@ -109,6 +109,7 @@ compile_error!(
 // === Public modules (consumer-facing API) ===
 pub mod bootstrap;
 pub mod engine;
+pub mod redact;
 // `error` + `types` are relocated to the L0 `me-types` crate (Wave 2 #816). The
 // module re-export preserves `memory_engine::error::*` (and every internal
 // `crate::error::` path) with no call-site churn.

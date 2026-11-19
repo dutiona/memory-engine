@@ -7,13 +7,13 @@
 //! a blocking thread (the consumer `EmbeddingProvider`/`SessionExtractor` may block);
 //! no connection or driver type is threaded through this module anymore.
 
+pub(crate) mod denylist;
 pub(crate) mod extract;
 pub(crate) mod filter;
 pub(crate) mod memory_dir;
 pub(crate) mod metrics;
 pub(crate) mod outcome;
 pub(crate) mod parse;
-pub(crate) mod redact;
 
 use std::io::BufRead;
 use std::path::Path;
@@ -24,16 +24,16 @@ use crate::error::Result;
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
 use crate::types::{ClassifierInput, EventType, NewEvent, NewFact};
 
+pub use crate::redact::{
+    Finding, RedactionReport, redact_entries, redact_entries_with_denylist, redact_json_strings,
+    redact_text, redact_text_with_denylist, shannon_entropy,
+};
+pub use denylist::{DENYLIST_ENV_VAR, load_secret_denylist};
 pub use extract::{ExtractedFact, KeywordExtractor, SessionExtractor};
 pub use filter::{CandidateEpisode, ConversationTurn, EpisodeCategory, ToolCallRecord};
 pub use memory_dir::{ParsedMemory, parse_memory_file};
 pub use metrics::{BootstrapConfig, BootstrapReport, PrewarmMetrics};
 pub use outcome::{OutcomeSignals, SessionOutcome};
-pub use redact::{
-    DENYLIST_ENV_VAR, Finding, RedactionReport, load_secret_denylist, redact_entries,
-    redact_entries_with_denylist, redact_json_strings, redact_text, redact_text_with_denylist,
-    shannon_entropy,
-};
 
 /// Parsed-but-not-yet-embedded session data — the cheap output of the parse phase.
 ///
@@ -215,7 +215,7 @@ pub(crate) fn prepare_session(
 /// is idempotent.
 fn redact_turns(turns: &mut [ConversationTurn], denylist: &[String]) -> usize {
     let redact_field = |s: &mut String, n: &mut usize| {
-        let (clean, findings) = redact::redact_text_with_denylist(s, denylist);
+        let (clean, findings) = crate::redact::redact_text_with_denylist(s, denylist);
         if !findings.is_empty() {
             *s = clean;
             *n += findings.len();
@@ -226,7 +226,7 @@ fn redact_turns(turns: &mut [ConversationTurn], denylist: &[String]) -> usize {
         redact_field(&mut turn.user_text, &mut total);
         redact_field(&mut turn.assistant_text, &mut total);
         for tc in &mut turn.tool_calls {
-            total += redact::redact_json_strings(&mut tc.input, denylist);
+            total += crate::redact::redact_json_strings(&mut tc.input, denylist);
             if let Some(s) = tc.stdout.as_mut() {
                 redact_field(s, &mut total);
             }
@@ -264,7 +264,7 @@ fn prepare_extracted_fact(
     let mut redactions = 0usize;
     let content = if ctx.config.redact {
         let (clean, findings) =
-            redact::redact_text_with_denylist(&fact.content, &ctx.config.denylist);
+            crate::redact::redact_text_with_denylist(&fact.content, &ctx.config.denylist);
         redactions += findings.len();
         clean
     } else {
@@ -276,7 +276,7 @@ fn prepare_extracted_fact(
     // unredacted secret anywhere (not just in content). Keys are left intact.
     let mut metadata = fact.metadata.clone();
     if ctx.config.redact {
-        redactions += redact::redact_json_strings(&mut metadata, &ctx.config.denylist);
+        redactions += crate::redact::redact_json_strings(&mut metadata, &ctx.config.denylist);
     }
 
     // Session files are third-party input: a fact whose (redacted) content or

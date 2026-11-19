@@ -32,7 +32,7 @@ use crate::traits::{EmbeddingProvider, PersistenceClassifier};
 use crate::types::{ClassifierInput, FactType, NewFact};
 
 use super::BootstrapConfig;
-use super::redact;
+use crate::redact;
 
 /// Baseline importance for curated native-memory facts. Higher than the
 /// keyword-extracted session candidates: these files are hand-authored durable
