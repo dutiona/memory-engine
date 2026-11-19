@@ -378,7 +378,7 @@ async fn redaction_runs_before_extraction() {
 
     let engine = engine();
     let recorder = std::sync::Arc::new(RecordingExtractor::default());
-    let config = BootstrapConfig::default(); // redact = true
+    let config = BootstrapConfig::default();
 
     engine
         .bootstrap_session(
