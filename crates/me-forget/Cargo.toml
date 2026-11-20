@@ -1,6 +1,6 @@
 [package]
 name = "me-forget"
-version = "0.2.0-rc.2"
+version = "0.2.0-rc.3"
 edition = "2024"
 rust-version.workspace = true
 description = "Forget primitive: Ebbinghaus decay + multi-signal importance pruning (Wave 2 #816 / S3, sub-PR 2)"
