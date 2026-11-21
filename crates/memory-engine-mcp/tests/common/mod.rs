@@ -1041,6 +1041,33 @@ impl ServerProcess {
         }
     }
 
+    /// The status of a `/lifecycle/events` request whose headers are `fixture`'s and whose body
+    /// is claimed to be `claimed` bytes long and never sent: what the server decides from the
+    /// headers alone.
+    pub fn status_from_headers(&self, machine: &str, fixture: &Fixture, claimed: u64) -> u16 {
+        use std::fmt::Write as _;
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut head = format!(
+            "POST /lifecycle/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Length: {claimed}\r\n",
+            token(machine)
+        );
+        for (name, value) in &fixture.headers {
+            write!(head, "{name}: {value}\r\n").unwrap();
+        }
+        head.push_str("\r\n");
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut answer = [0; 12];
+        stream.read_exact(&mut answer).unwrap();
+        String::from_utf8(answer[9..12].to_vec())
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
     /// Wait for the child to exit on its own, at most `timeout`.
     pub fn wait_exit(&mut self, timeout: Duration) -> ExitStatus {
         let deadline = Instant::now() + timeout;

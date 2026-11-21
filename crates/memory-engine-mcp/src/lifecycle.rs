@@ -115,6 +115,12 @@ impl Envelope {
     }
 }
 
+/// An event ID as a log names it. The grammar admits `me_` and 32 base62 characters, a machine
+/// token, so the ID goes through the machine-token rule first, on every path.
+fn logged(event_id: &str) -> String {
+    memory_engine::redact::scrub_provenance(event_id)
+}
+
 /// The one value of header `name` when it is present once, short enough, visible ASCII and
 /// accepted by `grammar`.
 fn field<'a>(
@@ -327,10 +333,11 @@ pub(crate) async fn events(
         .get(CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok());
+    let event_id = logged(&envelope.event_id);
     let refuse = |status: StatusCode, why: &str| {
         tracing::warn!(
             machine = machine.as_str(),
-            event_id = envelope.event_id,
+            event_id,
             status = status.as_u16(),
             why,
             "lifecycle body refused"
@@ -349,7 +356,7 @@ pub(crate) async fn events(
     let Ok(fence) = server.in_flight.clone().try_read_owned() else {
         tracing::warn!(
             machine = machine.as_str(),
-            event_id = envelope.event_id,
+            event_id,
             "lifecycle event refused: the server is stopping"
         );
         return Answer::status(StatusCode::SERVICE_UNAVAILABLE).into_response();
@@ -432,8 +439,11 @@ impl MemoryMcpServer {
         body: &[u8],
     ) -> Answer {
         let answer = self.apply_lifecycle(machine, envelope, headers, body).await;
-        let (machine, event_id, status) =
-            (machine.as_str(), &envelope.event_id, answer.status.as_u16());
+        let (machine, event_id, status) = (
+            machine.as_str(),
+            logged(&envelope.event_id),
+            answer.status.as_u16(),
+        );
         if answer.status.is_success() {
             tracing::debug!(
                 machine,
@@ -487,7 +497,7 @@ impl MemoryMcpServer {
             Err(error) => {
                 tracing::warn!(
                     machine = machine.as_str(),
-                    event_id = envelope.event_id,
+                    event_id = logged(&envelope.event_id),
                     class = error_class(&error),
                     "lifecycle event failed"
                 );

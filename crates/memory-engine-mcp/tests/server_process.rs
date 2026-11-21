@@ -489,3 +489,32 @@ fn a_quarantine_logs_no_body_byte() {
         assert!(!log.contains(secret), "the log holds {secret:?}:\n{log}");
     }
 }
+/// An event ID is a client's string, and `me_` followed by 32 base62 characters is within its
+/// grammar: a machine token pasted there must not reach the log, on any path that names the ID.
+#[test]
+fn an_event_id_shaped_like_a_token_never_reaches_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    server.wait_ready().unwrap();
+    let token = common::machine_token();
+    let event = common::fixture("stop").header("ME-Event-Id", &token);
+
+    // The engine refuses the identifier: a 422, logged.
+    let refused = server.post_event("laptop", &event);
+    assert_eq!(refused.status, 422, "{refused:?}");
+    // A body-read refusal, logged before the engine is asked: a 413 from the headers alone.
+    let over = u64::try_from(memory_engine_mcp::lifecycle::BODY_LIMIT).unwrap() + 1;
+    assert_eq!(server.status_from_headers("laptop", &event, over), 413);
+
+    server.terminate();
+    let log = server.stderr();
+    assert!(
+        log.contains("lifecycle event refused") && log.contains("lifecycle body refused"),
+        "both refusals are logged:\n{log}"
+    );
+    assert!(
+        log.contains("[REDACTED:machine-token]"),
+        "the ID is logged in its redacted form:\n{log}"
+    );
+    assert!(!log.contains(&token), "the log holds the token:\n{log}");
+}

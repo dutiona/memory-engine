@@ -166,7 +166,8 @@ client's own session.
   server writes, gets the machine-token rule only; every other member gets every rule, `cwd` included. A directory name
   that looks high-entropy may therefore be over-redacted in the payload, which no key is derived from.
 - **Identifiers.** The event ID, the session ID and the agent ID are stored as sent, in columns, never redacted; one the
-  machine-token rule would change is refused with a 422, so no key and no column holds a token.
+  machine-token rule would change is refused with a 422, so no key and no column holds a token. The server's log names
+  an event ID only after the machine-token rule too, on every path, so a token pasted into `ME-Event-Id` is not logged.
 - **Quarantine.** A body that does not parse was never redacted, so a quarantine record holds no byte of it: the
   machine, the event ID, the client time as sent, the time of receipt, the harness, the byte size, the SHA-256 and the
   parse error as a class with its line and column, never the parser's message. The server logs the same and no more.
