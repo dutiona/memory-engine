@@ -114,10 +114,13 @@ refuses to store them.
   cut, like the result, on a stub too.
 - **Deduplication** hashes the scrubbed, uncut input: two calls that differ only by a secret merge, and two long inputs
   that share their first 512 bytes stay two rows.
-- **Over 1 MiB.** A raw input or result over the write limit is never scanned: an input is stored as
-  `[omitted: over 1 MiB]` and never deduplicates (its hash is a per-call random stand-in, so no digest of the content
-  is kept), and a result or an `Other` outcome is stored as `[omitted: <N> bytes]`; such a result is never promoted.
-  The call is still recorded.
+- **Over 1 MiB.** A raw input, result or `Other` outcome over the write limit keeps a redacted excerpt: its first
+  1 MiB (back to a character boundary; an input's compact JSON) is scrubbed, then cut to 512 bytes as above, so the
+  excerpt is as redacted as a small one. The rest is never scanned, which is safe because a secret that starts in the
+  first 512 bytes ends far below the window's end. An input that large never deduplicates (its hash is a per-call
+  random stand-in, so no digest of the content is kept), and such a result is never promoted. The call is still
+  recorded. An input's excerpt is read from its compact JSON, so a secret there is matched as the compact form spells
+  it, not leaf by leaf as a smaller input is.
 - **Stubs.** A call whose `touched_paths` names a secret is stored as a stub: its input becomes
   `{"sensitive_path": "<token>"}` (the token as spelled, scrubbed and cut), it keeps no result, is never promoted and
   never deduplicates with an ordinary call. Session, scope, time and outcome are kept.

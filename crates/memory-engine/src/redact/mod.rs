@@ -890,13 +890,25 @@ pub(crate) fn scrub_payload(payload: &mut Value) -> Result<u64> {
 
 // ── The capture cut ──────────────────────────────────────────────────────────
 
-/// At most [`CAPTURE_CAP`] bytes of already-scrubbed `text`, back to a character boundary.
-pub(crate) fn cut(text: &str) -> &str {
-    let mut end = text.len().min(CAPTURE_CAP);
+/// At most `max` bytes of `text`, back to a character boundary.
+fn head(text: &str, max: usize) -> &str {
+    let mut end = text.len().min(max);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     &text[..end]
+}
+
+/// At most [`CAPTURE_CAP`] bytes of already-scrubbed `text`, back to a character boundary.
+pub(crate) fn cut(text: &str) -> &str {
+    head(text, CAPTURE_CAP)
+}
+
+/// The part of a tool text that is scanned: the whole of one within the write limit, else its
+/// first `MAX_PAYLOAD_BYTES`. Only the first [`CAPTURE_CAP`] bytes of what is scanned are kept,
+/// and a secret that starts there ends far below the window's end.
+fn window(text: &str) -> &str {
+    head(text, crate::limits::MAX_PAYLOAD_BYTES)
 }
 
 /// Already-scrubbed `text` cut to [`CAPTURE_CAP`] and settled. A cut inside a word can expose a
@@ -952,11 +964,12 @@ pub fn excerpt(text: &str) -> Result<String> {
 
 /// What of a tool call is stored, under the capture contract (#1024).
 pub(crate) struct ToolCapture {
-    /// The stored input: scrubbed and cut, a stub's path, or an omission marker.
+    /// The stored input: scrubbed and cut, or a stub's path.
     pub args: Value,
-    /// The stored result: scrubbed and cut, or an omission marker; `None` for a stub.
+    /// The stored result: scrubbed and cut; `None` for a stub.
     pub result: Option<String>,
-    /// The scrubbed, uncut result a promotion may quote; `None` for a stub or an omitted one.
+    /// The scrubbed, uncut result a promotion may quote; `None` for a stub or a result over the
+    /// write limit.
     pub full_result: Option<String>,
     /// What deduplication hashes: the scrubbed uncut input, or a domain-separated stand-in.
     pub hash_input: String,
@@ -973,8 +986,9 @@ pub(crate) struct ToolCapture {
 /// Apply the capture contract to one tool call: a call touching a sensitive path is a stub that
 /// keeps its token and outcome and nothing of its input or result; otherwise the input and
 /// result are scrubbed, then cut to [`CAPTURE_CAP`]. An `Other` outcome text is scrubbed and cut
-/// on both branches. A field over the write limit is never scanned: it is stored as a marker,
-/// and an omitted input never deduplicates.
+/// on both branches. A field over the write limit keeps an excerpt of its first window, scrubbed
+/// and cut the same way: the rest is never scanned, an input that large never deduplicates,
+/// and a result that large is never quoted.
 pub(crate) fn capture_tool_use(
     args: &Value,
     result: Option<&str>,
@@ -985,7 +999,7 @@ pub(crate) fn capture_tool_use(
     let (outcome, outcome_found) = match outcome {
         OutcomeClass::Other(text) => {
             let (text, found) = capture_text(&text)?;
-            (OutcomeClass::Other(text.into_owned()), found)
+            (OutcomeClass::Other(text), found)
         }
         named => (named, 0),
     };
@@ -1016,10 +1030,11 @@ pub(crate) fn capture_tool_use(
                 &std::collections::hash_map::RandomState::new(),
                 std::time::SystemTime::now(),
             );
+            let (clean, found) = scrub_with(window(&args.to_string()), &[])?;
             (
-                Value::String("[omitted: over 1 MiB]".to_owned()),
-                format!("omitted\0{nonce}"),
-                0,
+                Value::String(settled_cut(&clean)?),
+                format!("oversized\0{nonce}"),
+                found,
             )
         } else {
             let mut args = args.clone();
@@ -1030,7 +1045,8 @@ pub(crate) fn capture_tool_use(
     let (result, full_result, result_found) = match result {
         None => (None, None, 0),
         Some(r) if crate::limits::check_str_size(r, "tool result").is_err() => {
-            (Some(format!("[omitted: {} bytes]", r.len())), None, 0)
+            let (clean, found) = scrub_with(window(r), &[])?;
+            (Some(settled_cut(&clean)?), None, found)
         }
         Some(r) => {
             let (clean, found) = scrub_with(r, &[])?;
@@ -1049,14 +1065,11 @@ pub(crate) fn capture_tool_use(
     })
 }
 
-/// A tool text as stored: scrubbed, then cut; over the write limit, never scanned and stored as
-/// an omission marker. Returns the text and its findings.
-fn capture_text(text: &str) -> Result<(std::borrow::Cow<'static, str>, u64)> {
-    if crate::limits::check_str_size(text, "tool text").is_err() {
-        return Ok((format!("[omitted: {} bytes]", text.len()).into(), 0));
-    }
-    let (clean, found) = scrub_with(text, &[])?;
-    Ok((settled_cut(&clean)?.into(), found))
+/// A tool text as stored: scrubbed, then cut; over the write limit, only its first window is
+/// scanned. Returns the text and its findings.
+fn capture_text(text: &str) -> Result<(String, u64)> {
+    let (clean, found) = scrub_with(window(text), &[])?;
+    Ok((settled_cut(&clean)?, found))
 }
 
 // ── Derived text a consumer embeds itself ────────────────────────────────────
