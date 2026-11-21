@@ -148,6 +148,7 @@ macro_rules! all_behaviors_into {
             erase_machine_takes_what_names_it_or_sits_in_its_bucket => retraction::erase_machine_takes_what_names_it_or_sits_in_its_bucket,
             a_second_machine_erasure_deletes_nothing => retraction::a_second_machine_erasure_deletes_nothing,
             erase_of_a_missing_fact_deletes_nothing => retraction::erase_of_a_missing_fact_deletes_nothing,
+            erase_machine_takes_its_lifecycle_rows => retraction::erase_machine_takes_its_lifecycle_rows,
             a_key_is_held_once => lifecycle::a_key_is_held_once,
             a_delivery_commits_whole_or_not_at_all => lifecycle::a_delivery_commits_whole_or_not_at_all,
             a_busy_store_is_unavailable => lifecycle::a_busy_store_is_unavailable,

@@ -70,7 +70,9 @@ pub struct EraseReport {
     /// What was asked.
     pub target: EraseTarget,
     /// Rows deleted per kind (`activities`, `checkpoints`, `edges`, `events`, `facts`,
-    /// `summaries`), every kind present, zero included.
+    /// `quarantined`, `receipts`, `segments`, `summaries`), every kind present, zero
+    /// included. `quarantined`, `receipts` and `segments` are the lifecycle route's rows of a
+    /// machine, and zero for a fact.
     pub deleted: std::collections::BTreeMap<String, usize>,
     /// The facts deleted, in id order.
     pub erased_facts: Vec<i64>,

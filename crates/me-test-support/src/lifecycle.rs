@@ -13,11 +13,11 @@ use me_types::types::{EventFilter, FactType, NewFact, NextEmbedding};
 use super::factory::ConformanceBackend;
 use super::fixtures::{new_activity, new_event, new_fact, seed_facts};
 
-fn t0() -> DateTime<Utc> {
+pub fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 11, 21, 9, 0, 0).unwrap()
 }
 
-fn key(secs: i64, seq: u32, id: &str) -> OrderKey {
+pub fn key(secs: i64, seq: u32, id: &str) -> OrderKey {
     OrderKey {
         time: t0() + Duration::seconds(secs),
         seq,
@@ -26,7 +26,7 @@ fn key(secs: i64, seq: u32, id: &str) -> OrderKey {
 }
 
 /// A main-agent prompt of `session` as the engine would hand it over, filed under `p`.
-fn prompt(session: &str, key: OrderKey) -> CaptureWrite {
+pub fn prompt(session: &str, key: OrderKey) -> CaptureWrite {
     let mut event = new_event(session);
     event.timestamp = key.time;
     CaptureWrite {
@@ -45,17 +45,17 @@ fn prompt(session: &str, key: OrderKey) -> CaptureWrite {
 }
 
 /// A fact as the engine queues it: no vector yet.
-fn vectorless(content: &str) -> NewFact {
+pub fn vectorless(content: &str) -> NewFact {
     NewFact::builder(content, Vec::new(), FactType::Episodic)
         .scope_id(1)
         .build()
 }
 
-fn capture(session: &str, id: &str) -> DeliveryWrite {
+pub fn capture(session: &str, id: &str) -> DeliveryWrite {
     DeliveryWrite::Capture(Box::new(prompt(session, key(0, 1, id))))
 }
 
-async fn deliver_at(
+pub async fn deliver_at(
     be: &Arc<dyn StorageBackend>,
     machine: &str,
     id: &str,
@@ -67,7 +67,7 @@ async fn deliver_at(
         .await
 }
 
-async fn deliver(
+pub async fn deliver(
     be: &Arc<dyn StorageBackend>,
     machine: &str,
     id: &str,
@@ -77,7 +77,7 @@ async fn deliver(
     deliver_at(be, machine, id, body, Utc::now(), write).await
 }
 
-async fn events(be: &Arc<dyn StorageBackend>) -> i64 {
+pub async fn events(be: &Arc<dyn StorageBackend>) -> i64 {
     be.count_events(&EventFilter::default()).await.unwrap()
 }
 
