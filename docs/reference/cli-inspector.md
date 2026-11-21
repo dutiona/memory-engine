@@ -117,6 +117,7 @@ paused: no
 last embed success: 2026-11-17T09:12:03+00:00
 last embed error: 2026-11-17T09:10:41+00:00: embedder: embedding endpoint returned 503 Service Unavailable: …
 redaction: 12 redacted, 3 stubbed
+lifecycle: 0 quarantined
 ```
 
 - `waiting`: items not failed, due now or backing off; `oldest`: the age of the oldest of them, in its largest whole
@@ -126,15 +127,16 @@ redaction: 12 redacted, 3 stubbed
 - `last embed success`, `last embed error`: their times (RFC 3339, UTC) and the last error, or `never`.
 - `redaction`: the store-wide totals of secrets redacted on write and of activities stored as sensitive-path stubs
   (#1024, [what they count](redaction.md#counters)).
+- `lifecycle`: the lifecycle events whose body did not parse, held as metadata only (ADR-0020 §3, #1025).
 
-`--format json` prints `{"waiting","oldest_age_secs","failed","paused_since","pause_error","last_success_at","last_error_at","last_error","redacted","stubbed"}`,
+`--format json` prints `{"waiting","oldest_age_secs","failed","paused_since","pause_error","last_success_at","last_error_at","last_error","redacted","stubbed","quarantined"}`,
 each absent value `null`; `--format plain` prints the same keys as `key=value` lines, an absent value empty. Error
 texts come from the embedder, so their control characters are escaped in the table and plain formats. `status` exits 0
 in every queue state; the alarm is in the output.
 
 It builds no engine: it opens one SQLite connection with `SQLITE_OPEN_READ_ONLY` and a 5 s busy timeout, checks that
 the connection is read-only, and checks the schema version without migrating. It takes no lock, so it runs beside a
-live server and a writer and changes nothing. A store below schema v17 has no queue: `status` exits 1 with an error
+live server and a writer and changes nothing. A store below schema v18 has no lifecycle tables and one below v17 has no queue: `status` exits 1 with an error
 naming the migration it needs (a store newer than the binary is refused too), and the store stays as it was.
 
 A store whose facts all wait has no embedding identity yet; its first fact, or the `import` that restored it,
