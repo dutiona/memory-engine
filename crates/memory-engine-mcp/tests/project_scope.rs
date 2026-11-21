@@ -1359,3 +1359,50 @@ async fn concurrent_moves_leave_a_replayable_log() {
         );
     }
 }
+
+#[tokio::test]
+async fn recall_names_the_kind_of_a_captured_memory() {
+    let server = TestServer::start().await;
+    let home = home_of(P_KEY);
+    for (content, metadata) in [
+        ("kestrel said so", json!({ "capture": "final_message" })),
+        (
+            "kestrel summary",
+            json!({ "capture": "compaction_summary" }),
+        ),
+        ("kestrel remembered", json!({})),
+        ("kestrel odd", json!({ "capture": "something_new" })),
+    ] {
+        server.seed(Some(&home), content, metadata).await;
+    }
+    let p = session(LAPTOP_DEV, "project", Some(P_SSH), None);
+
+    let reply = recall(&server, "laptop", &p, json!({ "query": "kestrel" })).await;
+
+    assert!(!reply.is_error, "{reply:?}");
+    let mut kinds: Vec<(String, String)> = reply.json()["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["content"].as_str().unwrap().to_owned(),
+                r["kind"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    kinds.sort();
+    let kinds: Vec<(&str, &str)> = kinds
+        .iter()
+        .map(|(c, k)| (c.as_str(), k.as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("kestrel odd", "remembered"),
+            ("kestrel remembered", "remembered"),
+            ("kestrel said so", "final message"),
+            ("kestrel summary", "compaction summary"),
+        ]
+    );
+}
