@@ -99,6 +99,7 @@ impl MemoryEngine {
             outcome_class: capture.outcome,
             timestamp: req.timestamp,
             scope_id,
+            machine: None,
         };
 
         let (activity_id, was_deduplicated) = self

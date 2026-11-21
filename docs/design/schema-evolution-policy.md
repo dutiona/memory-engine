@@ -167,6 +167,22 @@ embedding. Only the generic hydration maps `X''` to an empty `Fact::embedding`. 
 not mirror the queue yet (#634). A v16 binary refuses a v17 store; rolling an image back means
 restoring the `memory.db.v16.bak` the first open writes.
 
+**v17→v18** (#1025, the lifecycle event route) adds two tables and one column, no data move.
+`lifecycle_receipts` holds the idempotency key `(machine, event_id)` with the body's SHA-256 and
+either the captured event's row or the quarantine's metadata (a `CHECK` makes it exactly one);
+`lifecycle_segments` holds one appended row per session segment. `activities` gains a nullable
+`machine` column, added by `ALTER TABLE … ADD COLUMN` only when `pragma_table_info` lacks it, and
+`idx_activities_dedup` is dropped and rebuilt with it, so two machines never share an activity row
+and an erasure by machine can take the rows by it. The seven new indexes are the child keys an
+erasure probes, the partial indexes the quarantine count and the idle sweep read, and
+`idx_events_mcp_call`, an expression index guarded by `json_valid` that resolves a captured tool
+result's call ID. Every statement is `IF NOT EXISTS`, so the step re-runs on the rolled-back
+fixtures. The oracles are `migrate_v17_to_v18_adds_the_lifecycle_tables`,
+`migrate_v17_to_v18_is_idempotent_on_a_current_schema`, `fresh_vs_migrated_lifecycle_converge`
+(the table's columns, the rest on normalized SQL), the goldens and `all_nine_indexes_created` =
+**41**. Postgres does not mirror the tables (#634). A v17 binary refuses a v18 store; rolling an
+image back means restoring the `memory.db.v17.bak` the first open writes.
+
 ## Event Envelope Versioning
 
 Events in the append-only log carry a per-event-type revision via the `event_revision` column.

@@ -510,7 +510,7 @@ fn migrate_v11_to_v12_drops_embed_dim() {
 
     migrate(&conn, None).unwrap();
 
-    // Migrating from v11 runs the full chain forward to CURRENT (v11→…→v17).
+    // Migrating from v11 runs the full chain forward to CURRENT (v11→…→v18).
     assert_eq!(
         get_config(&conn, "schema_version").unwrap(),
         Some(CURRENT_SCHEMA_VERSION.to_string()),
@@ -573,7 +573,7 @@ fn migrate_v12_to_v13_roundtrips_fingerprint() {
     assert_eq!(
         get_config(&conn, "schema_version").unwrap(),
         Some(CURRENT_SCHEMA_VERSION.to_string()),
-        "schema_version bumped to CURRENT (migrate chains v12→…→v17)"
+        "schema_version bumped to CURRENT (migrate chains v12→…→v18)"
     );
     // Exactly one active row, columns identical to the stamped tuple.
     let (name, model, provider, dim, base, elem, status): (
@@ -743,8 +743,8 @@ fn all_nine_indexes_created() {
             |r| r.get(0),
         )
         .unwrap();
-    // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11) + 1 embedding_spaces one-active (v13) + 1 fact_vectors space (v14) + 4 tombstone/erasure child keys (v16) + 1 embed_queue due (v17)
-    assert_eq!(count, 34);
+    // 9 original + 2 scopes indexes + 4 scope_id indexes + 4 v3 indexes + 1 archive_manifest + 1 lineage + 5 activities/checkpoints + 1 t_created (v11) + 1 embedding_spaces one-active (v13) + 1 fact_vectors space (v14) + 4 tombstone/erasure child keys (v16) + 1 embed_queue due (v17) + 7 lifecycle (v18: activities machine, receipts event/call/quarantine, segments open/final fact, events mcp call)
+    assert_eq!(count, 41);
 }
 
 // --- Migration framework tests ---
@@ -1547,7 +1547,10 @@ fn schema_ddl_snapshot_is_stable() {
     // a new schema version is intentionally introduced.
     let expected = "\
 -- index: idx_activities_dedup
-CREATE INDEX idx_activities_dedup ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);
+CREATE INDEX idx_activities_dedup ON activities(session_id, tool_name, args_hash, outcome_class, scope_id, machine);
+
+-- index: idx_activities_machine
+CREATE INDEX idx_activities_machine ON activities(machine);
 
 -- index: idx_activities_promoted
 CREATE INDEX idx_activities_promoted ON activities(promoted_fact_id);
@@ -1584,6 +1587,9 @@ CREATE INDEX idx_embed_queue_due ON embed_queue(next_attempt_at) WHERE failed_at
 
 -- index: idx_embedding_spaces_one_active
 CREATE UNIQUE INDEX idx_embedding_spaces_one_active ON embedding_spaces(status) WHERE status = 'active';
+
+-- index: idx_events_mcp_call
+CREATE INDEX idx_events_mcp_call ON events((CASE WHEN json_valid(payload) THEN json_extract(payload, '$.call') END)) WHERE source = 'mcp';
 
 -- index: idx_events_origin_seq
 CREATE INDEX idx_events_origin_seq ON events(origin_node_id, sequence_id);
@@ -1636,6 +1642,21 @@ CREATE INDEX idx_facts_type ON facts(fact_type);
 -- index: idx_facts_valid
 CREATE INDEX idx_facts_valid ON facts(t_valid, t_invalid);
 
+-- index: idx_lifecycle_receipts_call
+CREATE INDEX idx_lifecycle_receipts_call ON lifecycle_receipts(call_event);
+
+-- index: idx_lifecycle_receipts_event
+CREATE INDEX idx_lifecycle_receipts_event ON lifecycle_receipts(event_row);
+
+-- index: idx_lifecycle_receipts_quarantine
+CREATE INDEX idx_lifecycle_receipts_quarantine ON lifecycle_receipts(machine) WHERE quarantine IS NOT NULL;
+
+-- index: idx_lifecycle_segments_final_fact
+CREATE INDEX idx_lifecycle_segments_final_fact ON lifecycle_segments(final_fact);
+
+-- index: idx_lifecycle_segments_open
+CREATE INDEX idx_lifecycle_segments_open ON lifecycle_segments(received_at) WHERE ended_by IS NULL;
+
 -- index: idx_lineage_wisdom_fact_id
 CREATE UNIQUE INDEX idx_lineage_wisdom_fact_id ON lineage(wisdom_fact_id);
 
@@ -1649,7 +1670,7 @@ CREATE UNIQUE INDEX idx_scopes_parent_label ON scopes(parent_id, label);
 CREATE INDEX idx_summaries_scope ON summaries(scope_id);
 
 -- table: activities
-CREATE TABLE activities ( id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, tool_name TEXT NOT NULL, args_hash TEXT NOT NULL, args TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(args)), result_summary TEXT, outcome_class TEXT NOT NULL DEFAULT 'success', status TEXT NOT NULL DEFAULT 'recorded' CHECK(status IN ('recorded', 'deduplicated', 'ignored', 'promoted')), occurrence_count INTEGER NOT NULL DEFAULT 1, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), promoted_fact_id INTEGER REFERENCES facts(id) );
+CREATE TABLE activities ( id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, tool_name TEXT NOT NULL, args_hash TEXT NOT NULL, args TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(args)), result_summary TEXT, outcome_class TEXT NOT NULL DEFAULT 'success', status TEXT NOT NULL DEFAULT 'recorded' CHECK(status IN ('recorded', 'deduplicated', 'ignored', 'promoted')), occurrence_count INTEGER NOT NULL DEFAULT 1, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), promoted_fact_id INTEGER REFERENCES facts(id), machine TEXT );
 
 -- table: archive_manifest
 CREATE TABLE archive_manifest ( id INTEGER PRIMARY KEY AUTOINCREMENT, pak_path TEXT NOT NULL, created_at TEXT NOT NULL, fact_count INTEGER NOT NULL, edge_count INTEGER NOT NULL, fact_id_min INTEGER NOT NULL, fact_id_max INTEGER NOT NULL, t_created_min TEXT NOT NULL, t_created_max TEXT NOT NULL, size_bytes INTEGER NOT NULL, blake3_hash TEXT NOT NULL );
@@ -1692,6 +1713,12 @@ CREATE TABLE 'facts_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
 
 -- table: facts_fts_idx
 CREATE TABLE 'facts_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+
+-- table: lifecycle_receipts
+CREATE TABLE lifecycle_receipts ( machine TEXT NOT NULL, event_id TEXT NOT NULL, body_sha256 BLOB NOT NULL CHECK(length(body_sha256) = 32), received_at TEXT NOT NULL, event_row INTEGER REFERENCES events(id), call_event INTEGER REFERENCES events(id) ON DELETE SET NULL, quarantine TEXT CHECK(quarantine IS NULL OR json_valid(quarantine)), CHECK((quarantine IS NULL) = (event_row IS NOT NULL)), PRIMARY KEY (machine, event_id) ) WITHOUT ROWID;
+
+-- table: lifecycle_segments
+CREATE TABLE lifecycle_segments ( id INTEGER PRIMARY KEY, machine TEXT NOT NULL, session_id TEXT NOT NULL, number INTEGER NOT NULL, start_key TEXT NOT NULL, last_key TEXT NOT NULL, received_at TEXT NOT NULL, counts TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(counts)), main_turns INTEGER NOT NULL DEFAULT 0, final_key TEXT, final_fact INTEGER REFERENCES facts(id) ON DELETE SET NULL, ended_by TEXT CHECK(ended_by IN ('session_end', 'session_start', 'gap', 'idle')), ended_at TEXT, UNIQUE (machine, session_id, number) );
 
 -- table: lineage
 CREATE TABLE lineage ( lineage_id INTEGER PRIMARY KEY AUTOINCREMENT, wisdom_fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE, source_fact_ids TEXT NOT NULL CHECK(json_valid(source_fact_ids)), provenance TEXT NOT NULL CHECK(json_valid(provenance)) );
@@ -2277,21 +2304,22 @@ fn fresh_and_migrated_dedup_index_have_identical_columns() {
     migrate(&migrated, None).unwrap();
     let migrated_cols = index_columns(&migrated, "idx_activities_dedup");
 
-    // Both must include scope_id and be identical (5 columns).
+    // Both must include scope_id and machine (v18) and be identical (6 columns).
     let expected = vec![
         "session_id".to_string(),
         "tool_name".to_string(),
         "args_hash".to_string(),
         "outcome_class".to_string(),
         "scope_id".to_string(),
+        "machine".to_string(),
     ];
     assert_eq!(
         fresh_cols, expected,
-        "fresh-DB idx_activities_dedup must include scope_id (5 cols)"
+        "fresh-DB idx_activities_dedup must include scope_id and machine (6 cols)"
     );
     assert_eq!(
         migrated_cols, expected,
-        "migrated idx_activities_dedup must include scope_id (5 cols)"
+        "migrated idx_activities_dedup must include scope_id and machine (6 cols)"
     );
     assert_eq!(
         fresh_cols, migrated_cols,
@@ -2500,7 +2528,8 @@ fn migrate_v9_to_v10_converges_buggy_dedup_index() {
         Some(CURRENT_SCHEMA_VERSION.to_string())
     );
 
-    // After migration: the index converged to the 5-column form (incl scope_id).
+    // After the chain: the index converged to the current form (scope_id from v10, machine
+    // from v18).
     let after = index_columns(&conn, "idx_activities_dedup");
     assert_eq!(
         after,
@@ -2510,8 +2539,9 @@ fn migrate_v9_to_v10_converges_buggy_dedup_index() {
             "args_hash".to_string(),
             "outcome_class".to_string(),
             "scope_id".to_string(),
+            "machine".to_string(),
         ],
-        "v9→v10 migration must rebuild idx_activities_dedup with scope_id"
+        "the chain must rebuild idx_activities_dedup with scope_id and machine"
     );
 }
 
@@ -2529,7 +2559,7 @@ fn reopening_v10_db_leaves_dedup_index_unchanged() {
         before, after,
         "re-running migrations on a fresh v10 DB must leave the dedup index unchanged"
     );
-    assert_eq!(after.len(), 5, "dedup index must have 5 columns");
+    assert_eq!(after.len(), 6, "dedup index must have 6 columns");
 }
 
 // --- v14 → v15 (served artifact, #1017) ---
@@ -2779,4 +2809,139 @@ fn an_embed_queue_row_goes_with_its_fact() {
         .query_row("SELECT COUNT(*) FROM embed_queue", [], |r| r.get(0))
         .unwrap();
     assert_eq!(left, 0, "deleting the fact deletes its queue row");
+}
+
+// --- v17 → v18 (lifecycle receipts and segments, #1025) ---
+
+const LIFECYCLE_OBJECTS: [&str; 7] = [
+    "lifecycle_receipts",
+    "lifecycle_segments",
+    "idx_lifecycle_receipts_event",
+    "idx_lifecycle_receipts_call",
+    "idx_lifecycle_receipts_quarantine",
+    "idx_lifecycle_segments_open",
+    "idx_lifecycle_segments_final_fact",
+];
+
+/// Roll a fresh DB back to a simulated v17 state: drop the v18 tables (their indexes go with
+/// them), the call index and the activities column and its indexes, restore the v17 dedup
+/// index, and reset `schema_version` to 17.
+fn simulate_v17(conn: &Connection) {
+    init_schema(conn).unwrap();
+    conn.execute_batch(
+        "DROP TABLE lifecycle_receipts;
+         DROP TABLE lifecycle_segments;
+         DROP INDEX idx_events_mcp_call;
+         DROP INDEX idx_activities_machine;
+         DROP INDEX idx_activities_dedup;
+         ALTER TABLE activities DROP COLUMN machine;
+         CREATE INDEX idx_activities_dedup
+             ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);",
+    )
+    .unwrap();
+    set_config(conn, "schema_version", "17").unwrap();
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    table_columns(conn, table).iter().any(|c| c.0 == column)
+}
+
+#[test]
+fn migrate_v17_to_v18_adds_the_lifecycle_tables() {
+    let conn = open_memory().unwrap();
+    simulate_v17(&conn);
+    assert!(!table_exists(&conn, "lifecycle_receipts"));
+    assert!(!has_column(&conn, "activities", "machine"));
+
+    migrate(&conn, None).unwrap();
+
+    assert_eq!(
+        get_config(&conn, "schema_version").unwrap().as_deref(),
+        Some(CURRENT_SCHEMA_VERSION.to_string().as_str())
+    );
+    assert!(table_exists(&conn, "lifecycle_receipts"));
+    assert!(table_exists(&conn, "lifecycle_segments"));
+    for index in &LIFECYCLE_OBJECTS[2..] {
+        assert!(index_exists(&conn, index), "{index}");
+    }
+    for index in ["idx_events_mcp_call", "idx_activities_machine"] {
+        assert!(index_exists(&conn, index), "{index}");
+    }
+    assert!(has_column(&conn, "activities", "machine"));
+    assert!(normalized_object_sql(&conn, "idx_activities_dedup").contains("scope_id, machine)"));
+}
+
+#[test]
+fn migrate_v17_to_v18_is_idempotent_on_a_current_schema() {
+    // A current schema rolled back to v17 without dropping anything re-runs the step: the column
+    // is added only when missing, the dedup index is rebuilt.
+    let conn = open_memory().unwrap();
+    init_schema(&conn).unwrap();
+    for _ in 0..2 {
+        set_config(&conn, "schema_version", "17").unwrap();
+        migrate(&conn, None).unwrap();
+        assert_eq!(
+            get_config(&conn, "schema_version").unwrap().as_deref(),
+            Some(CURRENT_SCHEMA_VERSION.to_string().as_str())
+        );
+    }
+    assert!(table_exists(&conn, "lifecycle_receipts"));
+    assert!(normalized_object_sql(&conn, "idx_activities_dedup").contains("scope_id, machine)"));
+}
+
+#[test]
+fn fresh_vs_migrated_lifecycle_converge() {
+    let fresh = open_memory().unwrap();
+    init_schema(&fresh).unwrap();
+
+    let migrated = open_memory().unwrap();
+    simulate_v17(&migrated);
+    migrate(&migrated, None).unwrap();
+
+    for obj in LIFECYCLE_OBJECTS.iter().chain(&[
+        "idx_events_mcp_call",
+        "idx_activities_machine",
+        "idx_activities_dedup",
+    ]) {
+        assert_eq!(
+            normalized_object_sql(&fresh, obj),
+            normalized_object_sql(&migrated, obj),
+            "fresh-init and migrated {obj} DDL must converge"
+        );
+    }
+    // `ADD COLUMN` splices the column into the stored text with its own spacing, so the table
+    // is compared on its columns.
+    assert_eq!(
+        table_columns(&fresh, "activities"),
+        table_columns(&migrated, "activities"),
+        "fresh-init and migrated activities columns must converge"
+    );
+}
+
+#[test]
+fn a_receipt_names_an_event_or_a_quarantine_never_both_nor_neither() {
+    let conn = open_memory().unwrap();
+    init_schema(&conn).unwrap();
+    conn.execute_batch(
+        "INSERT INTO events (timestamp, event_type, source) VALUES ('t', 'system_event', 'lifecycle');",
+    )
+    .unwrap();
+    let next_id = std::cell::Cell::new(0);
+    let insert = |event_row: &str, quarantine: &str, digest_len: usize| {
+        next_id.set(next_id.get() + 1);
+        conn.execute_batch(&format!(
+            "INSERT INTO lifecycle_receipts (machine, event_id, body_sha256, received_at, event_row, quarantine)
+             VALUES ('laptop', 'e{}', zeroblob({digest_len}), 't', {event_row}, {quarantine});",
+            next_id.get()
+        ))
+    };
+    assert!(insert("1", "NULL", 32).is_ok(), "an event");
+    assert!(insert("NULL", "'{}'", 32).is_ok(), "a quarantine");
+    assert!(insert("1", "'{}'", 32).is_err(), "both");
+    assert!(insert("NULL", "NULL", 32).is_err(), "neither");
+    assert!(insert("1", "NULL", 31).is_err(), "a short digest");
+    assert!(
+        insert("NULL", "'{'", 32).is_err(),
+        "a quarantine that is not JSON"
+    );
 }
