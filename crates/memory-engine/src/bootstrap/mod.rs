@@ -30,6 +30,7 @@ pub use filter::{CandidateEpisode, ConversationTurn, EpisodeCategory, ToolCallRe
 pub use memory_dir::{ParsedMemory, parse_memory_file};
 pub use metrics::{BootstrapConfig, BootstrapReport, PrewarmMetrics};
 pub use outcome::{OutcomeSignals, SessionOutcome};
+pub use parse::{parse_timestamp, read_json_lines};
 
 /// Parsed-but-not-yet-embedded session data — the cheap output of the parse phase.
 ///

@@ -120,8 +120,10 @@ pub const MAX_JSONL_LINE_BYTES: usize = 8 * 1024 * 1024;
 /// is treated as a (final) malformed/oversized line rather than parsed.
 ///
 /// 256 MiB is generously above any real Claude Code session file while keeping
-/// the worst-case I/O bounded. Surfaced as [`crate::bootstrap::BootstrapConfig::max_session_bytes`].
-pub const DEFAULT_MAX_SESSION_BYTES: u64 = 256 * 1024 * 1024;
+/// the worst-case I/O bounded. It is the backfill route's body limit too
+/// ([`crate::BACKFILL_BODY_BYTES`]). Surfaced as
+/// [`crate::bootstrap::BootstrapConfig::max_session_bytes`].
+pub const DEFAULT_MAX_SESSION_BYTES: u64 = crate::limits::BACKFILL_BODY_BYTES as u64;
 
 /// Default ceiling on the number of [`SessionEntry`] values retained from one
 /// stream (#293).
@@ -221,33 +223,97 @@ pub fn parse_session_file(
     max_session_bytes: u64,
     max_entries: usize,
 ) -> (Vec<SessionEntry>, usize) {
-    // `0` is the "no per-stream limit" sentinel (matching the `max_turns`
-    // convention); map it to the maximum so `Read::take` does not read *nothing*.
-    let stream_cap = if max_session_bytes == 0 {
-        u64::MAX
-    } else {
-        max_session_bytes
-    };
-    // `Read::take` enforces the per-stream byte ceiling; re-buffer because the
-    // `Take` adapter is `Read`, not `BufRead`, and the line reader needs the
-    // latter (`read_until`/`fill_buf`/`consume`).
-    let capped = std::io::BufReader::new(reader.take(stream_cap));
-    parse_session_file_capped(capped, MAX_JSONL_LINE_BYTES, max_entries)
+    parse_session_file_capped(
+        stream(reader, max_session_bytes),
+        MAX_JSONL_LINE_BYTES,
+        max_entries,
+    )
 }
 
 /// [`parse_session_file`] with explicit per-line and per-entry caps (test seam).
 fn parse_session_file_capped(
-    mut reader: impl std::io::BufRead,
+    reader: impl std::io::BufRead,
     cap: usize,
     max_entries: usize,
 ) -> (Vec<SessionEntry>, usize) {
-    let mut entries = Vec::new();
+    let (entries, malformed) = read_lines(reader, cap, max_entries, |line_no, line| {
+        serde_json::from_str::<SessionEntry>(line)
+            .map_err(
+                |e| tracing::warn!(line = line_no, error = %e, "skipping malformed JSONL line"),
+            )
+            .ok()
+    });
+    (
+        entries.into_iter().map(|(_, entry)| entry).collect(),
+        malformed,
+    )
+}
+
+/// The JSON objects of a JSON Lines stream, under the bounds of [`parse_session_file`].
+///
+/// The bounds are [`MAX_JSONL_LINE_BYTES`] per line, `max_bytes` for the stream and `max_lines`
+/// objects kept, `0` meaning no limit for either. Each object comes with its 1-based line
+/// number, counted over every line, empty ones included.
+///
+/// Returns the objects and how many non-empty lines were skipped: oversized, not UTF-8, not
+/// JSON, or JSON that is not an object. A skipped line is never logged with its bytes.
+///
+/// # Examples
+///
+/// ```
+/// use memory_engine::bootstrap::read_json_lines;
+///
+/// let (objects, malformed) = read_json_lines(&b"{\"a\":1}\n\n[2]\n{\"b\":3}\n"[..], 0, 0);
+/// assert_eq!(objects.iter().map(|(line, _)| *line).collect::<Vec<_>>(), [1, 4]);
+/// assert_eq!(malformed, 1);
+/// ```
+#[must_use]
+pub fn read_json_lines(
+    reader: impl std::io::BufRead,
+    max_bytes: u64,
+    max_lines: usize,
+) -> (Vec<(usize, serde_json::Value)>, usize) {
+    read_json_lines_capped(stream(reader, max_bytes), MAX_JSONL_LINE_BYTES, max_lines)
+}
+
+/// [`read_json_lines`] with an explicit per-line cap (test seam).
+fn read_json_lines_capped(
+    reader: impl std::io::BufRead,
+    cap: usize,
+    max_lines: usize,
+) -> (Vec<(usize, serde_json::Value)>, usize) {
+    read_lines(reader, cap, max_lines, |_, line| {
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line)
+            .ok()
+            .map(serde_json::Value::Object)
+    })
+}
+
+/// `reader` under the per-stream byte ceiling: `Read::take`, re-buffered because the `Take`
+/// adapter is `Read`, not `BufRead`, and the line reader needs the latter
+/// (`read_until`/`fill_buf`/`consume`). `0` is the "no per-stream limit" sentinel (matching
+/// the `max_turns` convention), mapped to the maximum so `Read::take` does not read *nothing*.
+fn stream(reader: impl std::io::BufRead, max_bytes: u64) -> impl std::io::BufRead {
+    let cap = if max_bytes == 0 { u64::MAX } else { max_bytes };
+    std::io::BufReader::new(reader.take(cap))
+}
+
+/// The bounded line loop both importers share: each non-empty line within `cap` bytes, as
+/// UTF-8 and trimmed, goes to `parse` with its line number; `None` counts it malformed, as
+/// does an oversized or non-UTF-8 line. It stops after `max` kept values (`0` = no limit).
+fn read_lines<T>(
+    mut reader: impl std::io::BufRead,
+    cap: usize,
+    max: usize,
+    mut parse: impl FnMut(usize, &str) -> Option<T>,
+) -> (Vec<(usize, T)>, usize) {
+    let mut kept = Vec::new();
     let mut malformed = 0;
     let mut line_no = 0usize;
     loop {
-        if max_entries > 0 && entries.len() >= max_entries {
+        if max > 0 && kept.len() >= max {
             tracing::warn!(
-                max_entries,
+                max_entries = max,
                 "truncating session: reached entry-count cap (remaining lines discarded)"
             );
             break;
@@ -277,12 +343,9 @@ fn parse_session_file_capped(
                 if trimmed.is_empty() {
                     continue;
                 }
-                match serde_json::from_str::<SessionEntry>(trimmed) {
-                    Ok(entry) => entries.push(entry),
-                    Err(e) => {
-                        tracing::warn!(line = line_no, error = %e, "skipping malformed JSONL line");
-                        malformed += 1;
-                    }
+                match parse(line_no, trimmed) {
+                    Some(value) => kept.push((line_no, value)),
+                    None => malformed += 1,
                 }
             }
             Err(e) => {
@@ -294,7 +357,7 @@ fn parse_session_file_capped(
             }
         }
     }
-    (entries, malformed)
+    (kept, malformed)
 }
 
 /// Parse the content blocks from a [`MessagePayload`]'s `content` field.
@@ -358,6 +421,17 @@ fn parse_single_block(obj: &serde_json::Value) -> ContentBlock {
 /// Parse a timestamp string to `DateTime<Utc>`, returning `None` on failure.
 ///
 /// Tries RFC 3339 first, then falls back to `%Y-%m-%dT%H:%M:%S` (no timezone).
+///
+/// # Examples
+///
+/// ```
+/// use memory_engine::bootstrap::parse_timestamp;
+///
+/// let ms = parse_timestamp("2026-03-19T10:00:00.120Z").unwrap();
+/// assert_eq!(ms.timestamp_subsec_millis(), 120);
+/// assert_eq!(parse_timestamp("2026-03-19T10:00:00"), parse_timestamp("2026-03-19T10:00:00Z"));
+/// assert_eq!(parse_timestamp("yesterday"), None);
+/// ```
 #[must_use]
 pub fn parse_timestamp(s: &str) -> Option<DateTime<Utc>> {
     // Try RFC 3339 / ISO 8601 with timezone
@@ -507,6 +581,36 @@ mod tests {
             5,
             "the 0 sentinel must mean unbounded, not take(0)/read-nothing"
         );
+    }
+
+    /// The backfill route's reader keeps the importer's bounds: an oversized line is skipped,
+    /// counted and resynchronized; the stream and object caps hold; a line that is not UTF-8,
+    /// not JSON or not an object is counted; line numbers count every line, empty ones included.
+    #[test]
+    fn read_json_lines_keeps_the_importer_bounds() {
+        let big = "x".repeat(200);
+        let input = format!("{{\"a\":1}}\n\n{big}\n{{\"b\":2}}\n[1]\nnot json\n\"text\"\n");
+        let mut bytes = input.into_bytes();
+        bytes.extend_from_slice(b"\xff\xfe\n{\"c\":3}\n");
+
+        let (objects, malformed) = read_json_lines_capped(bytes.as_slice(), 64, 0);
+        let lines: Vec<usize> = objects.iter().map(|(n, _)| *n).collect();
+        assert_eq!(lines, [1, 4, 9], "line numbers over all lines");
+        assert_eq!(objects[1].1, serde_json::json!({ "b": 2 }));
+        assert_eq!(
+            malformed, 5,
+            "oversized, an array, not JSON, a string, not UTF-8"
+        );
+
+        let (objects, _) = read_json_lines_capped(bytes.as_slice(), 64, 2);
+        assert_eq!(objects.len(), 2, "the object cap");
+
+        let line = "{\"type\":\"user\"}";
+        let stream = format!("{line}\n{line}\n{line}\n");
+        let (objects, _) = read_json_lines(stream.as_bytes(), 31, 0);
+        assert_eq!(objects.len(), 2, "the stream cap");
+        let (objects, malformed) = read_json_lines(stream.as_bytes(), 0, 0);
+        assert_eq!((objects.len(), malformed), (3, 0), "0 is no limit");
     }
 
     #[test]
