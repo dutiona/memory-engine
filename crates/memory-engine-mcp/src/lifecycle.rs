@@ -370,6 +370,54 @@ pub(crate) async fn events(
         .into_response()
 }
 
+/// How often the sweep looks for sessions that went quiet.
+const SWEEP_EVERY: Duration = Duration::from_secs(60);
+
+/// End idle lifecycle segments (ADR-0020 §5, rule 4): once at start, which finishes the sessions
+/// that went quiet while the server was down, and then every minute, until the task is aborted.
+///
+/// Each tick holds `fence` for reading, so a stop that takes it for writing waits for a sweep in
+/// progress and lets none start. A failed sweep is logged and retried at the next tick: nothing
+/// is lost, because a segment stays open until some sweep ends it.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use memory_engine::MemoryEngine;
+///
+/// let runtime = tokio::runtime::Runtime::new()?;
+/// runtime.block_on(async {
+///     let engine = Arc::new(MemoryEngine::builder(4).build()?);
+///     let fence = Arc::new(tokio::sync::RwLock::new(()));
+///     let sweep = tokio::spawn(memory_engine_mcp::lifecycle::sweep(engine, fence));
+///     sweep.abort();
+///     Ok::<(), memory_engine::MemoryError>(())
+/// })?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub async fn sweep(
+    engine: std::sync::Arc<memory_engine::MemoryEngine>,
+    fence: std::sync::Arc<tokio::sync::RwLock<()>>,
+) {
+    let mut ticks = tokio::time::interval(SWEEP_EVERY);
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticks.tick().await;
+        let _fence = fence.read().await;
+        match engine.end_idle_segments(Utc::now()).await {
+            Ok(0) => {}
+            Ok(ended) => tracing::info!(ended, "ended idle lifecycle segments"),
+            Err(error) => {
+                tracing::warn!(
+                    class = error_class(&error),
+                    "the idle sweep failed; retrying at the next tick"
+                );
+            }
+        }
+    }
+}
+
 impl MemoryMcpServer {
     /// Everything after the envelope check, the body read and the fence (ADR-0020 §3): choose
     /// the adapter by `ME-Harness`, read the key, parse, map and apply the body, and answer.

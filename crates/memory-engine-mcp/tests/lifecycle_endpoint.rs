@@ -1118,3 +1118,64 @@ fn erasing_a_machine_takes_its_captured_rows() {
         "desktop's text is intact"
     );
 }
+/// The sweep runs once at start, so a session that went quiet while the server was down is
+/// finished at once: its segment ends as `idle` and keeps its checkpoint; a later event opens the
+/// next segment; a second start changes nothing.
+#[tokio::test]
+async fn the_server_ends_idle_segments_at_start() {
+    let mut server = TestServer::start().await;
+    stored(&server, &event("session-start-startup", "a", 0, 1)).await;
+    stored(
+        &server,
+        &saying(event("stop", "b", 5, 1), "last_assistant_message", "done"),
+    )
+    .await;
+    let session = fixture("stop").json_value()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(segments(&server, &session)[0].ended_by, None);
+    server.stop().await;
+    let hour_ago = (chrono::Utc::now() - chrono::Duration::hours(1))
+        .format("%Y-%m-%dT%H:%M:%S%.6fZ")
+        .to_string();
+    server.sql(&format!(
+        "UPDATE lifecycle_segments SET received_at = '{hour_ago}'"
+    ));
+
+    server.restart().await;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while segments(&server, &session)[0].ended_by.is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the segment was not ended within 5 s of the start"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let ended = segments(&server, &session);
+    assert_eq!(ended[0].ended_by.as_deref(), Some("idle"));
+    assert_eq!(ended[0].main_turns, 1, "the checkpoint: a main turn");
+    assert_eq!(ended[0].final_fact, Some(fact_of(&server, "b")));
+
+    stored(
+        &server,
+        &saying(
+            event("stop", "c", 100, 1),
+            "last_assistant_message",
+            "later",
+        ),
+    )
+    .await;
+    let rows = segments(&server, &session);
+    assert_eq!(rows.len(), 2, "a later event opens the next segment");
+    assert_eq!(rows[0], ended[0]);
+
+    server.restart().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(
+        segments(&server, &session),
+        rows,
+        "a second start changes nothing"
+    );
+}

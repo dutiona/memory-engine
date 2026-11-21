@@ -31,7 +31,8 @@ const RESPONSE_GRACE: std::time::Duration = std::time::Duration::from_millis(500
 /// Serve MCP on `listener` until `shutdown` resolves, then flush the sidecar snapshot.
 ///
 /// With an embedder, the embedding drain ([`crate::drain`]) runs beside the server and stops
-/// with it, before the flush.
+/// with it, before the flush. The idle-segment sweep ([`crate::lifecycle::sweep`]) runs beside it
+/// with or without an embedder.
 ///
 /// `allowed_hosts` are added to rmcp's loopback default, never in place of it, so the
 /// Host list can never be empty (rmcp reads an empty list as "admit every host").
@@ -58,6 +59,10 @@ pub async fn serve(
             server.embed_backoff,
         ));
     }
+    drain.spawn(crate::lifecycle::sweep(
+        Arc::clone(&engine),
+        Arc::clone(&in_flight),
+    ));
     let (stopping, stopped) = tokio::sync::oneshot::channel();
     let serving = axum::serve(listener, router(server, tokens, allowed_hosts))
         .with_graceful_shutdown(async move {
