@@ -141,6 +141,31 @@ fn a_hex_leaf_is_redacted_when_its_key_is_a_context_word() {
     }
 }
 
+/// The shared fixture's `json-` cases hold JSON documents: the walk turns each input into its
+/// output, which knowledge-base's walk must match (dutiona/knowledge-base#626). Read here because
+/// `scrub_json` is crate-private; `tests/redaction_conformance.rs` runs their one text pass.
+#[test]
+fn fixture_json_cases_pass_the_json_walk() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/redaction-cases.jsonl");
+    let text = std::fs::read_to_string(path).unwrap();
+    let mut seen = 0;
+    for line in text.lines().skip(1) {
+        let case: Value = serde_json::from_str(line).unwrap();
+        let name = case["name"].as_str().unwrap();
+        if !name.starts_with("json-") {
+            continue;
+        }
+        let parse =
+            |key: &str| -> Value { serde_json::from_str(case[key].as_str().unwrap()).unwrap() };
+        let mut value = parse("input");
+        scrub_json(&mut value, &[]).unwrap();
+        assert_eq!(value, parse("output"), "{name}");
+        seen += 1;
+    }
+    assert!(seen > 0, "the fixture holds no json- case");
+}
+
 // ── Provenance ───────────────────────────────────────────────────────────────
 
 fn provenance(root: &str, key: &Value) -> Value {
