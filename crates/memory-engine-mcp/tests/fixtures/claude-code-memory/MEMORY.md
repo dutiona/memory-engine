@@ -1,0 +1,6 @@
+- [User role](user_role.md) — the fixture user's role
+- [Tests first](feedback_tests_first.md) — write the failing test first
+- [Red before green](feedback_red_before_green.md) — the same rule, filed twice
+- [Release 1.2](project_release_2026_03_14.md) — the 1.2 release
+- [Fixture docs](reference_fixture_docs.md) — where the fixture docs live
+- [Empty stub](project_empty_stub.md) — a stub with no body
