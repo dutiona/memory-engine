@@ -35,7 +35,7 @@ Enable the `ann` feature for HNSW-accelerated vector search at scale:
 memory-engine = { git = "https://github.com/dutiona/memory-engine", features = ["ann"] }
 ```
 
-This adds the `hnsw`, `space`, and `rand` crates as dependencies. Without this feature, vector search uses brute-force only (zero additional dependencies). See [Hybrid Search — ANN](../advanced/hybrid-search.md#ann-approximate-nearest-neighbor) for configuration details.
+This adds the `space` and `rand` crates and the vendored `hnsw` 0.11.0 (`vendor/hnsw`, carried with the #1074 fix) as dependencies. Without this feature, vector search uses brute-force only (zero additional dependencies). See [Hybrid Search — ANN](../advanced/hybrid-search.md#ann-approximate-nearest-neighbor) for configuration details.
 
 ## Build
 
@@ -78,8 +78,8 @@ git archive --format=tar <tag> | podman build --pull=newer -t memory-engine:<tag
   and proc-macro runs, and the `--version` smoke run under `RUN --network=none`: their network namespace holds only
   loopback, so code that only needs to compile cannot open a connection from the build host. `--offline` separately
   makes cargo fail on a crate the fetch missed instead of trying to download it.
-- The build context is an allowlist (`.containerignore`): only `Cargo.toml`, `Cargo.lock` and `crates/`. Docker
-  ignores `.containerignore` and would send the whole tree, so build with Podman (or Buildah).
+- The build context is an allowlist (`.containerignore`): only `Cargo.toml`, `Cargo.lock`, `crates/` and `vendor/`.
+  Docker ignores `.containerignore` and would send the whole tree, so build with Podman (or Buildah).
 - The runtime is Debian slim with CA certificates, the `sqlite3` CLI and `curl`.
 - The image runs as the non-root user `memory-engine`, UID and GID `10001`, in `/var/lib/memory-engine`, with
   `memory-engine-mcp` as its entry point. Run the CLI with `--entrypoint memory-engine-cli`.

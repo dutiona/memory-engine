@@ -1292,8 +1292,6 @@ dependencies = [
 [[package]]
 name = "hnsw"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b9740ebf8769ec4ad6762cc951ba18f39bba6dfbc2fbbe46285f7539af79752"
 dependencies = [
  "ahash",
  "hashbrown 0.11.2",
@@ -2110,7 +2108,6 @@ dependencies = [
  "chrono",
  "criterion",
  "flate2",
- "hnsw",
  "insta",
  "me-archive",
  "me-backend-postgres",
@@ -2127,13 +2124,11 @@ dependencies = [
  "me-types",
  "parking_lot",
  "proptest",
- "rand 0.8.8",
  "rmp-serde",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
- "space",
  "tempfile",
  "thiserror",
  "tokio",

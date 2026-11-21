@@ -78,9 +78,6 @@ tempfile = "3"
 tracing = "0.1"
 parking_lot = "0.12"
 tokio = { version = "1", features = ["rt", "macros", "sync", "net"] }
-hnsw = { version = "0.11", optional = true }
-space = { version = "0.17", optional = true }
-rand = { version = "0.8", features = ["small_rng"], optional = true }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
 
@@ -220,7 +217,7 @@ default = ["backend-sqlite"]
 # Forwards to `me-backend-sqlite/ann` (Wave 2 #816 / S2, sub-PR 2b) so `search::ann`'s
 # HNSW strategy and `sqlite`'s HNSW dispatch/snapshot paths — now living below the
 # seam — compile in lockstep with the facade's own feature.
-ann = ["dep:hnsw", "dep:space", "dep:rand", "me-backend-sqlite/ann"]
+ann = ["me-backend-sqlite/ann"]
 # Forwards to `me-backend-sqlite/compress-{gzip,zstd}` (Wave 2 #816 / S2, sub-PR 2b) so
 # `inspect::dump`'s `dump_json_gzip`/`dump_json_zstd` — now living below the seam —
 # compile in lockstep with the facade's own feature.

@@ -42,8 +42,13 @@ rmp-serde = "1"
 # Sub-PR 2b: `search`'s scaling-warning + `snapshot.rs`'s reject-with-reason logging.
 tracing = "0.1"
 # Sub-PR 2b: HNSW approximate nearest-neighbor search (`search::ann`), gated by the `ann`
-# feature below — mirrors the facade's own optional deps exactly.
-hnsw = { version = "0.11", optional = true }
+# feature below; the facade's `ann` forwards here.
+# Vendored hnsw 0.11.0 with the #1074 fix (`vendor/hnsw/Cargo.toml` lists the deviations).
+# Upstream has not released since 2021-07-19 and closed the same fix (rust-cv/hnsw#40)
+# unmerged. A path dependency rather than a root `[patch]`, because Cargo honours
+# `[patch]` only in the root workspace, so `fuzz/` and git consumers would keep the panic.
+# Go back to crates.io when a release carries the fix.
+hnsw = { path = "../../vendor/hnsw", optional = true }
 space = { version = "0.17", optional = true }
 rand = { version = "0.8", features = ["small_rng"], optional = true }
 
@@ -82,7 +87,7 @@ archive = ["me-types/archive", "me-storage/archive"]
 compress-gzip = ["dep:flate2"]
 compress-zstd = ["dep:zstd"]
 # Sub-PR 2b: HNSW vector search (`search::ann`, `sqlite`'s HNSW dispatch/snapshot paths),
-# mirroring the facade's own `ann` feature exactly.
+# which the facade's `ann` forwards to.
 ann = ["dep:hnsw", "dep:space", "dep:rand"]
 # Forwards to `me-types/test-util` so a downstream consumer building this crate
 # with `--features test-util` still gets the shared `NewFact`/`NewEvent` test

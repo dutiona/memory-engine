@@ -1,0 +1,41 @@
+# Vendored copy of the crates.io `hnsw` 0.11.0 (sha256 of hnsw-0.11.0.crate:
+# 2b9740ebf8769ec4ad6762cc951ba18f39bba6dfbc2fbbe46285f7539af79752; upstream release
+# commit rust-cv/hnsw a50060296360d9dc9ba0f714d24991a12714f604), carried for #1074.
+# `src/` and `LICENSE` are the published bytes, except for the deviations listed below.
+# This manifest is upstream's `Cargo.toml.orig` with `readme`, `[[bench]]`,
+# `[dev-dependencies]` and `[profile.*]` removed: their files are not vendored.
+#
+# Deviations from upstream `src/`:
+# - `src/hnsw/hnsw_const.rs`, both returns of `search_layer`: copy only the `found` prefix
+#   into `dest` (`dest[..found].copy_from_slice(..)`, the fix of rust-cv/hnsw#40), so a
+#   walk shorter than `dest` returns its filled prefix instead of panicking (#1074).
+[package]
+name = "hnsw"
+version = "0.11.0"
+authors = ["Geordon Worley <vadixidav@gmail.com>"]
+edition = "2018"
+description = "Fast approximate nearest neighbors"
+keywords = ["hamming", "distance", "nearest", "neighbor", "search"]
+categories = ["algorithms", "data-structures", "science"]
+repository = "https://github.com/rust-cv/hnsw"
+documentation = "https://docs.rs/hnsw/"
+license = "MIT"
+
+[features]
+serde1 = ["smallvec/serde", "serde"]
+
+[dependencies]
+space = { version = "0.17.0", default-features = false, features = ["alloc"] }
+rand_core = "0.6.3"
+hashbrown = "0.11.2"
+serde = { version = "1.0.126", default-features = false, features = ["derive"], optional = true }
+libm = "0.2.1"
+smallvec = { version = "1.6.1", features = ["const_generics"] }
+ahash = { version = "0.7.4", default-features = false }
+num-traits = { version = "0.2.14", default-features = false }
+
+# The two warnings rustc raises on the unmodified source (Cargo does not cap a path
+# dependency's lints), allowed here so `src/` stays upstream's bytes.
+[lints.rust]
+dead_code = "allow"
+deprecated = "allow"

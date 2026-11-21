@@ -413,8 +413,10 @@ impl VectorSearchStrategy for HnswStrategy {
                 let inner = self.inner.read();
                 let mut searcher: Searcher<u32> = Searcher::default();
 
-                // dest length must not exceed the number of indexed items
-                // (hnsw 0.11 panics on copy_from_slice if dest > item count)
+                // A walk fills at most `ef` slots and can reach fewer nodes than `dest`
+                // holds; the vendored hnsw returns the filled prefix (#1074), and the
+                // widening and fallback below serve a short result. `ef >= dest_len`
+                // keeps the overfetch the window asks for.
                 let n_items = inner.index_to_fact.len();
                 if n_items == 0 {
                     return Ok(Vec::new());
@@ -427,9 +429,10 @@ impl VectorSearchStrategy for HnswStrategy {
                     };
                     dest_len
                 ];
-                let neighbors = inner
-                    .index
-                    .nearest(&query_vec, ef, &mut searcher, &mut dest);
+                let neighbors =
+                    inner
+                        .index
+                        .nearest(&query_vec, ef.max(dest_len), &mut searcher, &mut dest);
 
                 let mut cands = Vec::new();
                 for neighbor in neighbors {
@@ -953,7 +956,7 @@ mod tests {
         #[test]
         fn hnsw_strategy_empty_index_returns_empty() {
             // DB with no facts -> index_to_fact is empty, so search() hits the
-            // `n_items == 0` early return (ann.rs:248-253) before any nearest()
+            // `n_items == 0` early return in `HnswStrategy::search` before any nearest()
             // call, returning an empty vec.
             let conn = open_memory().unwrap();
             init_schema(&conn).unwrap();
@@ -971,8 +974,9 @@ mod tests {
             let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
 
             // Query length != strategy.embed_dim -> EmbeddingDimension error
-            // before any index access (ann.rs:230-235). The `_embed_dim`
-            // parameter is intentionally ignored; the strategy's own dim wins.
+            // before any index access (the dimension check at the top of `search`).
+            // The `_embed_dim` parameter is intentionally ignored; the strategy's own
+            // dim wins.
             let wrong = [1.0_f32, 0.0]; // len 2, DIM is 4
             let err = strategy
                 .search(&conn, &wrong, DIM, 5, None, None)
@@ -1253,6 +1257,82 @@ mod tests {
                 "two widening attempts must issue exactly two batched candidate \
                  queries — one per attempt, never 2N per-candidate round-trips"
             );
+        }
+
+        /// Insert `facts` in order, returning their ids.
+        fn seed_facts(
+            conn: &rusqlite::Connection,
+            facts: impl IntoIterator<Item = (Vec<f32>, FactType)>,
+        ) -> Vec<i64> {
+            let store = FactStore::new(conn, DIM);
+            facts
+                .into_iter()
+                .map(|(emb, ft)| {
+                    store
+                        .insert(&me_types::test_util::new_fact_with_type("fact", emb, ft))
+                        .unwrap()
+                })
+                .collect()
+        }
+
+        #[test]
+        fn hnsw_search_serves_a_window_wider_than_ef_in_one_attempt() {
+            // #1074 trigger 1: the candidate window (3 × limit) exceeds the search's
+            // `ef`, and hnsw 0.11 panicked copying a pool of at most `ef` into it.
+            // At limit 34 the window is 102 against ef 100: the walk is short, but its
+            // 100 unfiltered survivors cover the limit. At limit 120 the window is 360:
+            // only `ef >= window` keeps it to one attempt.
+            use rand::{Rng, SeedableRng};
+            let mut conn = open_memory().unwrap();
+            init_schema(&conn).unwrap();
+            let mut rng = rand::rngs::SmallRng::seed_from_u64(7);
+            let facts: Vec<_> = (0..400)
+                .map(|_| {
+                    let emb = (0..DIM).map(|_| rng.gen_range(-1.0_f32..1.0)).collect();
+                    (emb, FactType::Semantic)
+                })
+                .collect();
+            seed_facts(&conn, facts);
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            for limit in [34, 120] {
+                let (results, batch_queries) = count_batch_queries(&mut conn, |c| {
+                    strategy.search(c, &query, DIM, limit, None, None).unwrap()
+                });
+                assert_eq!(results.len(), limit, "limit {limit}");
+                assert_eq!(batch_queries, 1, "limit {limit} must take one attempt");
+            }
+        }
+
+        #[test]
+        fn hnsw_search_widened_to_the_whole_index_returns_every_match() {
+            // #1074 trigger 2: a filtered query widens the window up to the index size,
+            // which the walk does not reach (it skips nodes seen on upper layers, and a
+            // duplicate cluster starves it). The #1020 eval fixture's shape: 55 copies
+            // of the query vector, then 12 distinct matches. Only the result is
+            // asserted, not whether a widened attempt or the brute-force fallback
+            // served it: that depends on the walk's length (#1111).
+            let conn = open_memory().unwrap();
+            init_schema(&conn).unwrap();
+            seed_facts(
+                &conn,
+                (0..55).map(|_| (vec![1.0, 0.0, 0.0, 0.0], FactType::Procedural)),
+            );
+            let mut semantic = seed_facts(
+                &conn,
+                (1..=12_u8).map(|k| (vec![0.1 * f32::from(k), 1.0, 0.0, 0.0], FactType::Semantic)),
+            );
+            let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
+
+            let query = [1.0_f32, 0.0, 0.0, 0.0];
+            let results = strategy
+                .search(&conn, &query, DIM, 12, Some(&FactType::Semantic), None)
+                .unwrap();
+            let mut found: Vec<i64> = results.iter().map(|r| r.fact_id).collect();
+            found.sort_unstable();
+            semantic.sort_unstable();
+            assert_eq!(found, semantic);
         }
 
         #[test]

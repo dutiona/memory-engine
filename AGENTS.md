@@ -106,6 +106,7 @@ crates/
 tests/     # workspace integration tests    benches/  # Criterion benchmarks
 examples/  # runnable examples               fuzz/     # cargo-fuzz (detached, nightly-only)
 utils/     # scripts (github-pm, hooks)       docs/     # Sphinx narrative documentation
+vendor/    # third-party crates carried with a fix (path deps, not workspace members)
 plugins/memory-engine/  # the Claude Code plugin (POSIX sh helper + hooks), listed by .claude-plugin/marketplace.json
 ```
 
