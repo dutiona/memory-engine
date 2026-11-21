@@ -1,0 +1,9 @@
+ME-Event-Id: 1795282820-000000-1643307
+ME-Event-Time: 2026-11-21T17:40:20Z
+ME-Event-Seq: 000000
+ME-Harness: claude-code
+ME-Client-Version: 0.1.0
+ME-Project-Root: /work/fixture-home/dev/proj
+ME-Project-Dev-Root: /work/fixture-home/dev
+ME-Project-Origin-Url: https://example.com/example/proj.git
+ME-Project-Branch: main
