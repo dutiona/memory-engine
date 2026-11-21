@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use me_types::error::StorageError;
 use rusqlite::{Connection, params};
 
+use crate::store::classify;
 use crate::store::upcaster::UpcasterRegistry;
 use me_types::error::{MemoryError, Result};
 use me_types::types::{Event, EventType, NewEvent};
@@ -160,7 +161,7 @@ impl<'a> EventStore<'a> {
                     i64::from(self.registry.latest_revision(event_type_str)),
                 ],
             )
-            .map_err(StorageError::backend)?;
+            .map_err(classify)?;
         Ok(self.conn.last_insert_rowid())
     }
 

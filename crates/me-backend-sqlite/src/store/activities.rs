@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use me_types::error::{MemoryError, Result};
 use me_types::types::{Activity, ActivityStatus, NewActivity, OutcomeClass};
 
-use super::parse_timestamp;
+use super::{classify, parse_timestamp};
 
 /// Store facade for the `activities` table.
 pub struct ActivityStore<'a> {
@@ -78,7 +78,7 @@ impl<'a> ActivityStore<'a> {
                      WHERE id = ?4",
                     params![count + 1, ts, activity.result_summary, existing_id],
                 )
-                .map_err(StorageError::backend)?;
+                .map_err(classify)?;
             return Ok((existing_id, true));
         }
 
@@ -101,7 +101,7 @@ impl<'a> ActivityStore<'a> {
                     activity.machine,
                 ],
             )
-            .map_err(StorageError::backend)?;
+            .map_err(classify)?;
 
         let id = self.conn.last_insert_rowid();
         Ok((id, false))

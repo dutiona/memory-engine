@@ -42,6 +42,8 @@ mod event;
 #[cfg(all(test, feature = "test-util"))]
 mod graph;
 #[cfg(all(test, feature = "test-util"))]
+mod lifecycle;
+#[cfg(all(test, feature = "test-util"))]
 mod read_only;
 #[cfg(all(test, feature = "test-util"))]
 mod retraction;
@@ -146,6 +148,11 @@ macro_rules! all_behaviors_into {
             erase_machine_takes_what_names_it_or_sits_in_its_bucket => retraction::erase_machine_takes_what_names_it_or_sits_in_its_bucket,
             a_second_machine_erasure_deletes_nothing => retraction::a_second_machine_erasure_deletes_nothing,
             erase_of_a_missing_fact_deletes_nothing => retraction::erase_of_a_missing_fact_deletes_nothing,
+            a_key_is_held_once => lifecycle::a_key_is_held_once,
+            a_delivery_commits_whole_or_not_at_all => lifecycle::a_delivery_commits_whole_or_not_at_all,
+            a_busy_store_is_unavailable => lifecycle::a_busy_store_is_unavailable,
+            idle_segments_end_once => lifecycle::idle_segments_end_once,
+            a_tombstoned_text_makes_no_fact => lifecycle::a_tombstoned_text_makes_no_fact,
         );
     };
 }

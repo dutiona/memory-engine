@@ -1,11 +1,13 @@
 //! The harness-neutral lifecycle record and ADR-0020 §5's segment rule.
 //!
-//! A harness adapter turns one hook body into one [`NeutralRecord`]; the engine applies it. Nothing
-//! here names a tool or a harness field (ADR-0020 §1).
+//! A harness adapter turns one hook body into one [`NeutralRecord`](crate::types::lifecycle::NeutralRecord);
+//! the engine applies it. Nothing here names a tool or a harness field (ADR-0020 §1).
 
 use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
 use serde_json::Value;
 use thiserror::Error;
+
+use crate::types::{NewActivity, NewEvent, NewFact, ScopeNode};
 
 /// The idle threshold of ADR-0020 §5: a client gap longer than this, or a session the server heard
 /// nothing of for this long, ends a segment.
@@ -296,6 +298,70 @@ pub enum Recorded {
     Refused(&'static str),
 }
 
+/// What the engine hands the store for one delivery, beside the key (ADR-0020 §3, §5).
+#[derive(Debug, Clone)]
+pub enum DeliveryWrite {
+    /// Only the key: answers whether it is held, and writes nothing. For a body that cannot be
+    /// applied, so that a refusal leaves no key behind.
+    Check,
+    /// A body that did not parse, held as metadata only: the receipt's quarantine record.
+    Quarantine(Value),
+    /// A captured event and its effects.
+    Capture(Box<CaptureWrite>),
+}
+
+/// One captured event and everything that commits with it. The store replaces the `scope_id` of
+/// the event, the activity and the fact by the leaf of `home`, and the fact's `source_event_id`
+/// by the event's row.
+#[derive(Debug, Clone)]
+pub struct CaptureWrite {
+    /// The scope path the event is filed under; created when missing.
+    pub home: String,
+    /// The event, already redacted.
+    pub event: NewEvent,
+    /// The session's identifier.
+    pub session_id: String,
+    /// The event's order key.
+    pub key: OrderKey,
+    /// The event's kind, counted in its segment; a session end also ends the segment it is in.
+    pub kind: Kind,
+    /// Whether it is a main-agent prompt or stop, which makes its segment a checkpoint.
+    pub main_turn: bool,
+    /// Whether it is a main-agent session start that begins a new run.
+    pub boundary: bool,
+    /// Whether it is a main-agent final message: the segment's final key and fact follow it.
+    pub final_message: bool,
+    /// The activity row and its duplicate window in seconds; `None` writes none.
+    pub activity: Option<(NewActivity, i64)>,
+    /// The memory the event becomes, queued for its vector; skipped when a tombstone blocks its
+    /// text.
+    pub fact: Option<NewFact>,
+    /// The call ID the event's result names: linked to the call record of the same machine.
+    pub call: Option<String>,
+}
+
+/// What the store did with a delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Applied {
+    /// A [`DeliveryWrite::Check`] found the key free; nothing was written.
+    Absent,
+    /// The key is held with this body; nothing was written.
+    Duplicate,
+    /// The key is held with another body; nothing was written.
+    Collision,
+    /// The quarantine record is held.
+    Quarantined,
+    /// The event and its effects are committed.
+    Stored {
+        /// The event's row.
+        event: i64,
+        /// The fact it became, if one was stored.
+        fact: Option<i64>,
+        /// The scope nodes from the home up to the root's child, for the in-memory tree.
+        chain: Vec<ScopeNode>,
+    },
+}
+
 /// The state of a segment that [`step`] needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentState {
@@ -318,6 +384,19 @@ pub enum EndedBy {
     Gap,
     /// The server heard nothing of the session for [`IDLE`].
     Idle,
+}
+
+impl EndedBy {
+    /// The name stored in the segment's `ended_by` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionEnd => "session_end",
+            Self::SessionStart => "session_start",
+            Self::Gap => "gap",
+            Self::Idle => "idle",
+        }
+    }
 }
 
 /// What an event does to its session's segments.

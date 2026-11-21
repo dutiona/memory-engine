@@ -7,7 +7,7 @@
 //! It owns three things:
 //! - the `StorageBackend` trait family — the bounded-context traits
 //!   ([`FactGraph`], [`EventLog`], [`SearchIndex`], [`ConsolidationStore`],
-//!   [`SessionStore`], [`SchemaManager`], [`Retraction`]) aggregated by the [`StorageBackend`]
+//!   [`SessionStore`], [`SchemaManager`], [`Retraction`], [`Lifecycle`]) aggregated by the [`StorageBackend`]
 //!   umbrella, plus the feature-gated `ColdStorage` trait and the closed
 //!   [`FactFilter`]/[`TemporalFilter`] query vocabulary;
 //! - [`MemoryCtx`] — the universal capability handle the L3 primitives operate on;
@@ -35,6 +35,7 @@ pub mod ctx;
 pub mod event_log;
 pub mod filter;
 pub mod graph;
+pub mod lifecycle;
 pub mod offload;
 pub mod retraction;
 pub mod schema;
@@ -51,6 +52,7 @@ pub use ctx::MemoryCtx;
 pub use event_log::EventLog;
 pub use filter::{FactFilter, MetadataPredicate, TemporalFilter};
 pub use graph::{BootstrapIngestOutcome, FactGraph, ImportOutcome, ScopedWrite};
+pub use lifecycle::Lifecycle;
 pub use offload::spawn_join_err;
 pub use retraction::Retraction;
 pub use schema::SchemaManager;

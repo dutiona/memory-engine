@@ -14,6 +14,7 @@ pub mod erase;
 pub mod events;
 pub mod fact_vectors;
 pub mod facts;
+pub mod lifecycle;
 pub mod lineage;
 pub mod redaction;
 pub mod schema;

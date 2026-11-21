@@ -26,6 +26,7 @@
 
 use rusqlite::{Connection, Transaction};
 
+use crate::store::classify;
 use me_types::error::{MemoryError, Result, StorageError};
 use me_types::types::EmbeddingFingerprint;
 
@@ -79,7 +80,7 @@ pub fn record_dim_if_unknown(tx: &Transaction, dim: usize) -> Result<()> {
             "INSERT OR IGNORE INTO config (key, value) VALUES (?1, ?2)",
             rusqlite::params![STORE_DIM, dim.to_string()],
         )
-        .map_err(StorageError::backend)?;
+        .map_err(classify)?;
     }
     Ok(())
 }

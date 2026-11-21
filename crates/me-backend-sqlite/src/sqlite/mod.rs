@@ -55,6 +55,7 @@ mod consolidation;
 mod convert;
 mod event_log;
 mod graph;
+mod lifecycle;
 #[cfg(test)]
 mod realization;
 mod retraction;

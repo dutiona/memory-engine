@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, set_config};
 use crate::store::{
-    embedding_meta, parse_optional_timestamp, parse_timestamp, serialize_embedding,
+    classify, embedding_meta, parse_optional_timestamp, parse_timestamp, serialize_embedding,
 };
 use me_types::error::{MemoryError, Result, StorageError};
 use me_types::types::{
@@ -67,7 +67,7 @@ pub(crate) fn queue(
         "INSERT INTO embed_queue (fact_id, enqueued_at, next_attempt_at) VALUES (?1, ?2, ?2)",
         params![id, now.to_rfc3339()],
     )
-    .map_err(StorageError::backend)?;
+    .map_err(classify)?;
     embedding_meta::record_dim_if_unknown(tx, embed_dim)?;
     Ok(id)
 }

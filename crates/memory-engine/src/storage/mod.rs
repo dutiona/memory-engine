@@ -2,7 +2,7 @@
 //!
 //! The port trait family — the bounded-context traits ([`FactGraph`], [`EventLog`],
 //! [`SearchIndex`], [`ConsolidationStore`], [`SessionStore`], [`SchemaManager`],
-//! [`Retraction`])
+//! [`Retraction`], [`Lifecycle`])
 //! aggregated by the [`StorageBackend`] umbrella, the feature-gated `ColdStorage`
 //! trait, the closed [`FactFilter`]/[`TemporalFilter`] query vocabulary, and
 //! [`MemoryCtx`] — lives in `me-storage`. This module **re-exports** it (both the
@@ -38,15 +38,15 @@ pub use me_storage::cold_storage;
 // probe: neither `memory_engine::storage::spawn_join_err` nor
 // `memory_engine::storage::offload::spawn_join_err` resolves for a consumer.
 pub use me_storage::{
-    backend, capabilities, consolidation, ctx, event_log, filter, graph, retraction, schema,
-    search_index, session,
+    backend, capabilities, consolidation, ctx, event_log, filter, graph, lifecycle, retraction,
+    schema, search_index, session,
 };
 // Flat trait/type re-exports so `crate::storage::Trait` paths still resolve.
 #[cfg(feature = "archive")]
 pub use me_storage::ColdStorage;
 pub use me_storage::{
     BackendCapabilities, BootstrapIngestOutcome, ConsolidationStore, EventLog, FactFilter,
-    FactGraph, ImportOutcome, LexicalRanker, MemoryCtx, MetadataPredicate, Retraction,
+    FactGraph, ImportOutcome, LexicalRanker, Lifecycle, MemoryCtx, MetadataPredicate, Retraction,
     SchemaManager, SearchIndex, SessionStore, StorageBackend, TemporalFilter,
 };
 
