@@ -318,7 +318,7 @@ fn printable(raw: &[u8]) -> Result<(), Flaw> {
 }
 
 /// Decode every `%HH`, in either hex case, exactly once.
-fn decode(raw: &[u8]) -> Result<String, Flaw> {
+pub(crate) fn decode(raw: &[u8]) -> Result<String, Flaw> {
     printable(raw)?;
     let mut out = Vec::with_capacity(raw.len());
     let mut rest = raw;

@@ -151,8 +151,13 @@ async fn run() -> Result<(), BoxError> {
             .map_err(|e| format!("embedding identity check failed: {e}"))?;
     }
 
-    // 6. Construct and serve
-    let mcp_server = server::MemoryMcpServer::new(engine, embedder, cli.user.clone());
+    // 6. Construct and serve. The author denylist is read once: the backfill route requires
+    //    it, live capture does not use it, so the server starts without it and the route
+    //    refuses every upload.
+    let mut mcp_server = server::MemoryMcpServer::new(engine, embedder, cli.user.clone());
+    if let Some(literals) = load_denylist() {
+        mcp_server = mcp_server.with_denylist(literals);
+    }
 
     let listener = tokio::net::TcpListener::bind(cli.listen).await?;
     tracing::info!("memory-engine-mcp listening on {}", listener.local_addr()?);
@@ -166,6 +171,30 @@ async fn run() -> Result<(), BoxError> {
     .await?;
 
     Ok(())
+}
+
+/// The author denylist of `ME_REDACT_DENYLIST_FILE` (#1026): its literals when the variable is
+/// set and the file readable, an empty or comments-only file meaning an explicit "none"; `None`
+/// when the variable is unset or the file unreadable, logged as which.
+fn load_denylist() -> Option<Vec<String>> {
+    use memory_engine::bootstrap::{DENYLIST_ENV_VAR, load_secret_denylist};
+    if std::env::var_os(DENYLIST_ENV_VAR).is_none() {
+        tracing::warn!("{DENYLIST_ENV_VAR} is unset: backfill uploads answer 503");
+        return None;
+    }
+    match load_secret_denylist() {
+        Ok(literals) => {
+            tracing::info!(
+                literals = literals.len(),
+                "author denylist loaded for backfill uploads"
+            );
+            Some(literals)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the author denylist is unreadable: backfill uploads answer 503");
+            None
+        }
+    }
 }
 
 /// Recognized embedding backends. `provider` is free-form (it feeds the fingerprint),

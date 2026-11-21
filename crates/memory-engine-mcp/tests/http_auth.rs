@@ -50,6 +50,7 @@ async fn refuses_every_request_without_a_valid_token() {
         (Method::DELETE, "/mcp", None),
         (Method::GET, "/", None),
         (Method::POST, "/lifecycle/events", Some(json!({}))),
+        (Method::POST, "/backfill/uploads", Some(json!({}))),
     ];
     for credentials in refused_credentials() {
         for (method, path, body) in &requests {

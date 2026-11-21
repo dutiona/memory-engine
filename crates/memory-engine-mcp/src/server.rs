@@ -32,6 +32,11 @@ pub struct MemoryMcpServer {
     pub(crate) in_flight: Arc<tokio::sync::RwLock<()>>,
     /// The embedding drain's retry schedule.
     pub(crate) embed_backoff: Backoff,
+    /// The author denylist the backfill route redacts with (#1026); without one, the route
+    /// refuses every upload.
+    pub(crate) denylist: Option<Arc<[String]>>,
+    /// The one backfill upload slot: an upload holds it from before its body is read.
+    pub(crate) uploads: Arc<tokio::sync::Semaphore>,
 }
 
 impl MemoryMcpServer {
@@ -48,7 +53,32 @@ impl MemoryMcpServer {
             user,
             in_flight: Arc::new(tokio::sync::RwLock::new(())),
             embed_backoff: Backoff::DEFAULT,
+            denylist: None,
+            uploads: Arc::new(tokio::sync::Semaphore::new(1)),
         }
+    }
+
+    /// The author denylist the backfill route redacts with (#1026), as `main` loads it from
+    /// `ME_REDACT_DENYLIST_FILE`; an empty list is an explicit "none". Without this, the route
+    /// answers 503 to every upload. Live capture never uses it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use memory_engine::MemoryEngine;
+    /// use memory_engine_mcp::home::User;
+    /// use memory_engine_mcp::server::MemoryMcpServer;
+    ///
+    /// let engine = Arc::new(MemoryEngine::builder(4).build()?);
+    /// let server = MemoryMcpServer::new(engine, None, User::parse("alice")?)
+    ///     .with_denylist(vec!["a-host-name".to_owned()]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn with_denylist(mut self, literals: Vec<String>) -> Self {
+        self.denylist = Some(literals.into());
+        self
     }
 
     /// The embedding drain's retry schedule, in place of [`Backoff::DEFAULT`].
