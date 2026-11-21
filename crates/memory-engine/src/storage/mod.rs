@@ -1,6 +1,6 @@
 //! The persistence **port**, now carved into the [`me_storage`] crate (Wave 2 #816, L1).
 //!
-//! The port trait family — the seven bounded-context traits ([`FactGraph`], [`EventLog`],
+//! The port trait family — the bounded-context traits ([`FactGraph`], [`EventLog`],
 //! [`SearchIndex`], [`ConsolidationStore`], [`SessionStore`], [`SchemaManager`],
 //! [`Retraction`])
 //! aggregated by the [`StorageBackend`] umbrella, the feature-gated `ColdStorage`

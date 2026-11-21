@@ -42,8 +42,8 @@ use crate::{
 
 /// The single persistence handle the engine holds (`Arc<dyn StorageBackend>`).
 ///
-/// A pure aggregation supertrait: any type implementing all seven bounded-context
-/// traits *is* a `StorageBackend` via the blanket impl below — backends never
+/// A pure aggregation supertrait: any type implementing every bounded-context
+/// trait *is* a `StorageBackend` via the blanket impl below — backends never
 /// write `impl StorageBackend`, they implement the parts. The bounded traits stay
 /// what tests mock in isolation (a forgetting test mocks only [`FactGraph`]); this
 /// umbrella is what the engine depends on.
@@ -56,7 +56,7 @@ pub trait StorageBackend:
 {
 }
 
-/// Blanket impl: implementing the seven bounded traits is sufficient to be a
+/// Blanket impl: implementing the bounded traits is sufficient to be a
 /// `StorageBackend`. A backend cannot accidentally be "a `StorageBackend` that
 /// forgot to be a `FactGraph`".
 impl<T> StorageBackend for T where

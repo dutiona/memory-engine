@@ -5,7 +5,7 @@
 //! invariant `cargo` enforces.
 //!
 //! It owns three things:
-//! - the `StorageBackend` trait family — seven bounded-context traits
+//! - the `StorageBackend` trait family — the bounded-context traits
 //!   ([`FactGraph`], [`EventLog`], [`SearchIndex`], [`ConsolidationStore`],
 //!   [`SessionStore`], [`SchemaManager`], [`Retraction`]) aggregated by the [`StorageBackend`]
 //!   umbrella, plus the feature-gated `ColdStorage` trait and the closed

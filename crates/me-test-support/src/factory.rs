@@ -157,7 +157,7 @@ impl ConformanceBackend for SqliteFactory {
 /// The inert Postgres factory.
 ///
 /// #635 fills the `todo!()`s and deletes the `#[ignore]`, once `PgBackend` implements
-/// all six bounded traits and is a full `StorageBackend`; #633 added only its
+/// every bounded trait and is a full `StorageBackend`; #633 added only its
 /// `SchemaManager` + pool + migrations.
 ///
 /// Compiles under `--features backend-postgres` (the bodies typecheck via the never
