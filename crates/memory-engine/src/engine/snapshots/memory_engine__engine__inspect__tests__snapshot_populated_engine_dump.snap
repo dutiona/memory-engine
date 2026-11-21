@@ -43,4 +43,6 @@ embedding_spaces:
     element_type: float32
 fact_vectors: []
 tombstones: []
+lifecycle_receipts: []
+lifecycle_segments: []
 config: "{}"

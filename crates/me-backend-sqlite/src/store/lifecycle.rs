@@ -5,6 +5,8 @@
 //! microseconds and `Z`, so its text sorts like the instant it names. Every statement's error
 //! goes through [`classify`], so a store that cannot take the write now is `Unavailable`.
 
+use std::fmt::Write as _;
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -12,9 +14,10 @@ use super::activities::ActivityStore;
 use super::events::{EventStore, event_type_to_str};
 use super::scopes::ScopeStore;
 use super::upcaster::UpcasterRegistry;
-use super::{classify, embed_queue, tombstones};
-use me_types::error::{MemoryError, Result};
+use super::{classify, embed_queue, parse_optional_timestamp, parse_timestamp, tombstones};
+use me_types::error::{MemoryError, Result, StorageError};
 use me_types::types::EventType;
+use me_types::types::inspect::{LifecycleReceiptSnapshot, LifecycleSegmentSnapshot};
 use me_types::types::lifecycle::{
     Applied, CaptureWrite, DeliveryWrite, EndedBy, Kind, OrderKey, SegmentState, Step, step,
 };
@@ -356,6 +359,85 @@ pub fn count_quarantined(conn: &rusqlite::Connection) -> Result<u64> {
         )
         .map_err(classify)?;
     Ok(u64::try_from(count).unwrap_or_default())
+}
+
+/// Every receipt, in key order, one at a time (the JSON export).
+///
+/// # Errors
+///
+/// `Storage(Backend)` on a read failure, or what `f` returns.
+pub fn for_each_receipt(
+    conn: &rusqlite::Connection,
+    f: &mut dyn FnMut(LifecycleReceiptSnapshot) -> Result<()>,
+) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT machine, event_id, body_sha256, received_at, event_row, call_event, quarantine
+               FROM lifecycle_receipts ORDER BY machine, event_id",
+        )
+        .map_err(classify)?;
+    let mut rows = stmt.query([]).map_err(classify)?;
+    while let Some(row) = rows.next().map_err(classify)? {
+        let digest: Vec<u8> = row.get(2).map_err(classify)?;
+        let received_at: String = row.get(3).map_err(classify)?;
+        let quarantine: Option<String> = row.get(6).map_err(classify)?;
+        f(LifecycleReceiptSnapshot {
+            machine: row.get(0).map_err(classify)?,
+            event_id: row.get(1).map_err(classify)?,
+            body_sha256: digest.iter().fold(String::new(), |mut hex, b| {
+                let _ = write!(hex, "{b:02x}");
+                hex
+            }),
+            received_at: parse_timestamp(&received_at).map_err(classify)?,
+            event_row: row.get(4).map_err(classify)?,
+            call_event: row.get(5).map_err(classify)?,
+            quarantine: quarantine
+                .map(|text| serde_json::from_str(&text))
+                .transpose()
+                .map_err(StorageError::backend)?,
+        })?;
+    }
+    Ok(())
+}
+
+/// Every segment, in id order, one at a time (the JSON export).
+///
+/// # Errors
+///
+/// `Storage(Backend)` on a read failure, or what `f` returns.
+pub fn for_each_segment(
+    conn: &rusqlite::Connection,
+    f: &mut dyn FnMut(LifecycleSegmentSnapshot) -> Result<()>,
+) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, machine, session_id, number, start_key, last_key, received_at, counts,
+                    main_turns, final_key, final_fact, ended_by, ended_at
+               FROM lifecycle_segments ORDER BY id",
+        )
+        .map_err(classify)?;
+    let mut rows = stmt.query([]).map_err(classify)?;
+    while let Some(row) = rows.next().map_err(classify)? {
+        let received_at: String = row.get(6).map_err(classify)?;
+        let counts: String = row.get(7).map_err(classify)?;
+        let ended_at: Option<String> = row.get(12).map_err(classify)?;
+        f(LifecycleSegmentSnapshot {
+            id: row.get(0).map_err(classify)?,
+            machine: row.get(1).map_err(classify)?,
+            session_id: row.get(2).map_err(classify)?,
+            number: row.get(3).map_err(classify)?,
+            start_key: row.get(4).map_err(classify)?,
+            last_key: row.get(5).map_err(classify)?,
+            received_at: parse_timestamp(&received_at).map_err(classify)?,
+            counts: serde_json::from_str(&counts).map_err(StorageError::backend)?,
+            main_turns: row.get(8).map_err(classify)?,
+            final_key: row.get(9).map_err(classify)?,
+            final_fact: row.get(10).map_err(classify)?,
+            ended_by: row.get(11).map_err(classify)?,
+            ended_at: parse_optional_timestamp(ended_at.as_deref()).map_err(classify)?,
+        })?;
+    }
+    Ok(())
 }
 
 /// End, as idle, every open segment whose latest event was received before `idle_before`, in one

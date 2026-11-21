@@ -19,7 +19,8 @@ use crate::types::{Event, EventType};
 /// (CLI/MCP import-export included).
 pub use me_types::types::inspect::{
     DumpFormat, EdgeStats, EmbeddingSpaceSnapshot, EngineSnapshot, EngineStatistics, EventStats,
-    FactStats, FactVectorSnapshot, ScopeStats, StorageStats, SummaryStats,
+    FactStats, FactVectorSnapshot, LifecycleReceiptSnapshot, LifecycleSegmentSnapshot, ScopeStats,
+    StorageStats, SummaryStats,
 };
 
 // ---------------------------------------------------------------------------
@@ -599,6 +600,8 @@ mod tests {
             embedding_spaces: vec![],
             fact_vectors: vec![],
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config,
         };
         // EngineSnapshot does not derive `PartialEq` (it nests `serde_json::Value`

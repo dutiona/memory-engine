@@ -18,6 +18,8 @@ lineage: []
 embedding_spaces: []
 fact_vectors: []
 tombstones: []
+lifecycle_receipts: []
+lifecycle_segments: []
 config:
   schema_version: "18"
   storage_epoch: "1"

@@ -298,6 +298,8 @@ pub fn validate_snapshot(snapshot: &EngineSnapshot) -> Result<()> {
         }
     }
 
+    validate_lifecycle(snapshot, &fact_ids, &event_ids)?;
+
     // Root scope invariant: ScopeTree hardcodes root id=1, parent_id=None.
     let has_root = snapshot
         .scopes
@@ -310,6 +312,48 @@ pub fn validate_snapshot(snapshot: &EngineSnapshot) -> Result<()> {
         ));
     }
 
+    Ok(())
+}
+
+/// The lifecycle rows (#1025) name events and facts of this snapshot and carry the shape their
+/// CHECKs enforce. A row that breaks either is refused before the write begins.
+fn validate_lifecycle(
+    snapshot: &EngineSnapshot,
+    fact_ids: &std::collections::HashSet<i64>,
+    event_ids: &std::collections::HashSet<i64>,
+) -> Result<()> {
+    for receipt in &snapshot.lifecycle_receipts {
+        let dangling = [receipt.event_row, receipt.call_event]
+            .into_iter()
+            .flatten()
+            .any(|id| !event_ids.contains(&id));
+        let digest = receipt.body_sha256.len() == 64
+            && receipt
+                .body_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        let one_of_event_or_quarantine =
+            receipt.event_row.is_some() != receipt.quarantine.is_some();
+        if dangling || !digest || !one_of_event_or_quarantine {
+            return Err(MemoryError::Internal(format!(
+                "snapshot lifecycle receipt is invalid: machine {:?}, event {:?}",
+                receipt.machine, receipt.event_id
+            )));
+        }
+    }
+    for segment in &snapshot.lifecycle_segments {
+        let dangling = segment.final_fact.is_some_and(|id| !fact_ids.contains(&id));
+        let end = segment
+            .ended_by
+            .as_deref()
+            .is_none_or(|by| ["session_end", "session_start", "gap", "idle"].contains(&by));
+        if dangling || !end || !segment.counts.is_object() {
+            return Err(MemoryError::Internal(format!(
+                "snapshot lifecycle segment is invalid: machine {:?}, session {:?}, number {}",
+                segment.machine, segment.session_id, segment.number
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -347,6 +391,14 @@ fn assert_empty_db(conn: &Connection) -> Result<()> {
         .query_row("SELECT COUNT(*) FROM fact_tombstones", [], |r| r.get(0))
         .map_err(StorageError::backend)?;
 
+    let lifecycle_count: i64 = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM lifecycle_receipts) + (SELECT COUNT(*) FROM lifecycle_segments)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StorageError::backend)?;
+
     let total = event_count
         + fact_count
         + edge_count
@@ -354,7 +406,8 @@ fn assert_empty_db(conn: &Connection) -> Result<()> {
         + scope_count
         + lineage_count
         + fact_vector_count
-        + tombstone_count;
+        + tombstone_count
+        + lifecycle_count;
     if total > 0 {
         return Err(MemoryError::Conflict(ConflictError::TargetNotEmpty));
     }
@@ -545,6 +598,66 @@ fn restore_tombstones(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()
     Ok(())
 }
 
+/// Restore the lifecycle receipts and segments (#1025), keeping their keys, links and ids, so a
+/// resend after the restore is still a duplicate and the quarantine count and the checkpoints
+/// are as they were. MUST run after the events and facts they reference.
+fn restore_lifecycle(conn: &Connection, snapshot: &EngineSnapshot) -> Result<()> {
+    use chrono::SecondsFormat::Micros;
+
+    let mut receipt = conn
+        .prepare(
+            "INSERT INTO lifecycle_receipts
+                 (machine, event_id, body_sha256, received_at, event_row, call_event, quarantine)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .map_err(StorageError::backend)?;
+    for row in &snapshot.lifecycle_receipts {
+        let digest: Vec<u8> = (0..row.body_sha256.len())
+            .step_by(2)
+            .filter_map(|at| u8::from_str_radix(&row.body_sha256[at..at + 2], 16).ok())
+            .collect();
+        receipt
+            .execute(rusqlite::params![
+                row.machine,
+                row.event_id,
+                digest,
+                row.received_at.to_rfc3339_opts(Micros, true),
+                row.event_row,
+                row.call_event,
+                row.quarantine.as_ref().map(ToString::to_string),
+            ])
+            .map_err(StorageError::backend)?;
+    }
+    let mut segment = conn
+        .prepare(
+            "INSERT INTO lifecycle_segments
+                 (id, machine, session_id, number, start_key, last_key, received_at, counts,
+                  main_turns, final_key, final_fact, ended_by, ended_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        )
+        .map_err(StorageError::backend)?;
+    for row in &snapshot.lifecycle_segments {
+        segment
+            .execute(rusqlite::params![
+                row.id,
+                row.machine,
+                row.session_id,
+                row.number,
+                row.start_key,
+                row.last_key,
+                row.received_at.to_rfc3339_opts(Micros, true),
+                row.counts.to_string(),
+                row.main_turns,
+                row.final_key,
+                row.final_fact,
+                row.ended_by,
+                row.ended_at.map(|t| t.to_rfc3339_opts(Micros, true)),
+            ])
+            .map_err(StorageError::backend)?;
+    }
+    Ok(())
+}
+
 /// Restore the `fact_vectors` rows (#623): the non-active spaces' per-fact vectors
 /// (a `populating` space mid-reconstruction, or a `deprecated` space retained for
 /// rollback). Pre-#623 snapshots have none — a no-op. MUST run **after**
@@ -676,6 +789,9 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
     // 8d. Restore the tombstones (#1023) — after facts and events, which they reference.
     restore_tombstones(&tx, snapshot)?;
 
+    // 8e. Restore the lifecycle receipts and segments (#1025) — after events and facts.
+    restore_lifecycle(&tx, snapshot)?;
+
     // 9. Reset autoincrement sequences so new inserts don't collide.
     reset_autoincrement(
         &tx,
@@ -797,6 +913,8 @@ mod tests {
             embedding_spaces: vec![],
             fact_vectors: vec![],
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -818,6 +936,8 @@ mod tests {
             embedding_spaces: vec![],
             fact_vectors: vec![],
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -839,6 +959,8 @@ mod tests {
             embedding_spaces: vec![],
             fact_vectors: vec![],
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -866,6 +988,8 @@ mod tests {
             embedding_spaces: vec![],
             fact_vectors: vec![],
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config: BTreeMap::new(),
         };
         let err = validate_snapshot(&snapshot).unwrap_err();
@@ -887,6 +1011,8 @@ mod tests {
             embedding_spaces: vec![],
             fact_vectors: vec![],
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config: BTreeMap::new(),
         };
         validate_snapshot(&snapshot).unwrap();
@@ -1066,6 +1192,8 @@ mod tests {
             embedding_spaces: vec![], // pre-#622 dump: identity is in `config`, not here
             fact_vectors: vec![],     // pre-#623 dump: no shadow vectors
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config,
         };
 
@@ -1416,6 +1544,8 @@ mod tests {
             embedding_spaces,
             fact_vectors,
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config: BTreeMap::new(),
         }
     }
@@ -1852,6 +1982,8 @@ mod tests {
             embedding_spaces: vec![],
             fact_vectors: vec![],
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config: BTreeMap::new(),
         };
 
@@ -2079,6 +2211,8 @@ mod tests {
             embedding_spaces: vec![], // empty → legacy embedding_meta fallback runs
             fact_vectors: vec![],
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config,
         };
 
@@ -2201,6 +2335,8 @@ mod tests {
             embedding_spaces: vec![],
             fact_vectors: vec![],
             tombstones: vec![],
+            lifecycle_receipts: vec![],
+            lifecycle_segments: vec![],
             config: BTreeMap::new(),
         };
 
@@ -2642,6 +2778,8 @@ mod tests {
                         embedding_spaces: vec![],
                         fact_vectors: vec![],
                         tombstones: vec![],
+                        lifecycle_receipts: vec![],
+                        lifecycle_segments: vec![],
                         config,
                     }
                 })
@@ -2678,5 +2816,308 @@ mod tests {
                 prop_assert_eq!(snapshot.config, recovered.config);
             }
         }
+    }
+    // --- The lifecycle tables (#1025) ---
+
+    use crate::types::lifecycle::{
+        Actor, BodyFault, Content, Delivery, NeutralRecord, ParseClass, ParseFailure, Recorded,
+        StopOutcome, ToolOutcome,
+    };
+    use crate::types::{
+        EventType, NewEvent,
+        inspect::{LifecycleReceiptSnapshot, LifecycleSegmentSnapshot},
+    };
+
+    const CALL: &str = "0123456789abcdef";
+
+    async fn send(engine: &MemoryEngine, id: &str, secs: i64, content: Content) {
+        use chrono::TimeZone;
+        let now = chrono::Utc::now();
+        let delivery = Delivery {
+            machine: "laptop".into(),
+            event_id: id.into(),
+            time: chrono::Utc.with_ymd_and_hms(2026, 11, 21, 9, 0, 0).unwrap()
+                + chrono::Duration::seconds(secs),
+            seq: 1,
+            harness: "claude-code".into(),
+            client_version: "1.0.0".into(),
+            body_sha256: *blake3::hash(id.as_bytes()).as_bytes(),
+            body_size: 10,
+            received_at: now,
+            home: "user:u/project:p".into(),
+            provenance: serde_json::json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+        };
+        let record = NeutralRecord {
+            session_id: "s".into(),
+            actor: Actor::Main,
+            cwd: None,
+            content,
+        };
+        let recorded = engine
+            .record_lifecycle_event(&delivery, Ok(record))
+            .await
+            .unwrap();
+        assert!(
+            matches!(recorded, Recorded::Stored { .. }),
+            "{id}: {recorded:?}"
+        );
+    }
+
+    /// An engine holding two segments of one session (the first ended, the second open), a
+    /// quarantined body, and a tool event linked to an ME call record.
+    async fn lifecycle_engine() -> MemoryEngine {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+        .ingest_at(
+            "unscoped:laptop",
+            &NewEvent {
+                timestamp: chrono::Utc::now(),
+                event_type: EventType::MemoryOp,
+                payload: serde_json::json!({ "call": CALL, "machine": "laptop", "tool": "recall" }),
+                source: "mcp".into(),
+                session_id: None,
+                scope_id: 1,
+                origin_node_id: "mcp".into(),
+                sequence_id: 0,
+                created_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        let start = |source: &str| Content::SessionStart {
+            source: Some(source.into()),
+        };
+        send(&engine, "a", 0, start("startup")).await;
+        let call = Content::ToolUse {
+            tool: "recall".into(),
+            input: serde_json::json!({}),
+            result: Some(format!("call {CALL}\n{{}}")),
+            outcome: ToolOutcome::Success,
+            paths: vec![],
+            call: Some(CALL.into()),
+            dedup_window_secs: Some(300),
+        };
+        send(&engine, "b", 5, call).await;
+        let stop = Content::Stop {
+            outcome: StopOutcome::Completed,
+            message: Some("the answer".into()),
+        };
+        send(&engine, "c", 6, stop).await;
+        send(&engine, "d", 7, Content::SessionEnd { reason: None }).await;
+        send(&engine, "e", 100, start("resume")).await;
+        let torn = engine
+            .record_lifecycle_event(
+                &Delivery {
+                    event_id: "q".into(),
+                    ..quarantined_delivery()
+                },
+                Err(BodyFault::Parse(ParseFailure {
+                    class: ParseClass::NotJson,
+                    line: 1,
+                    column: 2,
+                })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(torn, Recorded::Quarantined);
+        engine
+    }
+
+    fn quarantined_delivery() -> Delivery {
+        let now = chrono::Utc::now();
+        Delivery {
+            machine: "laptop".into(),
+            event_id: "q".into(),
+            time: now,
+            seq: 1,
+            harness: "claude-code".into(),
+            client_version: "1.0.0".into(),
+            body_sha256: [9; 32],
+            body_size: 5,
+            received_at: now,
+            home: "unscoped:laptop".into(),
+            provenance: serde_json::json!({}),
+        }
+    }
+
+    async fn dumped(engine: &MemoryEngine, dir: &std::path::Path, name: &str) -> EngineSnapshot {
+        let path = dir.join(name);
+        engine
+            .dump_state(&DumpFormat::Json(path.clone()))
+            .await
+            .unwrap();
+        read_snapshot(&path).unwrap()
+    }
+
+    #[tokio::test]
+    async fn json_round_trip_keeps_lifecycle_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = lifecycle_engine().await;
+        let before = dumped(&source, dir.path(), "before.json").await;
+        assert_eq!(
+            before.lifecycle_receipts.len(),
+            6,
+            "five events and a quarantine"
+        );
+        assert_eq!(before.lifecycle_segments.len(), 2);
+        assert!(
+            before
+                .lifecycle_receipts
+                .iter()
+                .any(|r| r.call_event.is_some())
+        );
+        assert!(
+            before
+                .lifecycle_receipts
+                .iter()
+                .any(|r| r.quarantine.is_some())
+        );
+        let ended = before
+            .lifecycle_segments
+            .iter()
+            .find(|s| s.ended_by.is_some())
+            .unwrap();
+        assert!(ended.final_fact.is_some() && ended.main_turns > 0);
+        assert!(
+            before
+                .lifecycle_segments
+                .iter()
+                .any(|s| s.ended_by.is_none())
+        );
+
+        let db = dir.path().join("restored.db");
+        let config = crate::engine::EngineConfig::new(db.clone(), DIM);
+        let mut restored =
+            MemoryEngine::restore_json(&dir.path().join("before.json"), &config).unwrap();
+        let after = dumped(&restored, dir.path(), "after.json").await;
+
+        assert_eq!(after.lifecycle_receipts, before.lifecycle_receipts);
+        assert_eq!(after.lifecycle_segments, before.lifecycle_segments);
+        // Idempotency survives the restore: a resend of the stored event is a duplicate, and the
+        // quarantine count is kept.
+        let again = restored
+            .record_lifecycle_event(
+                &Delivery {
+                    event_id: "a".into(),
+                    body_sha256: *blake3::hash(b"a").as_bytes(),
+                    ..quarantined_delivery()
+                },
+                Err(BodyFault::Unmappable("resent")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(again, Recorded::Duplicate);
+        restored.close().await.unwrap();
+        assert_eq!(crate::read_quarantined(&db).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_without_lifecycle_rows_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        let snapshot = dumped(&engine, dir.path(), "plain.json").await;
+        let mut legacy = serde_json::to_value(&snapshot).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("lifecycle_receipts").unwrap();
+        object.remove("lifecycle_segments").unwrap();
+
+        let loaded: EngineSnapshot = serde_json::from_value(legacy).unwrap();
+
+        assert!(loaded.lifecycle_receipts.is_empty() && loaded.lifecycle_segments.is_empty());
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        restore_snapshot_into(&conn, &loaded).unwrap();
+    }
+
+    fn receipt(
+        event_row: Option<i64>,
+        quarantine: Option<serde_json::Value>,
+    ) -> LifecycleReceiptSnapshot {
+        LifecycleReceiptSnapshot {
+            machine: "laptop".into(),
+            event_id: "x".into(),
+            body_sha256: "0".repeat(64),
+            received_at: chrono::Utc::now(),
+            event_row,
+            call_event: None,
+            quarantine,
+        }
+    }
+
+    #[test]
+    fn restore_rejects_a_receipt_off_its_links() {
+        let valid = |snapshot: &EngineSnapshot| validate_snapshot(snapshot).is_ok();
+        let mut snapshot = snapshot_with(vec![], vec![], vec![], vec![]);
+        snapshot.lifecycle_receipts = vec![receipt(None, Some(serde_json::json!({})))];
+        assert!(valid(&snapshot), "a quarantine alone");
+
+        let cases = [
+            ("an event the snapshot lacks", receipt(Some(7), None)),
+            (
+                "both an event and a quarantine",
+                receipt(Some(7), Some(serde_json::json!({}))),
+            ),
+            ("neither", receipt(None, None)),
+            (
+                "a call record the snapshot lacks",
+                LifecycleReceiptSnapshot {
+                    call_event: Some(8),
+                    ..receipt(None, Some(serde_json::json!({})))
+                },
+            ),
+            (
+                "a short digest",
+                LifecycleReceiptSnapshot {
+                    body_sha256: "0".repeat(63),
+                    ..receipt(None, Some(serde_json::json!({})))
+                },
+            ),
+        ];
+        for (name, bad) in cases {
+            snapshot.lifecycle_receipts = vec![bad];
+            assert!(!valid(&snapshot), "{name}");
+        }
+
+        let segment = |final_fact, ended_by: Option<&str>| LifecycleSegmentSnapshot {
+            id: 1,
+            machine: "laptop".into(),
+            session_id: "s".into(),
+            number: 1,
+            start_key: "k".into(),
+            last_key: "k".into(),
+            received_at: chrono::Utc::now(),
+            counts: serde_json::json!({}),
+            main_turns: 0,
+            final_key: None,
+            final_fact,
+            ended_by: ended_by.map(str::to_owned),
+            ended_at: None,
+        };
+        snapshot.lifecycle_receipts = vec![];
+        snapshot.lifecycle_segments = vec![segment(None, Some("idle"))];
+        assert!(valid(&snapshot), "an ended segment");
+        for (name, bad) in [
+            ("a fact the snapshot lacks", segment(Some(3), None)),
+            ("an unknown end", segment(None, Some("bored"))),
+        ] {
+            snapshot.lifecycle_segments = vec![bad];
+            assert!(!valid(&snapshot), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_target_with_only_receipts_is_not_empty() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+        "INSERT INTO lifecycle_receipts (machine, event_id, body_sha256, received_at, quarantine)
+             VALUES ('laptop', 'x', zeroblob(32), '2026-11-21T09:00:00.000000Z', '{}')",
+        [],
+    )
+    .unwrap();
+
+        let err = assert_empty_db(&conn).unwrap_err();
+
+        assert!(err.to_string().contains("not empty"), "{err}");
     }
 }

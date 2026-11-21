@@ -152,7 +152,9 @@ memory-engine-cli export -o backup.json.gz --export-format json-gz
 memory-engine-cli export -o backup.json.zst --export-format json-zst
 ```
 
-Exports the full engine state. JSON is human-readable; SQLite is a WAL-safe binary copy; compressed formats save space. Every format opens the store read-only, so an export runs against a live store, beside a running server.
+Exports the full engine state. JSON is human-readable; SQLite is a WAL-safe binary copy; compressed formats save space. Every format opens the store read-only, so an export runs against a live store, beside a running server. A JSON export reads every
+collection inside one read transaction, which in WAL mode is one snapshot of the store: an event the running server
+commits while the export runs is in none of them, so a receipt never names an event the export lacks.
 
 #### `import <snapshot>` — Restore from Snapshot
 
@@ -162,6 +164,13 @@ memory-engine-cli --db new-agent.db import backup.json.gz --embed-dim 384
 ```
 
 Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots.
+
+A JSON snapshot carries the lifecycle route's two tables, `lifecycle_receipts` and `lifecycle_segments` (#1025), so a
+restored store keeps its idempotency keys (a client's resend of an event the old store had stored is still a
+`duplicate`), its quarantine count and its segment checkpoints. `import` refuses a snapshot whose receipt names an event
+or a call record the snapshot lacks, holds both an event and a quarantine record or neither, or whose segment names a
+fact it lacks, and a target holding only receipts or segments counts as not empty. A snapshot from before schema v18 has
+no such sections and loads as it did. The `activities` table is outside the snapshot, as before.
 
 #### `batch-ingest` — Bulk Fact Loading from JSONL
 

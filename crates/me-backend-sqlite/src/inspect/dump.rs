@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde::Serialize;
 use serde::Serializer as _;
 use serde::ser::SerializeMap as _;
@@ -129,6 +129,12 @@ fn mint_sqlite_vacuum_tmp(dir: &Path) -> std::io::Result<tempfile::NamedTempFile
 /// never holds more than one entity in memory per collection. Peak memory drops from
 /// O(total entities) to O(1), making this suitable for databases with 100K+ facts.
 fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W) -> Result<()> {
+    // One deferred read transaction, which in WAL mode is one snapshot of the store: a delivery
+    // that commits while the export runs is in none of the collections, so a receipt never names
+    // an event the export missed. The first read below takes the snapshot; dropping the
+    // transaction ends it.
+    let _snapshot = Transaction::new_unchecked(conn, TransactionBehavior::Deferred)
+        .map_err(|e| MemoryError::from(me_types::error::StorageError::backend(e)))?;
     let registry = UpcasterRegistry::new(); // raw events, no upcasting
 
     let schema_version: u32 = get_config(conn, "schema_version")?
@@ -254,6 +260,21 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
         )?;
 
         map.serialize_entry("tombstones", &tombstones)?;
+
+        // The lifecycle route's receipts and segments (#1025), streamed: one receipt per
+        // stored or quarantined event. They name events and facts, so they come after both.
+        map.serialize_entry(
+            "lifecycle_receipts",
+            &SeqStreamer::new(&store_err, |cb| {
+                crate::store::lifecycle::for_each_receipt(conn, cb)
+            }),
+        )?;
+        map.serialize_entry(
+            "lifecycle_segments",
+            &SeqStreamer::new(&store_err, |cb| {
+                crate::store::lifecycle::for_each_segment(conn, cb)
+            }),
+        )?;
 
         map.serialize_entry("config", &config)?;
 
@@ -1204,5 +1225,131 @@ mod tests {
         insta::assert_yaml_snapshot!(snapshot, {
             ".config" => insta::sorted_redaction(),
         });
+    }
+
+    /// A writer that, once the stream holds `marker`, runs `then` once: what a delivery
+    /// committing in the middle of an export looks like to the exporting connection.
+    struct Mid<'a> {
+        out: Vec<u8>,
+        marker: &'static [u8],
+        then: Option<Box<dyn FnOnce() + 'a>>,
+    }
+
+    impl Write for Mid<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.out.extend_from_slice(buf);
+            if self
+                .out
+                .windows(self.marker.len())
+                .any(|w| w == self.marker)
+                && let Some(then) = self.then.take()
+            {
+                then();
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn deliver(conn: &Connection, id: &str) {
+        use crate::store::lifecycle::{ReceiptKey, record_delivery};
+        use me_types::types::lifecycle::{CaptureWrite, DeliveryWrite, Kind, OrderKey};
+        use me_types::types::{EventType, NewEvent};
+
+        let now = chrono::Utc::now();
+        let capture = CaptureWrite {
+            home: "p".into(),
+            event: NewEvent {
+                timestamp: now,
+                event_type: EventType::Interaction,
+                payload: serde_json::json!({}),
+                source: "lifecycle".into(),
+                session_id: Some("s".into()),
+                scope_id: 1,
+                origin_node_id: "lifecycle".into(),
+                sequence_id: 0,
+                created_at: Some(now),
+            },
+            session_id: "s".into(),
+            key: OrderKey {
+                time: now,
+                seq: 1,
+                event_id: id.into(),
+            },
+            kind: Kind::Prompt,
+            main_turn: true,
+            boundary: false,
+            final_message: false,
+            activity: None,
+            fact: None,
+            call: None,
+        };
+        let key = ReceiptKey {
+            machine: "laptop",
+            event_id: id,
+            body_sha256: &[3; 32],
+            received_at: now,
+        };
+        record_delivery(
+            conn,
+            &UpcasterRegistry::new(),
+            DIM,
+            &key,
+            DeliveryWrite::Capture(Box::new(capture)),
+        )
+        .unwrap();
+    }
+
+    /// An export reads every collection from one snapshot: a delivery that commits after the
+    /// events were written is in none of them, so no receipt names an event the export missed.
+    #[test]
+    fn an_export_is_one_snapshot() {
+        use crate::store::schema::{init_schema, migrate, open_connection};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        let path = path.to_str().unwrap();
+        let exporting = open_connection(path).unwrap();
+        init_schema(&exporting).unwrap();
+        migrate(&exporting, None).unwrap();
+        deliver(&exporting, "before");
+        let other = open_connection(path).unwrap();
+
+        let mut writer = Mid {
+            out: Vec::new(),
+            // The events are written; the next section starts.
+            marker: br#""lineage":"#,
+            then: Some(Box::new(|| deliver(&other, "during"))),
+        };
+        stream_snapshot(&exporting, DIM, &mut writer).unwrap();
+
+        assert!(writer.then.is_none(), "the delivery ran mid-export");
+        let snapshot: EngineSnapshot = serde_json::from_slice(&writer.out).unwrap();
+        let ids: Vec<&str> = snapshot
+            .lifecycle_receipts
+            .iter()
+            .map(|r| r.event_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["before"],
+            "the export holds neither its event nor its receipt"
+        );
+        assert_eq!(snapshot.events.len(), 1);
+        for receipt in &snapshot.lifecycle_receipts {
+            let event = receipt.event_row.unwrap();
+            assert!(
+                snapshot.events.iter().any(|e| e.id == event),
+                "a receipt names a missing event"
+            );
+        }
+        // The delivery did commit, for the next export.
+        let mut next = Vec::new();
+        stream_snapshot(&exporting, DIM, &mut next).unwrap();
+        let next: EngineSnapshot = serde_json::from_slice(&next).unwrap();
+        assert_eq!(next.lifecycle_receipts.len(), 2);
     }
 }
