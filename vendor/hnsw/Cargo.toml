@@ -5,7 +5,10 @@
 # This manifest is upstream's `Cargo.toml.orig` with `readme`, `[[bench]]`,
 # `[dev-dependencies]` and `[profile.*]` removed: their files are not vendored.
 #
-# Deviations from upstream `src/`: none yet.
+# Deviations from upstream `src/`:
+# - `src/hnsw/hnsw_const.rs`, both returns of `search_layer`: copy only the `found` prefix
+#   into `dest` (`dest[..found].copy_from_slice(..)`, the fix of rust-cv/hnsw#40), so a
+#   walk shorter than `dest` returns its filled prefix instead of panicking (#1074).
 [package]
 name = "hnsw"
 version = "0.11.0"
