@@ -1253,3 +1253,27 @@ async fn a_bare_relative_sensitive_name_is_a_stub() {
         }
     }
 }
+
+/// The paths of a call are the adapter's copies of words already in its input, so they are not
+/// text the body held a second time: a command of many words, well inside the body limit, is
+/// stored truncated, not refused. Counted twice, its 12 MB would be 25 MB.
+#[tokio::test]
+async fn a_bash_command_of_many_short_words_is_stored_truncated() {
+    let server = TestServer::start().await;
+    let command = format!("{} ", "abcdefgh".repeat(4)).repeat(400_000);
+    let big = event("post-tool-use-bash", "a", 0, 1)
+        .json(|v| v["tool_input"]["command"] = json!(command));
+    assert!(
+        (10_000_000..BODY_LIMIT).contains(&big.body.len()),
+        "{}",
+        big.body.len()
+    );
+
+    let posted = server.post_event("laptop", &big).await;
+
+    assert!(posted.is(204, Some("stored")), "{posted:?}");
+    let payload = payload_of(&server, "a");
+    let input = payload["input"].as_str().expect("an excerpt of the input");
+    assert!(input.len() <= 512, "{}", input.len());
+    assert!(input.contains("abcdefgh"), "{input}");
+}

@@ -289,7 +289,8 @@ fn record_off_invariants(record: &NeutralRecord) -> Option<&'static str> {
 }
 
 /// The bytes of every text a record holds, before redaction: never more than the body it was
-/// decoded from.
+/// decoded from. A tool call's paths are not counted: they are the adapter's copies of strings
+/// of its input, not text the body held a second time.
 fn text_len(record: &NeutralRecord) -> usize {
     let opt = |s: &Option<String>| s.as_ref().map_or(0, String::len);
     let actor = match &record.actor {
@@ -303,14 +304,8 @@ fn text_len(record: &NeutralRecord) -> usize {
             tool,
             input,
             result,
-            paths,
             ..
-        } => {
-            tool.len()
-                + input.to_string().len()
-                + opt(result)
-                + paths.iter().map(String::len).sum::<usize>()
-        }
+        } => tool.len() + input.to_string().len() + opt(result),
         Content::Stop { message, .. } => opt(message),
         Content::Compact { trigger, summary } => opt(trigger) + summary.len(),
         Content::SessionEnd { reason } => opt(reason),
