@@ -482,7 +482,8 @@ map is not quarantined: it is a 422 and the client keeps it.
 **The Claude Code adapter** owns what ADR-0020 §11 leaves to it. Its activity filter ignores a tool whose name holds
 `prettier`, `eslint_fix`, `ruff_format` or `clang_format` (case-insensitively): the event is stored, no activity row is
 written; any other call within 300 s of an identical one is the same activity, counted again. It reads the paths a
-call touches: every string of the tool input that holds a `/` or starts with `.` or `~`, and every word of a `Bash`
+call touches: every string of the tool input up to 4,096 bytes (a bare file name relative to the call's working
+directory holds no `/`, so no shape narrows them), and every word of a `Bash`
 command, split the way the shell splits it (quotes, backslash escapes, and `;|&<>()=` outside quotes end a word); the
 engine decides which are sensitive. It reads the ME call ID from the first line of the raw result or error text,
 before any redaction or cut: `call ` and 16 lowercase hex digits. The event is linked to the call record of the same

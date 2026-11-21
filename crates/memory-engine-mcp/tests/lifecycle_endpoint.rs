@@ -1217,3 +1217,39 @@ async fn lifecycle_write_latency() {
         at(99)
     );
 }
+/// A bare name relative to the call's working directory has no `/` and no leading dot, and is a
+/// secret all the same: the call is a stub, and nothing of its result reaches the store.
+#[tokio::test]
+async fn a_bare_relative_sensitive_name_is_a_stub() {
+    let mut server = TestServer::start().await;
+    let secret = common::ghp();
+    let marker = "kestrel-secret-contents";
+    let read = event("post-tool-use-read", "a", 0, 1).json(|v| {
+        v["tool_input"]["file_path"] = json!("credentials.json");
+        v["tool_response"] = json!({ "content": format!("{marker} {secret}") });
+    });
+
+    stored(&server, &read).await;
+
+    let payload = payload_of(&server, "a");
+    assert_eq!(
+        payload["input"],
+        json!({ "sensitive_path": "credentials.json" })
+    );
+    assert!(
+        payload["result"].is_null(),
+        "a stub keeps no result: {payload}"
+    );
+    assert_eq!(
+        memory_engine::read_redaction_counts(&server.db())
+            .unwrap()
+            .stubbed,
+        1
+    );
+    server.stop().await;
+    for (name, bytes) in &store_bytes(&server) {
+        for planted in [marker, secret.as_str()] {
+            assert!(!holds(bytes, planted.as_bytes()), "{name} holds {planted}");
+        }
+    }
+}

@@ -192,8 +192,9 @@ fn call_line(result: &str) -> Option<String> {
 }
 
 /// The path tokens a call touches, as it spelled them; the core decides which are sensitive.
-/// Every string of the input that holds a `/` or starts with `.` or `~` (a path may hold a
-/// space), and every word of a shell command. The rule errs wide: over-stubbing loses one
+/// Every string of the input, whole (a path may hold a space), and every word of a shell
+/// command. A bare name relative to the call's working directory holds no `/` and no leading
+/// dot, so no shape narrows the candidates. The rule errs wide: over-stubbing loses one
 /// excerpt, a missed path leaks one.
 fn touched_paths(tool: &str, input: &Value) -> Vec<String> {
     let mut paths = Vec::new();
@@ -204,7 +205,7 @@ fn touched_paths(tool: &str, input: &Value) -> Vec<String> {
 fn collect(shell: bool, value: &Value, paths: &mut Vec<String>) {
     match value {
         Value::String(s) => {
-            if s.len() <= PATH_MAX && (s.contains('/') || s.starts_with(['.', '~'])) {
+            if s.len() <= PATH_MAX {
                 paths.push(s.clone());
             }
         }
@@ -571,18 +572,19 @@ mod tests {
             let paths = paths_of("Bash", &json!({ "command": command }));
             assert!(paths.contains(&path.to_owned()), "{command}: {paths:?}");
         }
-        // Nested leaves count, whitespace included; a number or a plain word is not a path.
+        // Nested leaves count, whitespace included; a number is not a path.
         let paths = paths_of(
             "Write",
             &json!({ "edits": [{ "path": "~/notes", "text": "plain" }], "n": 3, "dot": ".hidden" }),
         );
-        assert_eq!(paths, [".hidden", "~/notes"]);
-        // The whole command is not a token, only its words; a string no path can be is skipped.
+        assert_eq!(paths, [".hidden", "~/notes", "plain"]);
+        // The whole command is not a token, only its words, beside every other string; one no
+        // path can be, being too long, is skipped.
         let paths = paths_of(
             "Bash",
             &json!({ "command": "cat /x/y", "description": "d" }),
         );
-        assert_eq!(paths, ["cat", "/x/y"]);
+        assert_eq!(paths, ["cat", "/x/y", "d"]);
         let long = format!("/{}", "a".repeat(PATH_MAX));
         assert!(
             paths_of("Write", &json!({ "content": long })).is_empty(),
@@ -590,6 +592,40 @@ mod tests {
         );
     }
 
+    /// A bare name relative to the call's working directory holds no `/` and no leading dot, and
+    /// names a secret all the same: every string of the input is a candidate.
+    #[test]
+    fn a_bare_relative_sensitive_name_is_a_candidate() {
+        for (tool, input, name) in [
+            (
+                "Read",
+                json!({ "file_path": "credentials.json" }),
+                "credentials.json",
+            ),
+            ("Read", json!({ "file_path": "id_rsa" }), "id_rsa"),
+            (
+                "Edit",
+                json!({ "file_path": "secrets.json", "new_string": "x" }),
+                "secrets.json",
+            ),
+            (
+                "Bash",
+                json!({ "command": "cat id_rsa", "description": "token.json" }),
+                "id_rsa",
+            ),
+            (
+                "Bash",
+                json!({ "command": "ls", "description": "credentials.json" }),
+                "credentials.json",
+            ),
+        ] {
+            let paths = paths_of(tool, &input);
+            assert!(
+                paths.contains(&name.to_owned()),
+                "{tool} {input}: {paths:?}"
+            );
+        }
+    }
     #[test]
     fn the_call_line_is_read_before_any_cut() {
         let mut object: Value =
