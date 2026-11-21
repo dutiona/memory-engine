@@ -4,6 +4,7 @@
 //! Every module is `pub`: the binary (`main.rs`, a separate crate), the integration tests and
 //! the fuzz target consume them.
 
+pub mod adapters;
 pub mod auth;
 pub mod config;
 pub mod drain;
