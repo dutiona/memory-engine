@@ -7,7 +7,7 @@ use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::types::{NewActivity, NewEvent, NewFact, ScopeNode};
+use crate::types::{FactType, NewActivity, NewEvent, NewFact, ScopeNode};
 
 /// The idle threshold of ADR-0020 §5: a client gap longer than this, or a session the server heard
 /// nothing of for this long, ends a segment.
@@ -215,6 +215,22 @@ pub struct NeutralRecord {
     pub cwd: Option<String>,
     /// The kind's own content.
     pub content: Content,
+}
+
+/// One native memory file as read, before any redaction (ADR-0009): the text it becomes, its
+/// type, importance, date and metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryItem {
+    /// The body, trimmed.
+    pub text: String,
+    /// The fact type its memory type routes to.
+    pub fact_type: FactType,
+    /// The base importance of a hand-authored memory.
+    pub importance: f64,
+    /// Its date: the frontmatter's, else the file name's, else the caller's fallback.
+    pub time: DateTime<Utc>,
+    /// Where it came from and what its frontmatter says.
+    pub metadata: Value,
 }
 
 /// How a body failed to parse.
