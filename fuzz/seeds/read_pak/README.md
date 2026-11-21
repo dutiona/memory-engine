@@ -21,10 +21,12 @@ fuzzer-grown corpus is throwaway, machine-specific output that must not be
 committed. **Seeds are source** — the hand-authored inputs that bootstrap a
 fresh run — so they live in this tracked `fuzz/seeds/read_pak/` directory
 instead. cargo-fuzz takes any number of extra input directories on the command
-line, so point the run at this dir directly:
+line, so point the run at this dir directly, after the corpus directory: libFuzzer writes every
+new input to the first directory it is given, so naming the seeds first would grow them with
+generated files.
 
 ```sh
-cargo +nightly fuzz run read_pak fuzz/seeds/read_pak
+cargo +nightly fuzz run read_pak fuzz/corpus/read_pak fuzz/seeds/read_pak
 ```
 
 (or copy `fuzz/seeds/read_pak/*.pak` into `fuzz/corpus/read_pak/` once before a
