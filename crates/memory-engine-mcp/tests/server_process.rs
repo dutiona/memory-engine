@@ -428,3 +428,64 @@ fn the_user_setting_is_required_and_validated() {
     let mut server = ServerProcess::spawn(dir.path(), &[], &[("MEMORY_MCP_USER", "bob")]);
     server.wait_ready().unwrap();
 }
+/// SIGKILL after the 204: the server dies with no chance to flush or close, the client resends
+/// (it never saw the answer it needs, or saw it and the outbox is replayed), and the store holds
+/// the event once.
+#[test]
+fn a_killed_server_stores_a_resent_event_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let event = common::fixture("stop");
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    server.wait_ready().unwrap();
+    let posted = server.post_event("laptop", &event);
+    assert!(posted.is(204, Some("stored")), "{posted:?}");
+
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    drop(server);
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[]);
+    server.wait_ready().unwrap();
+    let resent = server.post_event("laptop", &event);
+
+    assert!(resent.is(204, Some("duplicate")), "{resent:?}");
+    let count = |sql: &str| -> i64 {
+        rusqlite::Connection::open(dir.path().join("memory.db"))
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM events WHERE source = 'lifecycle'"),
+        1
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM lifecycle_receipts"), 1);
+}
+
+/// A quarantined body is metadata only, on disk and in the log: the server logs the machine, the
+/// event ID and the status, never a byte of what it could not parse.
+#[test]
+fn a_quarantine_logs_no_body_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server =
+        ServerProcess::spawn(dir.path(), &[], &[("RUST_LOG", "memory_engine_mcp=debug")]);
+    server.wait_ready().unwrap();
+    let token = common::ghp();
+    let path = format!("/work/fixture/{}", ".env");
+    let body = format!(r#"{{"session_id":"s","note":"{token} {path}"#);
+    let event = common::fixture("stop")
+        .header("ME-Event-Id", "quarantine-1")
+        .body(body);
+
+    let posted = server.post_event("laptop", &event);
+
+    assert!(posted.is(204, Some("quarantined")), "{posted:?}");
+    server.terminate();
+    let log = server.stderr();
+    assert!(
+        log.contains("quarantine-1") && log.contains("laptop"),
+        "the log names the event:\n{log}"
+    );
+    for secret in [token.as_str(), path.as_str(), "session_id"] {
+        assert!(!log.contains(secret), "the log holds {secret:?}:\n{log}");
+    }
+}

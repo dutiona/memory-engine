@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use memory_engine::traits::EmbeddingProvider;
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -131,6 +132,7 @@ pub fn parse_allowed_host(value: &str) -> Result<String, String> {
 }
 
 fn router(server: MemoryMcpServer, tokens: TokenTable, allowed_hosts: Vec<String>) -> Router {
+    let state = server.clone();
     let mut config = StreamableHttpServerConfig::default()
         .with_stateful_mode(false)
         .with_json_response(true);
@@ -142,6 +144,8 @@ fn router(server: MemoryMcpServer, tokens: TokenTable, allowed_hosts: Vec<String
     );
     Router::new()
         .route_service("/mcp", mcp)
+        .route("/lifecycle/events", post(crate::lifecycle::events))
+        .with_state(state)
         // Last on purpose: a route added after this layer would be served unauthenticated.
         .layer(from_fn_with_state(Arc::new(tokens), require_machine))
 }
