@@ -413,8 +413,10 @@ impl VectorSearchStrategy for HnswStrategy {
                 let inner = self.inner.read();
                 let mut searcher: Searcher<u32> = Searcher::default();
 
-                // dest length must not exceed the number of indexed items
-                // (hnsw 0.11 panics on copy_from_slice if dest > item count)
+                // A walk fills at most `ef` slots and can reach fewer nodes than `dest`
+                // holds; the vendored hnsw returns the filled prefix (#1074), and the
+                // widening and fallback below serve a short result. `ef >= dest_len`
+                // keeps the overfetch the window asks for.
                 let n_items = inner.index_to_fact.len();
                 if n_items == 0 {
                     return Ok(Vec::new());
@@ -427,9 +429,10 @@ impl VectorSearchStrategy for HnswStrategy {
                     };
                     dest_len
                 ];
-                let neighbors = inner
-                    .index
-                    .nearest(&query_vec, ef, &mut searcher, &mut dest);
+                let neighbors =
+                    inner
+                        .index
+                        .nearest(&query_vec, ef.max(dest_len), &mut searcher, &mut dest);
 
                 let mut cands = Vec::new();
                 for neighbor in neighbors {
