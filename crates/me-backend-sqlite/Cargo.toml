@@ -42,7 +42,7 @@ rmp-serde = "1"
 # Sub-PR 2b: `search`'s scaling-warning + `snapshot.rs`'s reject-with-reason logging.
 tracing = "0.1"
 # Sub-PR 2b: HNSW approximate nearest-neighbor search (`search::ann`), gated by the `ann`
-# feature below — mirrors the facade's own optional deps exactly.
+# feature below; the facade's `ann` forwards here.
 hnsw = { version = "0.11", optional = true }
 space = { version = "0.17", optional = true }
 rand = { version = "0.8", features = ["small_rng"], optional = true }
@@ -82,7 +82,7 @@ archive = ["me-types/archive", "me-storage/archive"]
 compress-gzip = ["dep:flate2"]
 compress-zstd = ["dep:zstd"]
 # Sub-PR 2b: HNSW vector search (`search::ann`, `sqlite`'s HNSW dispatch/snapshot paths),
-# mirroring the facade's own `ann` feature exactly.
+# which the facade's `ann` forwards to.
 ann = ["dep:hnsw", "dep:space", "dep:rand"]
 # Forwards to `me-types/test-util` so a downstream consumer building this crate
 # with `--features test-util` still gets the shared `NewFact`/`NewEvent` test
