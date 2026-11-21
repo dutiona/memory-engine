@@ -21,8 +21,10 @@ members = [
     "crates/memory-engine-mcp",
 ]
 # `fuzz` is its own detached workspace (cargo-fuzz, nightly-only). `.worktrees` holds
-# scratch git worktrees. Neither is a member here.
-exclude = [".worktrees", "fuzz"]
+# scratch git worktrees. `vendor` holds third-party crates carried with a fix, used as
+# path dependencies; a path crate under the root would otherwise join as a member.
+# None of them is a member here.
+exclude = [".worktrees", "fuzz", "vendor"]
 
 # Workspace MSRV — the single source of truth: every member inherits it
 # (`rust-version.workspace = true`) and the CI "verify rust-version" job greps it from

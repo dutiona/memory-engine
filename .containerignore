@@ -1,8 +1,10 @@
-# Allowlist: the image build reads only the workspace manifest, its lock and the crates.
+# Allowlist: the image build reads only the workspace manifest, its lock, the crates and
+# vendor/ (cargo reads every path dependency's manifest, even one the build does not compile).
 *
 !Cargo.toml
 !Cargo.lock
 !crates/
+!vendor/
 **/target
 **/.worktrees
 **/.env

@@ -43,7 +43,12 @@ rmp-serde = "1"
 tracing = "0.1"
 # Sub-PR 2b: HNSW approximate nearest-neighbor search (`search::ann`), gated by the `ann`
 # feature below; the facade's `ann` forwards here.
-hnsw = { version = "0.11", optional = true }
+# Vendored hnsw 0.11.0 with the #1074 fix (`vendor/hnsw/Cargo.toml` lists the deviations).
+# Upstream has not released since 2021-07-19 and closed the same fix (rust-cv/hnsw#40)
+# unmerged. A path dependency rather than a root `[patch]`, because Cargo honours
+# `[patch]` only in the root workspace, so `fuzz/` and git consumers would keep the panic.
+# Go back to crates.io when a release carries the fix.
+hnsw = { path = "../../vendor/hnsw", optional = true }
 space = { version = "0.17", optional = true }
 rand = { version = "0.8", features = ["small_rng"], optional = true }
 
