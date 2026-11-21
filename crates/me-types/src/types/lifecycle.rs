@@ -512,6 +512,157 @@ pub enum Applied {
     LiveOverlap,
 }
 
+/// One upload to the backfill route (#1026): what the route knows of it before the engine
+/// imports its items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upload {
+    /// The machine the token names: the host whose history it is.
+    pub machine: String,
+    /// `ME-Harness`.
+    pub harness: String,
+    /// `ME-Client-Version`, as sent.
+    pub client_version: String,
+    /// `ME-Backfill-Kind`.
+    pub kind: String,
+    /// `ME-Backfill-Source`, decoded: the file's path under the bundle root. Content, so the
+    /// engine redacts it before it stores or reports it.
+    pub source: String,
+    /// When the server received it.
+    pub received_at: DateTime<Utc>,
+    /// The scope path every item is filed under.
+    pub home: String,
+    /// The project facts as decoded, with the resolved key and the rules version.
+    pub provenance: Value,
+}
+
+/// One item a harness reader made of an upload.
+#[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a transcript's items are all events and a memory upload holds one item"
+)]
+pub enum ImportItem {
+    /// A harness event, applied under the capture contract as if captured live.
+    Event(ImportEvent),
+    /// A native memory, stored as one fact recorded by one event.
+    Memory(ImportMemory),
+}
+
+/// One harness event of an upload, with the key and order a reader gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportEvent {
+    /// The event ID of its `(machine, event ID)` key, stable across uploads.
+    pub event_id: String,
+    /// Its time, to the second.
+    pub time: DateTime<Utc>,
+    /// The tie-break within that second.
+    pub seq: u32,
+    /// The digest a later upload of the same key is compared with.
+    pub body_sha256: [u8; 32],
+    /// The size of what it was read from, in bytes.
+    pub body_size: u64,
+    /// The 1-based line of the upload it was read from.
+    pub line: usize,
+    /// The event.
+    pub record: NeutralRecord,
+}
+
+/// One native memory of an upload, with its key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportMemory {
+    /// The event ID of its key.
+    pub event_id: String,
+    /// The digest a later upload of the same key is compared with.
+    pub body_sha256: [u8; 32],
+    /// The size of the file, in bytes.
+    pub body_size: u64,
+    /// The memory, unredacted.
+    pub item: MemoryItem,
+}
+
+/// What became of one item of an import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// Stored, or stored by a commit.
+    Stored,
+    /// The key is held with this item's digest: nothing written.
+    Duplicate,
+    /// The key is held with another digest: nothing written, and a write refused.
+    Collision,
+    /// The session was captured live from before this item: nothing written.
+    LiveOverlap,
+    /// The engine cannot apply it (a fixed phrase): skipped, no key held.
+    Refused(&'static str),
+}
+
+/// What an imported item is, read from what the store would hold of it: every text redacted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemSummary {
+    /// The event ID of its key.
+    pub event_id: String,
+    /// The upload's line it was read from, when it has one.
+    pub line: Option<usize>,
+    /// Its kind: a neutral kind's name, or `memory`.
+    pub kind: &'static str,
+    /// `main` or `subagent`; `None` for a memory.
+    pub actor: Option<&'static str>,
+    /// Its session; `None` for a memory.
+    pub session_id: Option<String>,
+    /// Its time.
+    pub time: DateTime<Utc>,
+    /// A tool call's tool, redacted.
+    pub tool: Option<String>,
+    /// A tool call's or a stop's outcome.
+    pub outcome: Option<String>,
+    /// A sensitive-path stub's path, redacted.
+    pub stub: Option<String>,
+    /// The redaction placeholders its stored texts hold, by rule.
+    pub placeholders: BTreeMap<String, u64>,
+}
+
+/// A memory an import made, or a commit would make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactPreview {
+    /// The event ID of the item it comes from.
+    pub event_id: String,
+    /// What it was made of: `final_message`, `compaction_summary` or `memory`.
+    pub capture: &'static str,
+    /// Its fact type.
+    pub fact_type: FactType,
+    /// The scope path it is filed under.
+    pub home: String,
+    /// Its creation time: its event's.
+    pub t_created: DateTime<Utc>,
+    /// `created`, `reinforced` (an active twin) or `blocked` (a forget's tombstone).
+    pub outcome: &'static str,
+    /// What its reviewer may want to do: `set_level` for a `user` memory, which the default
+    /// placement files at the project.
+    pub hint: Option<&'static str>,
+    /// Its text as stored, cut to 512 bytes.
+    pub preview: String,
+}
+
+/// What an import did, or what its write would do (#1026).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Imported {
+    /// Whether the import committed; a dry run never does.
+    pub committed: bool,
+    /// The preview a write of the same upload must carry.
+    pub preview: [u8; 32],
+    /// The upload's source as stored: redacted with every rule and the denylist.
+    pub source: String,
+    /// Each item's outcome and summary, in order-key order.
+    pub items: Vec<(ImportOutcome, ItemSummary)>,
+    /// Every memory made, or a commit would make.
+    pub facts: Vec<FactPreview>,
+    /// The order key of the first live event of each session the upload holds that has one.
+    pub live_since: BTreeMap<String, OrderKey>,
+    /// The secrets redaction removed from the stored items.
+    pub found: u64,
+    /// The stored items that are sensitive-path stubs.
+    pub stubbed: u64,
+}
+
 /// The state of a segment that [`step`] needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentState {

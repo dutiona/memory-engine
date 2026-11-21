@@ -57,6 +57,7 @@ const GATED: &[(&str, &str)] = &[
         "record_lifecycle_event",
         "a_captured_event_redacts_its_texts",
     ),
+    ("import_backfill", "an_import_redacts_with_the_denylist"),
     (
         "bootstrap_session",
         "tests/bootstrap_test.rs (bootstrap's own pipeline)",
@@ -1647,4 +1648,154 @@ async fn a_captured_event_redacts_its_texts() {
     // the summary.
     assert_eq!(read_redaction_counts(&db).unwrap().redacted, 20);
     assert_store_files_clean(dir.path(), &c);
+}
+
+/// A backfill import (#1026): every text it stores, the prompt, the tool input and result, the
+/// final message, the summary, the working directory, the upload's source, and a memory's body
+/// and frontmatter, is redacted with every rule and the author denylist, and counted.
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // one upload of each kind, then every place a text lands
+async fn an_import_redacts_with_the_denylist() {
+    use memory_engine::types::lifecycle::{
+        Actor, BatchMode, Content, ImportEvent, ImportItem, ImportMemory, MemoryItem,
+        NeutralRecord, StopOutcome, ToolOutcome, Upload,
+    };
+
+    let c = Canaries::new();
+    let host = "fixturehost";
+    let denylist = vec![host.to_owned()];
+    let text = format!("{} on {host}", c.text());
+    let scrubbed = format!("{SCRUBBED} on [REDACTED:denylist]");
+    let store = Store::new();
+    let upload = |kind: &str| Upload {
+        machine: "laptop".into(),
+        harness: "claude-code".into(),
+        client_version: "0.1.0".into(),
+        kind: kind.into(),
+        source: format!("projects/{host}/{}", c.aws),
+        received_at: chrono::Utc::now(),
+        home: "user:u/project:p".into(),
+        provenance: json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+    };
+    let event = |n: u8, content: Content| {
+        ImportItem::Event(ImportEvent {
+            event_id: format!("bf.{n}.x"),
+            time: chrono::Utc::now() - chrono::Duration::days(1),
+            seq: u32::from(n),
+            body_sha256: [n; 32],
+            body_size: 10,
+            line: usize::from(n),
+            record: NeutralRecord {
+                session_id: "s".into(),
+                actor: Actor::Main,
+                cwd: Some(format!("/work/{host}/{}", c.aws)),
+                harness_version: None,
+                content,
+            },
+        })
+    };
+    let items = vec![
+        event(
+            1,
+            Content::Prompt {
+                text: Some(text.clone()),
+            },
+        ),
+        event(
+            2,
+            Content::ToolUse {
+                tool: "Bash".into(),
+                input: json!({ "command": text }),
+                result: Some(text.clone()),
+                outcome: ToolOutcome::Success,
+                paths: vec![],
+                call: None,
+                dedup_window_secs: Some(300),
+            },
+        ),
+        event(
+            3,
+            Content::Stop {
+                outcome: StopOutcome::Completed,
+                message: Some(text.clone()),
+            },
+        ),
+        event(
+            4,
+            Content::Compact {
+                trigger: Some("manual".into()),
+                summary: text.clone(),
+            },
+        ),
+    ];
+    let memory = vec![ImportItem::Memory(ImportMemory {
+        event_id: "bf.m.1".into(),
+        body_sha256: [9; 32],
+        body_size: 10,
+        item: MemoryItem {
+            text: format!("{text}, remembered"),
+            fact_type: FactType::Semantic,
+            importance: 0.6,
+            time: chrono::Utc::now() - chrono::Duration::days(2),
+            metadata: json!({ "source": "memory-dir", "file": "m.md", "description": text }),
+        },
+    })];
+    for (kind, items) in [("transcript", items), ("memory-file", memory)] {
+        let upload = upload(kind);
+        let dry = store
+            .engine
+            .import_backfill(&upload, items.clone(), &denylist, BatchMode::DryRun)
+            .await
+            .unwrap();
+        assert!(!dry.source.contains(host) && !dry.source.contains(&c.aws));
+        let write = store
+            .engine
+            .import_backfill(
+                &upload,
+                items,
+                &denylist,
+                BatchMode::Write {
+                    preview: dry.preview,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(write.committed);
+    }
+
+    let payloads = events(&store.engine).await;
+    let field = |name: &str| {
+        payloads
+            .iter()
+            .find_map(|p| p.get(name).filter(|v| !v.is_null()))
+            .unwrap_or_else(|| panic!("no payload holds {name}"))
+            .clone()
+    };
+    assert_eq!(field("prompt"), scrubbed);
+    assert_eq!(field("result"), scrubbed);
+    assert_eq!(field("message"), scrubbed);
+    assert_eq!(field("summary"), scrubbed);
+    assert_eq!(field("input")["command"], scrubbed);
+    let mut memories: Vec<Fact> = store.engine.list_active_facts(None).await.unwrap();
+    memories.sort_by_key(|f| f.id);
+    let texts: Vec<&str> = memories.iter().map(|f| f.content.as_str()).collect();
+    let remembered = format!("{scrubbed}, remembered");
+    assert_eq!(texts, [&scrubbed, &scrubbed, &remembered]);
+    assert_eq!(memories[2].metadata["description"], scrubbed);
+    let (dir, db) = store.close().await;
+    // Four secrets and the literal in each of the five event texts, in the memory and in its
+    // description; a canary and the literal in each of the four cwds and in the source the
+    // memory's event stores (a transcript's events do not store it).
+    assert_eq!(
+        read_redaction_counts(&db).unwrap().redacted,
+        5 * 5 + 2 * 5 + 4 * 2 + 2
+    );
+    assert_store_files_clean(dir.path(), &c);
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        assert!(
+            !bytes.windows(host.len()).any(|w| w == host.as_bytes()),
+            "the denylist literal is on disk"
+        );
+    }
 }

@@ -32,6 +32,7 @@ use crate::types::search::{MatchType, SearchResult};
 
 mod activity;
 pub(crate) mod activity_filter;
+mod backfill;
 mod bootstrap;
 pub mod builder;
 pub(crate) mod cognitive;

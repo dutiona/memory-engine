@@ -51,13 +51,6 @@ pub(super) enum Origin {
     Live,
     /// An uploaded copy of the harness's own record (#1026): labelled `backfill`, so it never
     /// counts as live, and its memory dated by the event (ADR-0009 D2).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the backfill import constructs it in the next commit"
-        )
-    )]
     Backfill,
 }
 
@@ -72,7 +65,7 @@ impl Origin {
 }
 
 /// What one delivery comes to before the store sees it.
-enum Plan {
+pub(super) enum Plan {
     /// The engine cannot apply it: the store only says whether the key is held.
     Refuse(&'static str),
     /// Write this, with the secrets it lost and the stubs it made.
@@ -304,11 +297,11 @@ const fn parse_class(class: ParseClass) -> &'static str {
 }
 
 /// An identifier the machine-token rule would change: it would put a token in a key.
-fn holds_a_token(identifier: &str) -> bool {
+pub(super) fn holds_a_token(identifier: &str) -> bool {
     redact::scrub_provenance(identifier) != identifier
 }
 
-fn delivery_off_invariants(delivery: &Delivery) -> Option<&'static str> {
+pub(super) fn delivery_off_invariants(delivery: &Delivery) -> Option<&'static str> {
     if usize::try_from(delivery.body_size).is_ok_and(|size| size <= LIFECYCLE_BODY_BYTES) {
         holds_a_token(&delivery.event_id).then_some("the event ID holds a machine token")
     } else {
@@ -316,7 +309,7 @@ fn delivery_off_invariants(delivery: &Delivery) -> Option<&'static str> {
     }
 }
 
-fn record_off_invariants(record: &NeutralRecord) -> Option<&'static str> {
+pub(super) fn record_off_invariants(record: &NeutralRecord) -> Option<&'static str> {
     if record.session_id.is_empty() || record.session_id.len() > MAX_SESSION_ID_BYTES {
         return Some("the session ID is not 1 to 256 bytes");
     }
@@ -488,7 +481,11 @@ fn content_members(
 /// #1025): the payload takes [`redact::scrub_payload`], so identifiers are columns as sent and
 /// every text is redacted, with no size check beyond the wire's. `capture` says whether it is
 /// live or imported (#1026), which sets its labels, its memory's date and the denylist.
-fn prepare(delivery: &Delivery, record: NeutralRecord, capture: &Capture<'_>) -> Result<Plan> {
+pub(super) fn prepare(
+    delivery: &Delivery,
+    record: NeutralRecord,
+    capture: &Capture<'_>,
+) -> Result<Plan> {
     let main = matches!(record.actor, Actor::Main);
     let kind = record.content.kind();
     let mut payload = Map::new();
