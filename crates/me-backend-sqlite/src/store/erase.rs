@@ -1,7 +1,8 @@
 //! Erasure (#1023): the store's one hard delete, as one transaction's statements.
 //!
-//! [`erase`] is the function #1026 and #1029 extend with the tables they add (#1025 added the
-//! lifecycle receipts and segments):
+//! [`erase`] is the function #1029 extends with the tables it adds (#1025 added the lifecycle
+//! receipts and segments; the backfill upload, #1026, adds no table, and every row it writes
+//! names its machine where this already looks):
 //! select what the target owns, then delete children before parents, each adding its count
 //! to `deleted`. Every id set is bound as one JSON array, so no erasure meets SQLite's
 //! bound-variable cap.
