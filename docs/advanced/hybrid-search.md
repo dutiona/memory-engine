@@ -25,7 +25,7 @@ Cosine similarity against all active fact embeddings. Requires `SearchQuery.embe
 The engine dispatches between two strategies at query time:
 
 - **Brute-force** (default): O(N) scan with `select_nth_unstable_by` partial sort for top-K. Zero overhead, always correct.
-- **HNSW** (with `ann` feature): Approximate nearest neighbor via the `hnsw` crate. Sublinear query time with a widening loop and brute-force fallback for correctness.
+- **HNSW** (with `ann` feature): Approximate nearest neighbor via the `hnsw` crate (0.11.0, vendored at `vendor/hnsw` with the #1074 fix). Sublinear query time with a widening loop and brute-force fallback for correctness.
 
 Dispatch is controlled by `SearchConfig::ann_threshold` — the minimum active fact count at which HNSW is preferred. When `ann` is not enabled, brute-force is always used.
 
@@ -297,13 +297,15 @@ This design ensures that the HNSW read lock is held only for the graph traversal
 If aggressive filters (scope, fact_type) eliminate too many HNSW candidates, the search widens:
 
 ```
-Attempt 1: ef=100,  overfetch=limit×3
-Attempt 2: ef=200,  overfetch=limit×6
-Attempt 3: ef=400,  overfetch=limit×12
+Attempt 1: ef=max(100, window),  window=min(limit×3,  index size)
+Attempt 2: ef=max(200, window),  window=min(limit×6,  index size)
+Attempt 3: ef=max(400, window),  window=min(limit×12, index size)
 Fallback:  brute-force (guaranteed correct)
 ```
 
-Both `ef_search` (search pool accuracy) and `overfetch` (candidate count) are doubled each retry. This prevents the failure mode where increasing only `ef` finds the same small candidate set more accurately without discovering new candidates.
+Both `ef_search` (search pool accuracy) and `overfetch` (candidate count) are doubled each retry. This prevents the failure mode where increasing only `ef` finds the same small candidate set more accurately without discovering new candidates. `ef` is never below the window, HNSW's own `ef >= k` rule: the walk's pool holds at most `ef` nodes, so a smaller `ef` would cut the window short.
+
+A walk can also return fewer neighbours than the window, because it does not reach every node (#1111). Its prefix is post-filtered like any other candidate set: an attempt with at least `limit` survivors is served as is, and one with fewer widens like a filtered query.
 
 ### Lifecycle Hooks
 
