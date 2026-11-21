@@ -97,6 +97,7 @@ fn record(session: &str, actor: Actor, content: Content) -> NeutralRecord {
         session_id: session.into(),
         actor,
         cwd: None,
+        harness_version: None,
         content,
     }
 }

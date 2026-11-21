@@ -1573,6 +1573,7 @@ async fn a_captured_event_redacts_its_texts() {
             session_id: "s".into(),
             actor: Actor::Main,
             cwd: None,
+            harness_version: None,
             content,
         };
         let engine = &store.engine;

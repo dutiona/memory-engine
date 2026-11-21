@@ -213,6 +213,9 @@ pub struct NeutralRecord {
     pub actor: Actor,
     /// The working directory the harness reported; provenance, and a base for relative paths.
     pub cwd: Option<String>,
+    /// The harness's own version, when the adapter can read one from the body (ADR-0020 §3):
+    /// a transcript entry carries it, a hook input does not.
+    pub harness_version: Option<String>,
     /// The kind's own content.
     pub content: Content,
 }

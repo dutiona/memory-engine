@@ -29,6 +29,48 @@ const MAX_SESSION_ID_BYTES: usize = 256;
 /// The start sources that begin a new run (ADR-0020 §5, rule 2).
 const BOUNDARY_SOURCES: [&str; 4] = ["startup", "resume", "clear", "fork"];
 
+/// What separates an imported capture from a live one (#1026): the author's denylist, which
+/// live capture does not take, and where the event came from.
+pub(super) struct Capture<'a> {
+    pub(super) denylist: &'a [String],
+    pub(super) origin: Origin,
+}
+
+impl Capture<'static> {
+    /// Live capture: signatures only, labelled `lifecycle`, its memory dated by its receipt.
+    pub(super) const LIVE: Self = Self {
+        denylist: &[],
+        origin: Origin::Live,
+    };
+}
+
+/// Where a captured event came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Origin {
+    /// `POST /lifecycle/events`.
+    Live,
+    /// An uploaded copy of the harness's own record (#1026): labelled `backfill`, so it never
+    /// counts as live, and its memory dated by the event (ADR-0009 D2).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the backfill import constructs it in the next commit"
+        )
+    )]
+    Backfill,
+}
+
+impl Origin {
+    /// The event's `source` and `origin_node_id`.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Live => "lifecycle",
+            Self::Backfill => "backfill",
+        }
+    }
+}
+
 /// What one delivery comes to before the store sees it.
 enum Plan {
     /// The engine cannot apply it: the store only says whether the key is held.
@@ -96,6 +138,7 @@ impl MemoryEngine {
     ///     session_id: "s1".into(),
     ///     actor: Actor::Main,
     ///     cwd: None,
+    ///     harness_version: None,
     ///     content: Content::Prompt { text: Some("hello".into()) },
     /// };
     /// assert_eq!(
@@ -242,7 +285,7 @@ async fn plan(
                 return Ok(Plan::Refuse(reason));
             }
             let delivery = delivery.clone();
-            tokio::task::spawn_blocking(move || prepare(&delivery, record))
+            tokio::task::spawn_blocking(move || prepare(&delivery, record, &Capture::LIVE))
                 .await
                 .map_err(spawn_join_err)?
         }
@@ -353,6 +396,7 @@ fn content_members(
     delivery: &Delivery,
     record: &NeutralRecord,
     main: bool,
+    denylist: &[String],
     payload: &mut Map<String, Value>,
 ) -> Result<Extras> {
     let mut extras = Extras::default();
@@ -387,9 +431,12 @@ fn content_members(
                 class,
                 paths,
                 record.cwd.as_deref(),
+                denylist,
             )?;
             extras.found = capture.input_found + capture.result_found;
             extras.stubbed = u64::from(capture.stub);
+            // A tool name is content: the payload's copy is scrubbed below, the activity's here.
+            let (tool_name, _) = redact::scrub_with(tool, denylist)?;
             payload.insert("tool".to_owned(), json!(tool));
             payload.insert("input".to_owned(), capture.args.clone());
             payload.insert("result".to_owned(), json!(capture.result));
@@ -398,7 +445,7 @@ fn content_members(
             extras.activity = dedup_window_secs.map(|window| {
                 let activity = NewActivity {
                     session_id: record.session_id.clone(),
-                    tool_name: tool.clone(),
+                    tool_name: tool_name.clone(),
                     args_hash: args_hash(&capture.hash_input),
                     args: capture.args,
                     result_summary: capture.result,
@@ -436,8 +483,9 @@ fn content_members(
 
 /// Redact and bound one record, and build what the store writes for it (decisions 9 to 11 of
 /// #1025): the payload takes [`redact::scrub_payload`], so identifiers are columns as sent and
-/// every text is redacted, with no size check beyond the wire's.
-fn prepare(delivery: &Delivery, record: NeutralRecord) -> Result<Plan> {
+/// every text is redacted, with no size check beyond the wire's. `capture` says whether it is
+/// live or imported (#1026), which sets its labels, its memory's date and the denylist.
+fn prepare(delivery: &Delivery, record: NeutralRecord, capture: &Capture<'_>) -> Result<Plan> {
     let main = matches!(record.actor, Actor::Main);
     let kind = record.content.kind();
     let mut payload = Map::new();
@@ -455,7 +503,7 @@ fn prepare(delivery: &Delivery, record: NeutralRecord) -> Result<Plan> {
         ("seq", json!(delivery.seq)),
         ("harness", json!(delivery.harness)),
         ("client_version", json!(delivery.client_version)),
-        ("harness_version", Value::Null),
+        ("harness_version", json!(record.harness_version)),
         ("kind", json!(kind.as_str())),
         ("actor", json!(if main { "main" } else { "subagent" })),
         ("agent_id", json!(subagent)),
@@ -465,15 +513,19 @@ fn prepare(delivery: &Delivery, record: NeutralRecord) -> Result<Plan> {
     ] {
         payload.insert(name.to_owned(), value);
     }
-    let extras = content_members(delivery, &record, main, &mut payload)?;
+    let extras = content_members(delivery, &record, main, capture.denylist, &mut payload)?;
     let mut payload = Value::Object(payload);
-    let found = extras.found + redact::scrub_payload(&mut payload)?;
+    let found = extras.found + redact::scrub_payload(&mut payload, capture.denylist)?;
 
+    let created = match capture.origin {
+        Origin::Live => delivery.received_at,
+        Origin::Backfill => delivery.time,
+    };
     let fact = extras.memory.and_then(|(member, capture)| {
         let text = payload.get(member)?.as_str()?;
         Some(
             NewFact::builder(text, Vec::new(), FactType::Episodic)
-                .t_created(delivery.received_at)
+                .t_created(created)
                 .t_valid(delivery.time.min(delivery.received_at))
                 .metadata(json!({
                     "machine": delivery.machine,
@@ -487,14 +539,14 @@ fn prepare(delivery: &Delivery, record: NeutralRecord) -> Result<Plan> {
         timestamp: delivery.time,
         event_type: event_type(kind),
         payload,
-        source: "lifecycle".to_owned(),
+        source: capture.origin.label().to_owned(),
         session_id: Some(record.session_id.clone()),
         scope_id: 1,
-        origin_node_id: "lifecycle".to_owned(),
+        origin_node_id: capture.origin.label().to_owned(),
         sequence_id: 0,
         created_at: Some(delivery.received_at),
     };
-    let capture = CaptureWrite {
+    let write = CaptureWrite {
         home: delivery.home.clone(),
         event,
         session_id: record.session_id,
@@ -512,8 +564,112 @@ fn prepare(delivery: &Delivery, record: NeutralRecord) -> Result<Plan> {
         call: extras.call,
     };
     Ok(Plan::Write {
-        write: DeliveryWrite::Capture(Box::new(capture)),
+        write: DeliveryWrite::Capture(Box::new(write)),
         found,
         stubbed: extras.stubbed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Duration, TimeZone, Utc};
+
+    use super::*;
+
+    fn delivery() -> Delivery {
+        let time = Utc.with_ymd_and_hms(2026, 3, 19, 10, 0, 0).unwrap();
+        Delivery {
+            machine: "laptop".into(),
+            event_id: "bf.e.s".into(),
+            time,
+            seq: 120_000,
+            harness: "claude-code".into(),
+            client_version: "0.1.0".into(),
+            body_sha256: [1; 32],
+            body_size: 10,
+            received_at: time + Duration::days(200),
+            home: "user:u/project:p".into(),
+            provenance: json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+        }
+    }
+
+    fn final_message(harness_version: Option<&str>) -> NeutralRecord {
+        NeutralRecord {
+            session_id: "s".into(),
+            actor: Actor::Main,
+            cwd: None,
+            harness_version: harness_version.map(str::to_owned),
+            content: Content::Stop {
+                outcome: StopOutcome::Completed,
+                message: Some("done".into()),
+            },
+        }
+    }
+
+    fn captured(delivery: &Delivery, record: NeutralRecord, capture: &Capture<'_>) -> CaptureWrite {
+        match prepare(delivery, record, capture).unwrap() {
+            Plan::Write {
+                write: DeliveryWrite::Capture(capture),
+                ..
+            } => *capture,
+            _ => panic!("a capture"),
+        }
+    }
+
+    /// An imported event is labelled `backfill` so it never counts as live, and its memory is
+    /// dated by the event, not by its receipt; a live one keeps today's labels and dates.
+    #[test]
+    fn a_backfill_capture_is_labelled_and_backdated() {
+        let delivery = delivery();
+        let backfill = Capture {
+            denylist: &[],
+            origin: Origin::Backfill,
+        };
+        let imported = captured(&delivery, final_message(Some("2.1.296")), &backfill);
+        assert_eq!(
+            (
+                imported.event.source.as_str(),
+                imported.event.origin_node_id.as_str()
+            ),
+            ("backfill", "backfill")
+        );
+        assert_eq!(imported.event.timestamp, delivery.time);
+        assert_eq!(imported.event.created_at, Some(delivery.received_at));
+        assert_eq!(imported.event.payload["harness_version"], "2.1.296");
+        let fact = imported.fact.unwrap();
+        assert_eq!(fact.t_created, delivery.time);
+        assert_eq!(fact.last_accessed, delivery.time);
+        assert_eq!(fact.t_valid, Some(delivery.time));
+
+        let live = captured(&delivery, final_message(None), &Capture::LIVE);
+        assert_eq!(
+            (
+                live.event.source.as_str(),
+                live.event.origin_node_id.as_str()
+            ),
+            ("lifecycle", "lifecycle")
+        );
+        assert!(live.event.payload["harness_version"].is_null());
+        assert_eq!(live.fact.unwrap().t_created, delivery.received_at);
+    }
+
+    /// The denylist reaches the prompt, never the identifiers.
+    #[test]
+    fn a_capture_scrubs_its_content_with_the_denylist() {
+        let delivery = delivery();
+        let denylist = ["laptop".to_owned()];
+        let record = NeutralRecord {
+            content: Content::Prompt {
+                text: Some("on laptop".into()),
+            },
+            ..final_message(None)
+        };
+        let capture = Capture {
+            denylist: &denylist,
+            origin: Origin::Backfill,
+        };
+        let prompt = captured(&delivery, record, &capture);
+        assert_eq!(prompt.event.payload["prompt"], "on [REDACTED:denylist]");
+        assert_eq!(prompt.event.payload["machine"], "laptop");
+    }
 }

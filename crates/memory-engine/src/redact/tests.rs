@@ -153,7 +153,7 @@ fn genuine_provenance_keeps_its_paths_and_loses_machine_tokens() {
     let mut payload =
         json!({ PROVENANCE_KEY: provenance(uuid_root, &json!(null)), "error": uuid_root });
     assert_eq!(
-        scrub_payload(&mut payload).unwrap(),
+        scrub_payload(&mut payload, &[]).unwrap(),
         1,
         "only the error is redacted"
     );
@@ -161,7 +161,7 @@ fn genuine_provenance_keeps_its_paths_and_loses_machine_tokens() {
     assert_eq!(payload["error"], "[REDACTED:high-entropy]");
 
     let mut forged = json!({ PROVENANCE_KEY: provenance("/dev/sk-learn-tutorial-2024", &json!(machine_token())) });
-    assert_eq!(scrub_payload(&mut forged).unwrap(), 1);
+    assert_eq!(scrub_payload(&mut forged, &[]).unwrap(), 1);
     assert_eq!(
         forged[PROVENANCE_KEY]["facts"]["root"],
         "/dev/sk-learn-tutorial-2024"
@@ -172,12 +172,82 @@ fn genuine_provenance_keeps_its_paths_and_loses_machine_tokens() {
 #[test]
 fn content_cannot_hide_under_the_provenance_key() {
     let mut payload = json!({ PROVENANCE_KEY: { "note": ghp() } });
-    assert_eq!(scrub_payload(&mut payload).unwrap(), 1);
+    assert_eq!(scrub_payload(&mut payload, &[]).unwrap(), 1);
     assert_eq!(payload[PROVENANCE_KEY]["note"], "[REDACTED:github-pat]");
     let mut long_key =
         json!({ PROVENANCE_KEY: provenance("/r", &json!("k".repeat(MAX_KEY_BYTES + 1))) });
     assert!(!is_provenance(&long_key[PROVENANCE_KEY]));
-    assert_eq!(scrub_payload(&mut long_key).unwrap(), 0);
+    assert_eq!(scrub_payload(&mut long_key, &[]).unwrap(), 0);
+}
+
+// ── The author denylist on the capture path (#1026) ─────────────────────────
+
+/// The backfill route's denylist reaches every content member a capture stores: a prompt, a tool
+/// input, a result and a stub token lose the literal, while the provenance and the identifiers
+/// keep it, so a host name in the denylist never hides its own rows.
+#[test]
+fn the_capture_path_takes_the_denylist() {
+    let host = "fixturehost";
+    let denylist = dl(&[host]);
+    let mut payload = json!({
+        "machine": host,
+        "event_id": format!("{host}-1"),
+        "agent_id": host,
+        "prompt": format!("deploy to {host} now"),
+        PROVENANCE_KEY: provenance(&format!("/srv/{host}/p"), &json!(null)),
+    });
+    assert_eq!(scrub_payload(&mut payload, &denylist).unwrap(), 1);
+    assert_eq!(payload["prompt"], "deploy to [REDACTED:denylist] now");
+    for identifier in ["machine", "agent_id"] {
+        assert_eq!(payload[identifier], host, "{identifier}");
+    }
+    assert_eq!(payload["event_id"], format!("{host}-1"));
+    assert_eq!(
+        payload[PROVENANCE_KEY]["facts"]["root"],
+        format!("/srv/{host}/p")
+    );
+
+    let call = capture_tool_use(
+        &json!({ "command": format!("ssh {host} uptime") }),
+        Some(&format!("{host}: up 3 days")),
+        OutcomeClass::Success,
+        &[],
+        None,
+        &denylist,
+    )
+    .unwrap();
+    assert_eq!(
+        call.args,
+        json!({ "command": "ssh [REDACTED:denylist] uptime" })
+    );
+    assert_eq!(
+        call.result.as_deref(),
+        Some("[REDACTED:denylist]: up 3 days")
+    );
+    assert_eq!((call.input_found, call.result_found), (1, 1));
+
+    let path = format!("/srv/{host}/.env");
+    let stub = capture_tool_use(
+        &json!({ "file_path": path }),
+        Some("X=1"),
+        OutcomeClass::Success,
+        std::slice::from_ref(&path),
+        None,
+        &denylist,
+    )
+    .unwrap();
+    assert!(stub.stub);
+    assert_eq!(
+        stub.args,
+        json!({ "sensitive_path": "/srv/[REDACTED:denylist]/.env" })
+    );
+
+    let mut live = json!({ "prompt": format!("deploy to {host} now") });
+    assert_eq!(
+        scrub_payload(&mut live, &[]).unwrap(),
+        0,
+        "live capture passes none"
+    );
 }
 
 // ── The cut ──────────────────────────────────────────────────────────────────

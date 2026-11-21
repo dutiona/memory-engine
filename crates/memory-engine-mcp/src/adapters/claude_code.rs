@@ -136,6 +136,7 @@ fn map(object: &Map<String, Value>) -> Result<NeutralRecord, BodyFault> {
             Actor::Main
         },
         cwd: owned(object, "cwd"),
+        harness_version: None,
         content,
     })
 }
@@ -338,6 +339,10 @@ mod tests {
                 "{name}"
             );
             assert!(!record.session_id.is_empty(), "{name}");
+            assert_eq!(
+                record.harness_version, None,
+                "{name}: no hook input carries the harness's version"
+            );
             let got = match &record.content {
                 Content::ToolUse { outcome, .. } => format!("{outcome:?}"),
                 Content::Stop { outcome, .. } => format!("{outcome:?}"),
