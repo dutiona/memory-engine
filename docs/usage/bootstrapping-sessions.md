@@ -2,6 +2,8 @@
 
 The bootstrap pipeline parses Claude Code JSONL session logs and imports noteworthy episodes (bug fixes, decisions, conventions, learnings) as historical facts. This solves the cold-start problem: a fresh memory engine starts with no knowledge, but past session logs contain valuable procedural and semantic information that can be recovered.
 
+This pipeline is the embedded library's, run on a store no server holds (`memory-engine-cli bootstrap` takes the store lock). The memory service backfills differently: its `POST /backfill/uploads` route imports each copied transcript as if it had been captured live, every event in the log under the capture contract, and only final messages and compaction summaries become memories ([Backfill](../backfill.md)). Never run this pipeline on the service's store.
+
 ## Quick start
 
 ```rust

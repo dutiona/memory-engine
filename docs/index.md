@@ -21,6 +21,7 @@ getting-started/index
 :caption: Usage Guide
 
 usage/index
+backfill
 ```
 
 ```{toctree}

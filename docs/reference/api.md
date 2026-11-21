@@ -165,6 +165,23 @@ The server's `POST /lifecycle/events` route applies one neutral record per harne
 `OrderKey` and section 5's rule as a pure function, `step`; `LIFECYCLE_BODY_BYTES` (16 MiB) is the one size bound a
 captured record meets. The port is the bounded trait `me_storage::Lifecycle`; Postgres does not implement it.
 
+### Backfill import
+
+The server's `POST /backfill/uploads` route (#1026, [MCP server](mcp-server.md#backfill-uploads)) reads one uploaded
+file into neutral items and hands them to the engine in one call (`engine::backfill`).
+
+| Method | Signature | Description |
+| ------ | --------- | ----------- |
+| `import_backfill` | `(&self, upload: &Upload, items: Vec<ImportItem>, denylist: &[String], mode: BatchMode) -> Result<Imported>` | Redact every item with every rule and the author `denylist` (never an identifier), refuse and skip what is off the lifecycle core's invariants, sort the rest by order key, and apply them in one store transaction through `Lifecycle::record_deliveries`: an event under the capture contract (labelled `backfill`, its memory dated by its event), a memory as one vectorless fact recorded by one event. `BatchMode::DryRun` rolls back; `BatchMode::Write { preview }` commits only when no item collided and the preview, a digest of every effect and of the store's outcomes, is `preview`. Nothing is embedded; the scope cache, the drain's wake and the redaction totals move only after a commit. `ReadOnly` on a read-only engine; `Storage(Unavailable)` when the store cannot take the write now. |
+
+`types::lifecycle` holds the import's types: `Upload`, `ImportItem` (`Event(ImportEvent)` or `Memory(ImportMemory)`),
+`MemoryItem`, `BatchMode`, `Imported` with each item's `ImportOutcome` and `ItemSummary` and each memory's
+`FactPreview`; and the store's batch, `Keyed`, `MemoryWrite`, `Batch` and `preview_digest`, which the store computes
+and the engine relies on. `BACKFILL_BODY_BYTES` (256 MiB) is the route's body limit and the importer's stream bound.
+The readers use two parts of ADR-0009's importer, `bootstrap::read_json_lines` (its bounded JSONL loop, one JSON object
+per line with its line number) and `bootstrap::memory_item` (a memory file read without redaction or embedding), and
+its timestamp grammar, `bootstrap::parse_timestamp`.
+
 ### Conflict Resolution
 
 | Method             | Signature                                                                                               | Description                                                                                                                                |
@@ -267,6 +284,8 @@ The crate root (`lib.rs`) re-exports these items for convenience:
 - **Types**: all public types from the `types` module (`Event`, `Fact`, `Edge`, `Summary`, `NewEvent`, `NewFact`, `NewEdge`, `NewSummary`, `EventType`, `FactType`, `ConsolidationLevel`, `ScopeQuery`, `ScopeNode`, `AddFactOptions`)
 - **Embedding queue** (#1021): `Backoff`, `Settled`, `read_embed_queue_status`, and the queue types `PendingEmbedding`, `NextEmbedding`, `EmbedQueueStatus`; `EmbedderError` beside `MemoryError`
 - **Lifecycle** (#1025): `read_quarantined` and `LIFECYCLE_BODY_BYTES`; the record types are `memory_engine::types::lifecycle`
+- **Backfill** (#1026): `BACKFILL_BODY_BYTES`; the import types are `memory_engine::types::lifecycle`, and
+  `read_json_lines`, `memory_item` and `parse_timestamp` are in `memory_engine::bootstrap`
 
 ## Feature Flags
 

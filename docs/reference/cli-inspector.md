@@ -279,7 +279,9 @@ The one operation that deletes (ADR-0020 §8, #1023). Exactly one target:
   captured for the machine (#1025): its receipts, counted apart as `receipts` (events it stored) and `quarantined`
   (bodies it could not parse), its `segments`, and the activities of its captured tool calls, which sit in a project
   scope the bucket rule does not reach. The captured events and memories go with it through `payload.machine`,
-  `metadata.machine` and their source events.
+  `metadata.machine` and their source events. The same holds for what the machine's backfill uploads imported (#1026):
+  their events, memories, activities, receipts and segments name the machine where these rules look, so they go too,
+  even when the machine's name is in the author denylist, which never redacts an identifier.
 
 Both also take every wisdom fact derived from a taken fact, the summaries naming one, the activities that promoted
 one, every incident edge, and the embedding queue's last error and pause error when a taken fact's attempt left them
