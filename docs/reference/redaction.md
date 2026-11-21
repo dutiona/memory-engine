@@ -71,7 +71,7 @@ other out.
 Every `MemoryEngine` write method checks its raw size, then (after its open and writable checks, so `ReadOnly` still
 wins, #972) scrubs its content fields and stores the scrubbed copy: fact content and metadata, event payloads, forget
 and move records, forget reasons, checkpoint summaries and metadata, recorded embedder errors, tool activities,
-bootstrap's turns and facts, cycle deltas and consolidation summaries. `tests/redaction_write_paths.rs` reads every
+bootstrap's turns and facts, cycle deltas, consolidation summaries and captured lifecycle events. `tests/redaction_write_paths.rs` reads every
 public method of `crates/memory-engine/src/engine/` and fails until each is listed as gated, with its test, or exempt,
 with its reason. A new write method must scrub its content and join the gated list.
 
@@ -144,6 +144,34 @@ what persists rather than what an agent may read:
 
 Because a relative token is also judged inside `cwd`, every data or extensionless file touched in a checkout whose path
 holds a `secrets`, `credentials` or `vault` directory is stubbed too.
+
+## Captured events
+
+`POST /lifecycle/events` ([MCP server](mcp-server.md#lifecycle-events)) hands the engine one neutral record per
+event, and `MemoryEngine::record_lifecycle_event` redacts it before anything is stored, queued or embedded; the
+redaction tripwire lists it as gated. Capture is not restore: a captured event is redacted even though it is the
+client's own session.
+
+- **Texts.** A prompt, a final message and a compaction summary are redacted and kept in full. They are bounded at the
+  wire only, by the route's 16 MiB body limit (`LIFECYCLE_BODY_BYTES`): the engine applies neither the 1 MiB payload
+  check nor the 1 MiB fact check to them, so a text that fits the body is stored whole after redaction, whatever the
+  envelope fields, the provenance or the placeholders add to it. The engine enforces the same bound for any caller: a
+  delivery whose `body_size`, or a record whose texts, exceed it is refused, and nothing is written. A memory made from
+  such a text is embedded in chunks like any other, and a text over the embedder's input size is marked failed by the
+  drain and stays found by full-text search.
+- **Tool calls.** The input and the result are redacted, then cut to 512 bytes, as for `record_activity`
+  ([Tool calls](#tool-calls)): a call touching a sensitive path is a stub, and a text over the 1 MiB write limit keeps an
+  excerpt of its first 1 MiB.
+- **The payload.** It takes the event payload scrub: its `project` provenance block, when it has exactly the shape the
+  server writes, gets the machine-token rule only; every other member gets every rule, `cwd` included. A directory name
+  that looks high-entropy may therefore be over-redacted in the payload, which no key is derived from.
+- **Identifiers.** The event ID, the session ID and the agent ID are stored as sent, in columns, never redacted; one the
+  machine-token rule would change is refused with a 422, so no key and no column holds a token.
+- **Quarantine.** A body that does not parse was never redacted, so a quarantine record holds no byte of it: the
+  machine, the event ID, the client time as sent, the time of receipt, the harness, the byte size, the SHA-256 and the
+  parse error as a class with its line and column, never the parser's message. The server logs the same and no more.
+- **Counters.** Each captured event adds its findings to `redact_count` and each stub to `stub_count`, once its
+  transaction has committed; a duplicate or a refusal counts nothing.
 
 ## Queries
 
