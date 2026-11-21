@@ -956,7 +956,7 @@ mod tests {
         #[test]
         fn hnsw_strategy_empty_index_returns_empty() {
             // DB with no facts -> index_to_fact is empty, so search() hits the
-            // `n_items == 0` early return (ann.rs:248-253) before any nearest()
+            // `n_items == 0` early return in `HnswStrategy::search` before any nearest()
             // call, returning an empty vec.
             let conn = open_memory().unwrap();
             init_schema(&conn).unwrap();
@@ -974,8 +974,9 @@ mod tests {
             let strategy = HnswStrategy::build_from_db(&conn, DIM).unwrap();
 
             // Query length != strategy.embed_dim -> EmbeddingDimension error
-            // before any index access (ann.rs:230-235). The `_embed_dim`
-            // parameter is intentionally ignored; the strategy's own dim wins.
+            // before any index access (the dimension check at the top of `search`).
+            // The `_embed_dim` parameter is intentionally ignored; the strategy's own
+            // dim wins.
             let wrong = [1.0_f32, 0.0]; // len 2, DIM is 4
             let err = strategy
                 .search(&conn, &wrong, DIM, 5, None, None)
