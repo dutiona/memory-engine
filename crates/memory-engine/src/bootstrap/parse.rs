@@ -249,10 +249,10 @@ fn parse_session_file_capped(
     )
 }
 
-/// The JSON objects of a JSON Lines stream, under the bounds of [`parse_session_file`].
+/// The JSON objects of a JSON Lines stream, under the bounds of ADR-0009's session importer.
 ///
-/// The bounds are [`MAX_JSONL_LINE_BYTES`] per line, `max_bytes` for the stream and `max_lines`
-/// objects kept, `0` meaning no limit for either. Each object comes with its 1-based line
+/// The bounds are 8 MiB per line, `max_bytes` for the stream and `max_lines` objects kept, `0`
+/// meaning no limit for either. Each object comes with its 1-based line
 /// number, counted over every line, empty ones included.
 ///
 /// Returns the objects and how many non-empty lines were skipped: oversized, not UTF-8, not
