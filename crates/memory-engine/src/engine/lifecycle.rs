@@ -194,6 +194,9 @@ impl MemoryEngine {
             (Applied::Absent, None) => Err(MemoryError::Internal(
                 "the store found no key for a write it was asked to make".into(),
             )),
+            (Applied::LiveOverlap, _) => Err(MemoryError::Internal(
+                "the store answered a live delivery as a live overlap".into(),
+            )),
         }
     }
 

@@ -72,6 +72,29 @@ pub(crate) fn queue(
     Ok(id)
 }
 
+/// An imported memory, inside the caller's transaction (#1026): nothing at all for content a
+/// forget's tombstone blocks, even beside an active twin; else the active twin in the fact's
+/// scope is reinforced (ADR-0009's dedup); else the fact is queued as [`queue`] does. Returns
+/// the fact's id, if any, and whether it is a reinforced twin.
+///
+/// # Errors
+///
+/// As [`queue`], and `MemoryError::Storage` on the tombstone or twin lookup.
+pub(crate) fn queue_or_reinforce(
+    tx: &Transaction,
+    fact: &NewFact,
+    embed_dim: usize,
+    now: DateTime<Utc>,
+) -> Result<(Option<i64>, bool)> {
+    if crate::store::tombstones::blocks(tx, &fact.content)? {
+        return Ok((None, false));
+    }
+    if let Some(twin) = FactStore::new(tx, embed_dim).reinforce_twin(fact)? {
+        return Ok((Some(twin), true));
+    }
+    Ok((Some(queue(tx, fact, embed_dim, now)?), false))
+}
+
 /// The waiting item the drain takes next: the smallest `(next_attempt_at, fact_id)` among
 /// the items not failed, `Due` once its time is `now` or earlier.
 ///

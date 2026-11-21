@@ -3,8 +3,12 @@
 //! A harness adapter turns one hook body into one [`NeutralRecord`](crate::types::lifecycle::NeutralRecord);
 //! the engine applies it. Nothing here names a tool or a harness field (ADR-0020 §1).
 
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
 use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
-use serde_json::Value;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::types::{FactType, NewActivity, NewEvent, NewFact, ScopeNode};
@@ -327,6 +331,128 @@ pub enum DeliveryWrite {
     Quarantine(Value),
     /// A captured event and its effects.
     Capture(Box<CaptureWrite>),
+    /// An imported memory and its event (#1026).
+    Memory(Box<MemoryWrite>),
+}
+
+impl DeliveryWrite {
+    /// Whether the write would make a memory, were no tombstone to block it.
+    fn carries_fact(&self) -> bool {
+        match self {
+            Self::Capture(capture) => capture.fact.is_some(),
+            Self::Memory(_) => true,
+            Self::Check | Self::Quarantine(_) => false,
+        }
+    }
+}
+
+/// One imported memory and its event, committed together (#1026).
+///
+/// The store files both under the leaf of `home`, created when missing, sets the fact's
+/// `source_event_id` to the event's row, and steps no segment. A tombstone of the text blocks
+/// the fact; otherwise an active twin in the home is reinforced, or the fact is queued for its
+/// vector.
+#[derive(Debug, Clone)]
+pub struct MemoryWrite {
+    /// The scope path both are filed under.
+    pub home: String,
+    /// The event that records the import, already redacted.
+    pub event: NewEvent,
+    /// The memory, already redacted, without a vector.
+    pub fact: NewFact,
+}
+
+/// One item of a batch: the event ID of its `(machine, event ID)` key, the SHA-256 of what it
+/// was made from, and what it writes.
+#[derive(Debug, Clone)]
+pub struct Keyed {
+    /// The event ID of the key.
+    pub event_id: String,
+    /// The digest a later delivery of the key is compared with.
+    pub body_sha256: [u8; 32],
+    /// What the item writes.
+    pub write: DeliveryWrite,
+}
+
+/// Whether a batch is a dry run or a write (#1026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchMode {
+    /// Apply every item in one transaction, then roll it back.
+    DryRun,
+    /// Apply every item and commit only when no item collided and the batch's preview is this
+    /// one, the preview of the dry run that was reviewed.
+    Write {
+        /// The reviewed dry run's preview.
+        preview: [u8; 32],
+    },
+}
+
+/// What the store did with a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Batch {
+    /// Whether it committed; otherwise the store is unchanged.
+    pub committed: bool,
+    /// [`preview_digest`] of the batch's outcomes, as computed inside its transaction.
+    pub preview: [u8; 32],
+    /// Each item's outcome, in item order, a collision included.
+    pub applied: Vec<Applied>,
+    /// The order key of the first live event of each session of the batch that has one, read
+    /// inside the transaction: the items at or after it are [`Applied::LiveOverlap`].
+    pub live_since: BTreeMap<String, OrderKey>,
+}
+
+/// The preview of a batch (#1026): what a reviewer approves and a write must reproduce.
+///
+/// It is the SHA-256 of `context`, the digest of every effect the batch would write, and of
+/// each item's outcome (its event ID, what the store did with it, and what became of its
+/// memory), never a row ID. A dry run and its write agree when nothing changed; any change of
+/// the effects or of the store's outcomes changes it.
+///
+/// # Examples
+///
+/// ```
+/// use me_types::types::lifecycle::{Applied, DeliveryWrite, Keyed, preview_digest};
+///
+/// let item = Keyed { event_id: "e".into(), body_sha256: [1; 32], write: DeliveryWrite::Check };
+/// let fresh = preview_digest(&[0; 32], std::slice::from_ref(&item), &[Applied::Absent]);
+/// let held = preview_digest(&[0; 32], std::slice::from_ref(&item), &[Applied::Duplicate]);
+/// assert_ne!(fresh, held);
+/// assert_ne!(fresh, preview_digest(&[1; 32], &[item], &[Applied::Absent]));
+/// ```
+#[must_use]
+pub fn preview_digest(context: &[u8; 32], items: &[Keyed], applied: &[Applied]) -> [u8; 32] {
+    let outcomes: Vec<Value> = items
+        .iter()
+        .zip(applied)
+        .map(|(item, applied)| {
+            let (outcome, fact) = match applied {
+                Applied::Absent => ("absent", "none"),
+                Applied::Duplicate => ("duplicate", "none"),
+                Applied::Collision => ("collision", "none"),
+                Applied::Quarantined => ("quarantined", "none"),
+                Applied::LiveOverlap => ("live_overlap", "none"),
+                Applied::Stored {
+                    fact: Some(_),
+                    reinforced,
+                    ..
+                } => ("stored", if *reinforced { "reinforced" } else { "created" }),
+                Applied::Stored { fact: None, .. } => (
+                    "stored",
+                    if item.write.carries_fact() {
+                        "blocked"
+                    } else {
+                        "none"
+                    },
+                ),
+            };
+            json!([item.event_id, outcome, fact])
+        })
+        .collect();
+    let hex = context.iter().fold(String::new(), |mut hex, b| {
+        let _ = write!(hex, "{b:02x}");
+        hex
+    });
+    Sha256::digest(json!([hex, outcomes]).to_string().as_bytes()).into()
 }
 
 /// One captured event and everything that commits with it. The store replaces the `scope_id` of
@@ -374,11 +500,16 @@ pub enum Applied {
     Stored {
         /// The event's row.
         event: i64,
-        /// The fact it became, if one was stored.
+        /// The fact it became, if one was stored or reinforced.
         fact: Option<i64>,
+        /// Whether `fact` is an active twin an imported memory reinforced; never for a capture.
+        reinforced: bool,
         /// The scope nodes from the home up to the root's child, for the in-memory tree.
         chain: Vec<ScopeNode>,
     },
+    /// A batch's capture at or after the first live event of its session and machine: the
+    /// session was captured live from there, so nothing was written (#1026).
+    LiveOverlap,
 }
 
 /// The state of a segment that [`step`] needs.

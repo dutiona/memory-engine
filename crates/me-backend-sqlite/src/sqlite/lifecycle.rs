@@ -10,7 +10,7 @@ use super::SqliteBackend;
 use crate::store::lifecycle::{self, ReceiptKey};
 use me_storage::lifecycle::Lifecycle;
 use me_types::error::Result;
-use me_types::types::lifecycle::{Applied, DeliveryWrite};
+use me_types::types::lifecycle::{Applied, Batch, BatchMode, DeliveryWrite, Keyed};
 
 #[async_trait]
 impl Lifecycle for SqliteBackend {
@@ -35,7 +35,34 @@ impl Lifecycle for SqliteBackend {
                 body_sha256: &body_sha256,
                 received_at,
             };
-            lifecycle::record_delivery(c, &registry, dim, &key, write)
+            lifecycle::record_delivery(c, &registry, dim, &key, &write)
+        })
+        .await
+    }
+
+    // WRITE
+    async fn record_deliveries(
+        &self,
+        machine: &str,
+        received_at: DateTime<Utc>,
+        items: Vec<Keyed>,
+        context: [u8; 32],
+        mode: BatchMode,
+    ) -> Result<Batch> {
+        let machine = machine.to_owned();
+        let registry = Arc::clone(&self.upcaster_registry);
+        let dim = self.embed_dim;
+        self.block_write(move |c| {
+            lifecycle::record_deliveries(
+                c,
+                &registry,
+                dim,
+                &machine,
+                received_at,
+                &items,
+                &context,
+                mode,
+            )
         })
         .await
     }

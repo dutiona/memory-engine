@@ -154,6 +154,14 @@ macro_rules! all_behaviors_into {
             a_busy_store_is_unavailable => lifecycle::a_busy_store_is_unavailable,
             idle_segments_end_once => lifecycle::idle_segments_end_once,
             a_tombstoned_text_makes_no_fact => lifecycle::a_tombstoned_text_makes_no_fact,
+            a_batch_commits_whole_or_not_at_all => lifecycle::a_batch_commits_whole_or_not_at_all,
+            a_dry_run_batch_changes_nothing => lifecycle::a_dry_run_batch_changes_nothing,
+            a_collision_rolls_the_batch_back => lifecycle::a_collision_rolls_the_batch_back,
+            a_write_commits_only_on_its_preview => lifecycle::a_write_commits_only_on_its_preview,
+            a_key_written_earlier_in_the_batch_is_a_duplicate => lifecycle::a_key_written_earlier_in_the_batch_is_a_duplicate,
+            a_live_event_drops_the_items_at_or_after_it => lifecycle::a_live_event_drops_the_items_at_or_after_it,
+            a_tombstone_blocks_even_with_an_active_twin => lifecycle::a_tombstone_blocks_even_with_an_active_twin,
+            an_imported_memory_reinforces_or_queues => lifecycle::an_imported_memory_reinforces_or_queues,
         );
     };
 }
