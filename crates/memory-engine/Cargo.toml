@@ -183,6 +183,10 @@ name = "roundtrip_test"
 path = "../../tests/roundtrip_test.rs"
 
 [[test]]
+name = "lifecycle_capture_test"
+path = "../../tests/lifecycle_capture_test.rs"
+
+[[test]]
 name = "all_features_store"
 path = "../../tests/all_features_store.rs"
 

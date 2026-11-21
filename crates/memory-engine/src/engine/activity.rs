@@ -21,7 +21,7 @@ use super::MemoryEngine;
 
 /// Compute blake3 hex hash, truncated to 32 chars (128 bits).
 /// Same policy as `FactStore::content_hash`.
-fn args_hash(canonical: &str) -> String {
+pub(super) fn args_hash(canonical: &str) -> String {
     blake3::hash(canonical.as_bytes()).to_hex()[..32].to_string()
 }
 

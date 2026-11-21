@@ -342,6 +342,22 @@ fn step_segments(
     Ok(())
 }
 
+/// How many quarantine records the store holds.
+///
+/// # Errors
+///
+/// `Storage(Backend)` on a read failure.
+pub fn count_quarantined(conn: &rusqlite::Connection) -> Result<u64> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM lifecycle_receipts WHERE quarantine IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(classify)?;
+    Ok(u64::try_from(count).unwrap_or_default())
+}
+
 /// End, as idle, every open segment whose latest event was received before `idle_before`, in one
 /// transaction; returns how many.
 ///
