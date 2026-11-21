@@ -416,6 +416,11 @@ mod tests {
         let _ = std::mem::size_of::<crate::types::forgetting::ForgetPolicy>();
         let _ = std::mem::size_of::<crate::types::forgetting::PruneStats>();
 
+        // The lifecycle vocabulary is namespaced, never flat: it is reached as `types::lifecycle`
+        // through the blanket `types` re-export, and pinned here for the same reason as above.
+        let _ = std::mem::size_of::<crate::types::lifecycle::OrderKey>();
+        let _ = std::mem::size_of::<crate::types::lifecycle::NeutralRecord>();
+
         // core types
         let _ = std::mem::size_of::<crate::FactType>();
         let _ = std::mem::size_of::<crate::Fact>();
