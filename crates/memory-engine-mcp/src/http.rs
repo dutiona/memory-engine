@@ -13,6 +13,7 @@ use axum::http::StatusCode;
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use memory_engine::traits::EmbeddingProvider;
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
@@ -30,7 +31,8 @@ const RESPONSE_GRACE: std::time::Duration = std::time::Duration::from_millis(500
 /// Serve MCP on `listener` until `shutdown` resolves, then flush the sidecar snapshot.
 ///
 /// With an embedder, the embedding drain ([`crate::drain`]) runs beside the server and stops
-/// with it, before the flush.
+/// with it, before the flush. The idle-segment sweep ([`crate::lifecycle::sweep`]) runs beside it
+/// with or without an embedder.
 ///
 /// `allowed_hosts` are added to rmcp's loopback default, never in place of it, so the
 /// Host list can never be empty (rmcp reads an empty list as "admit every host").
@@ -57,6 +59,10 @@ pub async fn serve(
             server.embed_backoff,
         ));
     }
+    drain.spawn(crate::lifecycle::sweep(
+        Arc::clone(&engine),
+        Arc::clone(&in_flight),
+    ));
     let (stopping, stopped) = tokio::sync::oneshot::channel();
     let serving = axum::serve(listener, router(server, tokens, allowed_hosts))
         .with_graceful_shutdown(async move {
@@ -131,6 +137,7 @@ pub fn parse_allowed_host(value: &str) -> Result<String, String> {
 }
 
 fn router(server: MemoryMcpServer, tokens: TokenTable, allowed_hosts: Vec<String>) -> Router {
+    let state = server.clone();
     let mut config = StreamableHttpServerConfig::default()
         .with_stateful_mode(false)
         .with_json_response(true);
@@ -142,6 +149,8 @@ fn router(server: MemoryMcpServer, tokens: TokenTable, allowed_hosts: Vec<String
     );
     Router::new()
         .route_service("/mcp", mcp)
+        .route("/lifecycle/events", post(crate::lifecycle::events))
+        .with_state(state)
         // Last on purpose: a route added after this layer would be served unauthenticated.
         .layer(from_fn_with_state(Arc::new(tokens), require_machine))
 }

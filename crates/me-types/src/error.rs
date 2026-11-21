@@ -425,6 +425,14 @@ pub enum StorageError {
         needed: &'static str,
         backend: &'static str,
     },
+
+    /// The store cannot take this write now, and the same write can work later: the database is
+    /// busy or locked, the disk is full, an I/O call failed, or the file cannot be opened. The
+    /// string is the driver's message. A caller that serves a retrying client answers "try again"
+    /// for this variant alone (ADR-0020 §3's 5xx); [`Backend`](StorageError::Backend) is a fault of
+    /// the request or the store, not of the moment.
+    #[error("store unavailable: {0}")]
+    Unavailable(String),
 }
 
 impl StorageError {

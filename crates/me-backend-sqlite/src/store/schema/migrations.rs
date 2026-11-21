@@ -573,3 +573,70 @@ pub(super) fn migrate_v16_to_v17(tx: &Transaction) -> Result<()> {
     .map_err(StorageError::backend)?;
     Ok(())
 }
+
+/// Add the lifecycle route's tables (#1025): `lifecycle_receipts`, the `(machine, event ID)` key
+/// with the body's digest, and `lifecycle_segments`, one row per session segment; the
+/// `activities.machine` column and its index; and the expression index the call link reads.
+///
+/// `activities` gains `machine` by `ADD COLUMN`, only if `pragma_table_info` lacks it, and its
+/// dedup index is rebuilt with the column: a machine's call never joins another machine's row.
+/// Everything else is `IF NOT EXISTS`, because tests roll a current schema back and re-run the
+/// chain. `idx_events_mcp_call` is guarded by `json_valid`, so a malformed payload never fails an
+/// insert. Frozen DDL snapshot — never reference the live `TABLES_DDL`.
+pub(super) fn migrate_v17_to_v18(tx: &Transaction) -> Result<()> {
+    let present: bool = tx
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('activities') WHERE name = 'machine'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StorageError::backend)?;
+    if !present {
+        tx.execute_batch("ALTER TABLE activities ADD COLUMN machine TEXT;")
+            .map_err(StorageError::backend)?;
+    }
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS idx_activities_dedup;
+CREATE INDEX IF NOT EXISTS idx_activities_dedup
+    ON activities(session_id, tool_name, args_hash, outcome_class, scope_id, machine);
+CREATE INDEX IF NOT EXISTS idx_activities_machine ON activities(machine);
+
+CREATE TABLE IF NOT EXISTS lifecycle_receipts (
+    machine     TEXT    NOT NULL,
+    event_id    TEXT    NOT NULL,
+    body_sha256 BLOB    NOT NULL CHECK(length(body_sha256) = 32),
+    received_at TEXT    NOT NULL,
+    event_row   INTEGER REFERENCES events(id),
+    call_event  INTEGER REFERENCES events(id) ON DELETE SET NULL,
+    quarantine  TEXT    CHECK(quarantine IS NULL OR json_valid(quarantine)),
+    CHECK((quarantine IS NULL) = (event_row IS NOT NULL)),
+    PRIMARY KEY (machine, event_id)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS lifecycle_segments (
+    id          INTEGER PRIMARY KEY,
+    machine     TEXT    NOT NULL,
+    session_id  TEXT    NOT NULL,
+    number      INTEGER NOT NULL,
+    start_key   TEXT    NOT NULL,
+    last_key    TEXT    NOT NULL,
+    received_at TEXT    NOT NULL,
+    counts      TEXT    NOT NULL DEFAULT '{}' CHECK(json_valid(counts)),
+    main_turns  INTEGER NOT NULL DEFAULT 0,
+    final_key   TEXT,
+    final_fact  INTEGER REFERENCES facts(id) ON DELETE SET NULL,
+    ended_by    TEXT    CHECK(ended_by IN ('session_end', 'session_start', 'gap', 'idle')),
+    ended_at    TEXT,
+    UNIQUE (machine, session_id, number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_lifecycle_receipts_event ON lifecycle_receipts(event_row);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_receipts_call ON lifecycle_receipts(call_event);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_receipts_quarantine ON lifecycle_receipts(machine) WHERE quarantine IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_lifecycle_segments_open ON lifecycle_segments(received_at) WHERE ended_by IS NULL;
+CREATE INDEX IF NOT EXISTS idx_lifecycle_segments_final_fact ON lifecycle_segments(final_fact);
+CREATE INDEX IF NOT EXISTS idx_events_mcp_call ON events((CASE WHEN json_valid(payload) THEN json_extract(payload, '$.call') END)) WHERE source = 'mcp';",
+    )
+    .map_err(StorageError::backend)?;
+    Ok(())
+}

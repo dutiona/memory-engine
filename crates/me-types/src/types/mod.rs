@@ -16,6 +16,10 @@ mod facts;
 pub mod forgetting;
 /// Inspection statistics + dump-format DTOs.
 pub mod inspect;
+/// The harness-neutral lifecycle record and ADR-0020 §5's segment rule (#1025).
+///
+/// Namespaced, never flat-re-exported: the vocabulary of one route, not of the engine at large.
+pub mod lifecycle;
 /// `MemoryQuery` — relocated from `me-query` (Wave 2 #816 / S4, sub-PR 3a).
 ///
 /// Private: re-exported as the single canonical path [`crate::types::search::MemoryQuery`]

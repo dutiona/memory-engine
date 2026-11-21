@@ -161,6 +161,15 @@ fn fts_terms(query: &str) -> Option<String> {
     (!terms.is_empty()).then(|| terms.join(" OR "))
 }
 
+/// What a memory is (ADR-0020 §8): a captured one names its source, any other was remembered.
+fn kind(fact: &Fact) -> &'static str {
+    match fact.metadata.get("capture").and_then(Value::as_str) {
+        Some("final_message") => "final message",
+        Some("compaction_summary") => "compaction summary",
+        _ => "remembered",
+    }
+}
+
 fn shape(fact: &Fact, homes: &Homes) -> Result<Value, String> {
     let scope = if Some(fact.scope_id) == homes.user_id {
         "user"
@@ -172,8 +181,7 @@ fn shape(fact: &Fact, homes: &Homes) -> Result<Value, String> {
     let date = fact.t_valid.unwrap_or(fact.t_created);
     Ok(json!({
         "id": fact.id,
-        // Only remembered facts exist before #1025 projects final messages and summaries.
-        "kind": "remembered",
+        "kind": kind(fact),
         "scope": scope,
         "date": date.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         "machine": fact.metadata.get("machine").and_then(Value::as_str),

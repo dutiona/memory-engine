@@ -14,6 +14,7 @@ pub mod erase;
 pub mod events;
 pub mod fact_vectors;
 pub mod facts;
+pub mod lifecycle;
 pub mod lineage;
 pub mod redaction;
 pub mod schema;
@@ -29,7 +30,44 @@ pub use me_storage::{UpcasterRegistry, upcaster};
 
 use chrono::{DateTime, Utc};
 
-use me_types::error::{MemoryError, Result};
+use me_types::error::{MemoryError, Result, StorageError};
+
+/// Map a `rusqlite` failure to the port's error, naming the ones a retry can cure.
+///
+/// A busy or locked database, a full disk, an I/O failure and a file that cannot be opened are
+/// [`StorageError::Unavailable`]; every other failure, a constraint or a trigger's abort included,
+/// is the opaque [`StorageError::Backend`].
+///
+/// # Examples
+///
+/// ```
+/// use me_backend_sqlite::store::classify;
+/// use me_types::error::StorageError;
+/// use rusqlite::ffi;
+///
+/// let busy = rusqlite::Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_BUSY), None);
+/// assert!(matches!(classify(busy), StorageError::Unavailable(_)));
+/// let constraint = rusqlite::Error::SqliteFailure(ffi::Error::new(ffi::SQLITE_CONSTRAINT), None);
+/// assert!(matches!(classify(constraint), StorageError::Backend(_)));
+/// ```
+#[must_use]
+pub fn classify(e: rusqlite::Error) -> StorageError {
+    use rusqlite::ErrorCode::{
+        CannotOpen, DatabaseBusy, DatabaseLocked, DiskFull, SystemIoFailure,
+    };
+
+    match &e {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if matches!(
+                failure.code,
+                DatabaseBusy | DatabaseLocked | DiskFull | SystemIoFailure | CannotOpen
+            ) =>
+        {
+            StorageError::Unavailable(e.to_string())
+        }
+        _ => StorageError::backend(e),
+    }
+}
 
 /// Serialize an embedding (`&[f32]`) to little-endian bytes for `SQLite` BLOB storage.
 #[must_use]
@@ -117,6 +155,41 @@ mod tests {
                 expected: 3,
                 actual: 2
             }
+        ));
+    }
+
+    #[test]
+    fn busy_full_and_io_failures_are_unavailable() {
+        use rusqlite::ffi;
+
+        let failure = |code| rusqlite::Error::SqliteFailure(ffi::Error::new(code), None);
+        for code in [
+            ffi::SQLITE_BUSY,
+            ffi::SQLITE_BUSY_SNAPSHOT,
+            ffi::SQLITE_LOCKED,
+            ffi::SQLITE_FULL,
+            ffi::SQLITE_IOERR,
+            ffi::SQLITE_IOERR_WRITE,
+            ffi::SQLITE_CANTOPEN,
+        ] {
+            assert!(
+                matches!(classify(failure(code)), StorageError::Unavailable(_)),
+                "code {code} must be unavailable"
+            );
+        }
+        for code in [
+            ffi::SQLITE_CONSTRAINT,
+            ffi::SQLITE_CONSTRAINT_TRIGGER,
+            ffi::SQLITE_CORRUPT,
+        ] {
+            assert!(
+                matches!(classify(failure(code)), StorageError::Backend(_)),
+                "code {code} must stay a backend fault"
+            );
+        }
+        assert!(matches!(
+            classify(rusqlite::Error::QueryReturnedNoRows),
+            StorageError::Backend(_)
         ));
     }
 

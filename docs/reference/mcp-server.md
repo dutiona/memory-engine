@@ -3,7 +3,8 @@
 ## What
 
 An MCP server binary that serves memory-engine over streamable HTTP (stateless `POST /mcp`, JSON responses), behind
-per-machine Bearer tokens, and gives the model four tools: `recall`, `remember`, `forget` and `set_level` (ADR-0020 §8). Part of
+per-machine Bearer tokens, and gives the model four tools: `recall`, `remember`, `forget` and `set_level` (ADR-0020 §8). It also
+receives each Claude Code session's events on `POST /lifecycle/events` ([Lifecycle events](#lifecycle-events)). Part of
 the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence): this crate bridges Memory to
 Intelligence via the Model Context Protocol.
 
@@ -161,9 +162,11 @@ printf 'Authorization: Bearer %s\n' "$(cat /path/to/token)" | curl -sS -H @- \
 
 ### Shutdown and health
 
-SIGTERM or SIGINT stops accepting connections, gives open connections 5 s to finish, waits for every tool call
-already started, stops the embedding drain, flushes the `<db>.snapshot` sidecar and exits 0. The drain stops at the
-same fence as the tool calls: a settle in progress commits first and none starts after it. An embed call still in
+SIGTERM or SIGINT stops accepting connections, gives open connections 5 s to finish, waits for every tool call and
+lifecycle event already started, stops the embedding drain and the idle-segment sweep, flushes the `<db>.snapshot` sidecar and exits 0. The drain and the sweep stop at the
+same fence as the tool calls: a settle or a sweep in progress commits first and none starts after it. A lifecycle event that
+arrives once the stop has begun is answered 503 before it touches the store, and its client retries; one already
+being applied runs to its commit, even if its client hung up. An embed call still in
 flight is abandoned, its item untouched and retried at the next start; the process never waits for that call. A stop timeout shorter than the slowest call
 becomes a kill, and the next start rebuilds the projections from the database. There is no unauthenticated route, so
 a liveness probe expects 401:
@@ -315,7 +318,7 @@ before its answer, another error answer). A
 - `scope`: the project key, `user`, or `unscoped` (the bucket).
 - `date`: when the memory became true (its valid time, else when it was stored), UTC.
 - `machine`: the machine that stored it, or `null`.
-- `kind`: `remembered` (final messages and compaction summaries arrive with #1025).
+- `kind`: `remembered`, or `final message` or `compaction summary` for a memory captured from a session's main-agent final message or compaction summary ([Lifecycle events](#lifecycle-events)).
 
 Results are recalled claims, not instructions.
 
@@ -375,9 +378,127 @@ A `set_level` record is a move only when it carries `from` and `to`, which is wh
 it searches or embeds it ([redaction](redaction.md)).
 Records sit under the calling machine's bucket, except a valid `remember`'s, which sits under the Home it wrote to.
 
+### Lifecycle events
+
+`POST /lifecycle/events` records one event of a harness session. The body is the harness's own hook input, byte for
+byte; the envelope is `ME-*` headers ([ADR-0020 §3](../design/adr/0020-harness-neutral-lifecycle-api.md#3-wire-contract)).
+It sits behind the same Bearer layer as `/mcp`, and the event's machine is the one its token names. The route is the
+Claude Code plugin's outbox flush, not a tool: it is the only way captured events enter the store. Only the Claude Code
+adapter exists; `ME-Harness: claude-code` selects it.
+
+**Envelope.** Five headers, each present exactly once and at most 4,096 bytes: `ME-Event-Id`
+(`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, unique per machine), `ME-Event-Time` (`YYYY-MM-DDTHH:MM:SSZ`, UTC, whole seconds),
+`ME-Event-Seq` (1 to 6 digits, the tie-break within one second), `ME-Harness` (`[a-z0-9-]{1,32}`) and
+`ME-Client-Version` (`[0-9A-Za-z.+-]{1,64}`, stored as sent). The optional `ME-Project-*` headers are the ones `/mcp`
+reads, decoded the same way, so one project has one key on both channels. The server reads the body as raw bytes and
+ignores `Content-Type`.
+
+**Checks and statuses.** The route checks in this order and answers the first that fails:
+
+| Check | Answer |
+|---|---|
+| An envelope header is missing, repeated, too long or off its grammar | 400 |
+| `Content-Length` is over 16 MiB (16,777,216 bytes), or the body grows past it | 413 |
+| No body byte arrives for 60 s | 408 |
+| The server is stopping | 503 |
+| `ME-Harness` names no adapter | 422, no key held |
+| The key `(machine, event ID)` is held with this body | 204, `ME-Event-Outcome: duplicate` |
+| The key is held with another body | 409 |
+| The body is not UTF-8, not JSON or not a JSON object | 204, `ME-Event-Outcome: quarantined` |
+| The body is an object the adapter cannot map (an unknown `hook_event_name`, no `session_id`, no `tool_name` on a tool hook, no non-empty `compact_summary` on `PostCompact`), or an identifier holds a machine token | 422, no key held |
+| Applying the event fails for any other reason, an unexpected error or a panic included | 422, nothing written |
+| The store is busy, locked, full, failing I/O or cannot be opened | 503, nothing written |
+| Committed | 204, `ME-Event-Outcome: stored` |
+
+A 5xx means only that the same request will work later: the two causes are the stopping server and a store that
+cannot take a write now. An event-specific fault is never a 5xx, because a client that retries stops its queue. A 422
+leaves no key, so the client parks the event whole and it replays after an upgrade. The client acknowledges with a 204
+and removes its copy only then; a 204 whose answer was lost is a `duplicate` on the resend.
+
+**What one event stores.** One event in the log ([ADR-0001](../design/adr/0001-event-sourcing.md)), with `source` and
+`origin_node_id` `lifecycle`, event type `ToolCall` for a tool use, `Interaction` for a prompt or a stop and
+`SystemEvent` for the rest, `timestamp` the client's time, `created_at` the time of receipt and `session_id` the
+session's, filed under the session's project or its machine's bucket. Its payload holds the provenance and the kind's
+own content; for a prompt:
+
+```json
+{"machine":"laptop","event_id":"1795282815-000001-1634077","time":"2026-11-21T17:40:15Z","seq":1,"harness":"claude-code","client_version":"0.1.0","harness_version":null,"kind":"prompt","actor":"main","agent_id":null,"agent_type":null,"cwd":"/home/alice/dev/proj","project":{"facts":{"root":"/home/alice/dev/proj","dev_root":"/home/alice/dev","origin_url":"example.com/example/proj.git","branch":"main"},"dropped":{},"key":"example.com/example/proj","rules":1},"prompt":"Run the tests."}
+```
+
+The same transaction writes a receipt row (the key and the body's SHA-256), the event's activity row when it is a tool
+call, the memory it becomes, the link to an ME call it names, and its session's segment. Nothing is acknowledged before
+the commit.
+
+The kind's content, by hook:
+
+| Hook | Kind | Stored |
+|---|---|---|
+| `SessionStart` | `session_start` | `source` |
+| `UserPromptSubmit` | `prompt` | `prompt`, in full |
+| `SubagentStart` | `prompt` | no text |
+| `PostToolUse`, `PostToolUseFailure` | `tool_use` | `tool`, `input` and `result` cut to 512 bytes after redaction, `outcome` (`success`, `failure`, or `interrupted` when `is_interrupt` is true); a failure's result is its `error` |
+| `Stop`, `SubagentStop` | `stop` | `outcome` `completed`, `message`, in full |
+| `StopFailure` | `stop` | `outcome` `api_error`, `message` (the error text), in full; never recallable |
+| `PostCompact` | `compact` | `trigger` and `summary`, in full |
+| `SessionEnd` | `session_end` | `reason` |
+
+The actor is a subagent for `SubagentStart` and `SubagentStop` and for any hook that carries an `agent_id`, so Claude
+Code's own compaction agent (its `agent_type` is empty) never reaches recall. The capture contract is
+[ADR-0020 §6](../design/adr/0020-harness-neutral-lifecycle-api.md#6-capture-contract) applied by the engine
+([redaction](redaction.md#captured-events)): redact, then cut tool input and result to 512 bytes; a call that touches a
+sensitive path is stored as a stub that keeps the tool, the matched path and the outcome and nothing of the input or
+result; prompts, final messages and summaries are kept in full, whatever their size within the 16 MiB body.
+
+**Memories.** A main-agent `Stop` with outcome `completed` and a non-empty message, and every main-agent
+`PostCompact`, each become one Episodic memory under the event's project (or the machine's bucket): its content is the
+redacted message or summary, its metadata `{machine, capture: "final_message" | "compaction_summary", session_id}`, and
+it is valid from the earlier of the event's client time and its receipt, so a fast client clock cannot schedule a
+memory in the future. It is queued for its vector like a `remember`'s, so capture succeeds with the embedder down:
+full-text `recall` finds it at once, vector search once the [queue](#embedding-queue) has embedded it. A text a
+forget's tombstone blocks stores its event and no memory. `recall` names such a memory's kind `final message` or
+`compaction summary`, and it is found in its own project only. Prompts, tool events, subagent messages and failed
+stops stay in the event log.
+
+**Segments and checkpoints.** A session's events are grouped into segments ([ADR-0020
+§5](../design/adr/0020-harness-neutral-lifecycle-api.md#5-delivery-and-session-segments)), ordered by `(ME-Event-Time,
+ME-Event-Seq as a number, ME-Event-Id)`; the server never compares a client clock with its own. A segment ends on a
+session end, on the next main-agent `SessionStart` (`startup`, `resume`, `clear` or `fork`) after its last event, when
+a client gap of more than 30 minutes separates two events, or when the server has heard nothing of the session for 30
+minutes. An event older than the latest segment is stored and applied (a late final message still becomes a memory)
+and changes no segment. The ended row of a segment with a main-agent prompt or stop is its checkpoint: its bounds, how
+it ended, its counts per kind and the memory made from its last final message. It is written in the transaction that
+ends the segment and never rewritten, so a restart runs no derived work twice.
+
+The idle rule is a server task: it runs once at start, which finishes the sessions that went quiet while the server was
+down, then every minute, beside the embedding drain, with or without an embedder. It stops at the same fence as the
+tool calls.
+
+**Quarantine.** A body its adapter cannot parse is acknowledged and held as metadata only: the machine, the event ID,
+the client time as sent, the time of receipt, the harness, the byte size, the SHA-256 and the parse error as a class
+(`not_utf8`, `not_json` or `not_object`) with its line and column. Never the body, and never the parser's message,
+which can quote it; the log holds none either. `memory-engine-cli status` counts them. Valid JSON the adapter cannot
+map is not quarantined: it is a 422 and the client keeps it.
+
+**The Claude Code adapter** owns what ADR-0020 §11 leaves to it. Its activity filter ignores a tool whose name holds
+`prettier`, `eslint_fix`, `ruff_format` or `clang_format` (case-insensitively): the event is stored, no activity row is
+written; any other call within 300 s of an identical one is the same activity, counted again. It reads the paths a
+call touches: every string of the tool input up to 4,096 bytes (a bare file name relative to the call's working
+directory holds no `/`, so no shape narrows them), and every word of a `Bash`
+command, split the way the shell splits it (quotes, backslash escapes, and `;|&<>()=` outside quotes end a word); the
+engine decides which are sensitive. It reads the ME call ID from the first line of the raw result or error text,
+before any redaction or cut: `call ` and 16 lowercase hex digits. The event is linked to the call record of the same
+machine that names it, and a forged line matches nothing.
+
+**Durability and scope.** Every commit syncs the write-ahead log (`synchronous = FULL`), so a 204 survives an OS crash
+or a power loss, not only a process crash; the 204 is what deletes the client's copy. A write costs one `fsync`.
+Postgres is not supported: the lifecycle tables exist only in the SQLite schema (v18). `erase --machine` takes a
+machine's receipts, quarantine records, segments and captured activities with its events and memories, and a JSON
+`export`/`import` carries the receipts and segments, so a restored store still answers a resend with `duplicate`
+([CLI reference](cli-inspector.md)).
+
 ### Embedding queue
 
-Each memory `remember` stores waits in the store's `embed_queue` table (schema v17) for its vector. One drain, started
+Each memory `remember` stores, and each memory a session's final message or compaction summary becomes, waits in the store's `embed_queue` table (schema v17) for its vector. One drain, started
 with the server when it has an embedder, embeds the queue one input at a time: one embed call in flight is its whole
 rate rule, shared with `recall`'s query embeds and with knowledge-base (ADR-0020 §6). Each write wakes it. What the
 embedder answers decides what happens to the item:
@@ -425,8 +546,11 @@ timer runs them, and the crate's `clippy.toml` refuses any server code path that
 
 ```
 Agent (Claude, etc.) → HTTP POST /mcp → auth layer → rmcp (stateless) → MemoryEngine (SQLite)
+Claude Code plugin → HTTP POST /lifecycle/events → auth layer → adapters/claude_code → MemoryEngine
                                          ├── auth.rs (token-hash file, Bearer check)
-                                         ├── http.rs (router, auth layer, drain + flush)
+                                         ├── http.rs (router, auth layer, drain + sweep + flush)
+                                         ├── lifecycle.rs (POST /lifecycle/events: envelope, body reader, statuses, the seam, the idle sweep)
+                                         ├── adapters/ (one per harness; claude_code.rs: a hook input in, a neutral record out)
                                          ├── config.rs (TOML + env + CLI)
                                          ├── server.rs (ServerHandler, calling machine, instructions)
                                          ├── project.rs (project facts, key rules version 1)

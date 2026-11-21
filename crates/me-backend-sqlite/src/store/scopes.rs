@@ -1,6 +1,8 @@
 use me_types::error::StorageError;
 use rusqlite::Connection;
 
+use super::classify;
+
 use me_types::error::{ConflictError, MemoryError, Result};
 use me_types::types::ScopeNode;
 
@@ -174,7 +176,7 @@ impl<'a> ScopeStore<'a> {
                     "INSERT OR IGNORE INTO scopes (parent_id, label, depth) VALUES (?1, ?2, ?3)",
                     rusqlite::params![parent_id, segment, depth],
                 )
-                .map_err(StorageError::backend)?;
+                .map_err(classify)?;
 
             // SELECT: get the id (whether just inserted or already existed).
             let id: i64 = self

@@ -31,6 +31,16 @@ use crate::types::NewFact;
 /// per-engine configurable is a documented follow-up (see issue #572 / L10).
 pub const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 
+/// The lifecycle path's one size bound, 16 MiB (ADR-0020 §3).
+///
+/// It is the largest request body `POST /lifecycle/events` takes, and the bound the engine
+/// enforces on a delivery and on the text of a record decoded from one. A prompt, a final
+/// message and a compaction summary are kept in full after redaction, so this is the only size
+/// check a lifecycle record meets: the 1 MiB checks of [`MAX_PAYLOAD_BYTES`] guard every other
+/// write path, not this one. The per-row worst case stays a constant, this bound times a
+/// bounded expansion.
+pub const LIFECYCLE_BODY_BYTES: usize = 16 * 1024 * 1024;
+
 /// Safety cap for the O(N·M) consolidation dedup pass (`compute_dedup`).
 ///
 /// Beyond this many active facts the pass is **skipped and the consolidation watermark

@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
@@ -135,6 +136,60 @@ pub struct FactVectorSnapshot {
     pub embedding: Vec<f32>,
 }
 
+/// One `lifecycle_receipts` row in a snapshot (#1025): a delivery's idempotency key, with the
+/// event it stored or the metadata of the body it quarantined.
+///
+/// A restore keeps the keys, so a client's resend after a restore is still a `duplicate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleReceiptSnapshot {
+    /// The machine the token named.
+    pub machine: String,
+    /// `ME-Event-Id`, as sent.
+    pub event_id: String,
+    /// The SHA-256 of the body: 64 lowercase hex digits.
+    pub body_sha256: String,
+    /// When the server received it.
+    pub received_at: DateTime<Utc>,
+    /// The stored event (FK → `events.id`); `None` for a quarantined body.
+    pub event_row: Option<i64>,
+    /// The ME call record the event's result named (FK → `events.id`).
+    pub call_event: Option<i64>,
+    /// The quarantine record; `None` for a stored event. Exactly one of this and `event_row`.
+    pub quarantine: Option<serde_json::Value>,
+}
+
+/// One `lifecycle_segments` row in a snapshot (#1025): a session segment, whose ended row is
+/// the checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleSegmentSnapshot {
+    /// The row's id, kept by a restore.
+    pub id: i64,
+    /// The machine the session ran on.
+    pub machine: String,
+    /// The session's identifier.
+    pub session_id: String,
+    /// The segment's number within the session, from 1.
+    pub number: i64,
+    /// The order key of its first event, as text.
+    pub start_key: String,
+    /// The order key of its last event, as text.
+    pub last_key: String,
+    /// When the server received the session's latest event.
+    pub received_at: DateTime<Utc>,
+    /// Events per kind.
+    pub counts: serde_json::Value,
+    /// Main-agent prompts and stops: more than 0 makes an ended segment a checkpoint.
+    pub main_turns: i64,
+    /// The order key of its last main-agent final message.
+    pub final_key: Option<String>,
+    /// The memory made from it (FK → `facts.id`).
+    pub final_fact: Option<i64>,
+    /// How it ended; `None` while it is open.
+    pub ended_by: Option<String>,
+    /// When it ended.
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
 /// Complete snapshot of engine state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineSnapshot {
@@ -165,5 +220,13 @@ pub struct EngineSnapshot {
     /// not unforget.
     #[serde(default)]
     pub tombstones: Vec<super::Tombstone>,
+    /// The lifecycle route's receipts (#1025). Absent in pre-v18 snapshots — defaults to empty.
+    /// Without them a restored store would take a resent event twice and lose its quarantine
+    /// count.
+    #[serde(default)]
+    pub lifecycle_receipts: Vec<LifecycleReceiptSnapshot>,
+    /// The lifecycle route's segments (#1025). Absent in pre-v18 snapshots — defaults to empty.
+    #[serde(default)]
+    pub lifecycle_segments: Vec<LifecycleSegmentSnapshot>,
     pub config: BTreeMap<String, String>,
 }

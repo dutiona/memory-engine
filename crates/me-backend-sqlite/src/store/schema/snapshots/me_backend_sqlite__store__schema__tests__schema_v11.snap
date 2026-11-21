@@ -3,7 +3,10 @@ source: crates/me-backend-sqlite/src/store/schema/tests.rs
 expression: schema
 ---
 -- index: idx_activities_dedup
-CREATE INDEX idx_activities_dedup ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);
+CREATE INDEX idx_activities_dedup ON activities(session_id, tool_name, args_hash, outcome_class, scope_id, machine);
+
+-- index: idx_activities_machine
+CREATE INDEX idx_activities_machine ON activities(machine);
 
 -- index: idx_activities_promoted
 CREATE INDEX idx_activities_promoted ON activities(promoted_fact_id);
@@ -40,6 +43,9 @@ CREATE INDEX idx_embed_queue_due ON embed_queue(next_attempt_at) WHERE failed_at
 
 -- index: idx_embedding_spaces_one_active
 CREATE UNIQUE INDEX idx_embedding_spaces_one_active ON embedding_spaces(status) WHERE status = 'active';
+
+-- index: idx_events_mcp_call
+CREATE INDEX idx_events_mcp_call ON events((CASE WHEN json_valid(payload) THEN json_extract(payload, '$.call') END)) WHERE source = 'mcp';
 
 -- index: idx_events_origin_seq
 CREATE INDEX idx_events_origin_seq ON events(origin_node_id, sequence_id);
@@ -92,6 +98,21 @@ CREATE INDEX idx_facts_type ON facts(fact_type);
 -- index: idx_facts_valid
 CREATE INDEX idx_facts_valid ON facts(t_valid, t_invalid);
 
+-- index: idx_lifecycle_receipts_call
+CREATE INDEX idx_lifecycle_receipts_call ON lifecycle_receipts(call_event);
+
+-- index: idx_lifecycle_receipts_event
+CREATE INDEX idx_lifecycle_receipts_event ON lifecycle_receipts(event_row);
+
+-- index: idx_lifecycle_receipts_quarantine
+CREATE INDEX idx_lifecycle_receipts_quarantine ON lifecycle_receipts(machine) WHERE quarantine IS NOT NULL;
+
+-- index: idx_lifecycle_segments_final_fact
+CREATE INDEX idx_lifecycle_segments_final_fact ON lifecycle_segments(final_fact);
+
+-- index: idx_lifecycle_segments_open
+CREATE INDEX idx_lifecycle_segments_open ON lifecycle_segments(received_at) WHERE ended_by IS NULL;
+
 -- index: idx_lineage_wisdom_fact_id
 CREATE UNIQUE INDEX idx_lineage_wisdom_fact_id ON lineage(wisdom_fact_id);
 
@@ -105,7 +126,7 @@ CREATE UNIQUE INDEX idx_scopes_parent_label ON scopes(parent_id, label);
 CREATE INDEX idx_summaries_scope ON summaries(scope_id);
 
 -- table: activities
-CREATE TABLE activities ( id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, tool_name TEXT NOT NULL, args_hash TEXT NOT NULL, args TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(args)), result_summary TEXT, outcome_class TEXT NOT NULL DEFAULT 'success', status TEXT NOT NULL DEFAULT 'recorded' CHECK(status IN ('recorded', 'deduplicated', 'ignored', 'promoted')), occurrence_count INTEGER NOT NULL DEFAULT 1, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), promoted_fact_id INTEGER REFERENCES facts(id) );
+CREATE TABLE activities ( id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, tool_name TEXT NOT NULL, args_hash TEXT NOT NULL, args TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(args)), result_summary TEXT, outcome_class TEXT NOT NULL DEFAULT 'success', status TEXT NOT NULL DEFAULT 'recorded' CHECK(status IN ('recorded', 'deduplicated', 'ignored', 'promoted')), occurrence_count INTEGER NOT NULL DEFAULT 1, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, scope_id INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id), promoted_fact_id INTEGER REFERENCES facts(id), machine TEXT );
 
 -- table: archive_manifest
 CREATE TABLE archive_manifest ( id INTEGER PRIMARY KEY AUTOINCREMENT, pak_path TEXT NOT NULL, created_at TEXT NOT NULL, fact_count INTEGER NOT NULL, edge_count INTEGER NOT NULL, fact_id_min INTEGER NOT NULL, fact_id_max INTEGER NOT NULL, t_created_min TEXT NOT NULL, t_created_max TEXT NOT NULL, size_bytes INTEGER NOT NULL, blake3_hash TEXT NOT NULL );
@@ -148,6 +169,12 @@ CREATE TABLE 'facts_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB);
 
 -- table: facts_fts_idx
 CREATE TABLE 'facts_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID;
+
+-- table: lifecycle_receipts
+CREATE TABLE lifecycle_receipts ( machine TEXT NOT NULL, event_id TEXT NOT NULL, body_sha256 BLOB NOT NULL CHECK(length(body_sha256) = 32), received_at TEXT NOT NULL, event_row INTEGER REFERENCES events(id), call_event INTEGER REFERENCES events(id) ON DELETE SET NULL, quarantine TEXT CHECK(quarantine IS NULL OR json_valid(quarantine)), CHECK((quarantine IS NULL) = (event_row IS NOT NULL)), PRIMARY KEY (machine, event_id) ) WITHOUT ROWID;
+
+-- table: lifecycle_segments
+CREATE TABLE lifecycle_segments ( id INTEGER PRIMARY KEY, machine TEXT NOT NULL, session_id TEXT NOT NULL, number INTEGER NOT NULL, start_key TEXT NOT NULL, last_key TEXT NOT NULL, received_at TEXT NOT NULL, counts TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(counts)), main_turns INTEGER NOT NULL DEFAULT 0, final_key TEXT, final_fact INTEGER REFERENCES facts(id) ON DELETE SET NULL, ended_by TEXT CHECK(ended_by IN ('session_end', 'session_start', 'gap', 'idle')), ended_at TEXT, UNIQUE (machine, session_id, number) );
 
 -- table: lineage
 CREATE TABLE lineage ( lineage_id INTEGER PRIMARY KEY AUTOINCREMENT, wisdom_fact_id INTEGER NOT NULL REFERENCES facts(id) ON DELETE CASCADE, source_fact_ids TEXT NOT NULL CHECK(json_valid(source_fact_ids)), provenance TEXT NOT NULL CHECK(json_valid(provenance)) );

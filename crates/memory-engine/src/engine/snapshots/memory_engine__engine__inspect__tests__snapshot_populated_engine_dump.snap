@@ -2,7 +2,7 @@
 source: src/engine/inspect.rs
 expression: snapshot
 ---
-schema_version: 17
+schema_version: 18
 storage_epoch: 1
 embed_dim: 4
 facts:
@@ -43,4 +43,6 @@ embedding_spaces:
     element_type: float32
 fact_vectors: []
 tombstones: []
+lifecycle_receipts: []
+lifecycle_segments: []
 config: "{}"

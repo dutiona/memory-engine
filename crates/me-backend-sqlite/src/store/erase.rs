@@ -1,6 +1,7 @@
 //! Erasure (#1023): the store's one hard delete, as one transaction's statements.
 //!
-//! [`erase`] is the function #1025, #1026 and #1029 extend with the tables they add:
+//! [`erase`] is the function #1026 and #1029 extend with the tables they add (#1025 added the
+//! lifecycle receipts and segments):
 //! select what the target owns, then delete children before parents, each adding its count
 //! to `deleted`. Every id set is bound as one JSON array, so no erasure meets SQLite's
 //! bound-variable cap.
@@ -40,6 +41,7 @@ fn exec(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<u
 /// What an erasure takes: the bucket's path and subtree (by machine), the machine's events,
 /// and every fact it deletes, wisdom closure included.
 struct Selection {
+    machine: Option<String>,
     bucket: Option<String>,
     subtree: Vec<i64>,
     events: Vec<i64>,
@@ -111,6 +113,10 @@ fn select(conn: &Connection, target: &EraseTarget) -> Result<Selection> {
         params![json_ids(&seed)?],
     )?;
     Ok(Selection {
+        machine: match target {
+            EraseTarget::Machine(machine) => Some(machine.clone()),
+            EraseTarget::Fact(_) => None,
+        },
         bucket,
         subtree,
         events,
@@ -141,8 +147,9 @@ fn delete(conn: &Connection, dim: usize, sel: &Selection) -> Result<BTreeMap<Str
         conn,
         "DELETE FROM activities
          WHERE promoted_fact_id IN (SELECT value FROM json_each(?1))
-            OR scope_id IN (SELECT value FROM json_each(?2))",
-        params![taken_json, json_ids(&sel.subtree)?],
+            OR scope_id IN (SELECT value FROM json_each(?2))
+            OR machine = ?3",
+        params![taken_json, json_ids(&sel.subtree)?, sel.machine],
     )?;
     let checkpoints = match &sel.bucket {
         Some(bucket) => exec(
@@ -152,6 +159,27 @@ fn delete(conn: &Connection, dim: usize, sel: &Selection) -> Result<BTreeMap<Str
             params![bucket],
         )?,
         None => 0,
+    };
+    // A machine's receipts name its events, which go below; a segment names a fact.
+    let (receipts, quarantined, segments) = match &sel.machine {
+        Some(machine) => (
+            exec(
+                conn,
+                "DELETE FROM lifecycle_receipts WHERE machine = ?1 AND quarantine IS NULL",
+                params![machine],
+            )?,
+            exec(
+                conn,
+                "DELETE FROM lifecycle_receipts WHERE machine = ?1 AND quarantine IS NOT NULL",
+                params![machine],
+            )?,
+            exec(
+                conn,
+                "DELETE FROM lifecycle_segments WHERE machine = ?1",
+                params![machine],
+            )?,
+        ),
+        None => (0, 0, 0),
     };
     super::embed_queue::forget_errors_of(conn, &sel.taken)?;
     let facts = FactStore::new(conn, dim).hard_delete_ids(&sel.taken)?;
@@ -172,6 +200,9 @@ fn delete(conn: &Connection, dim: usize, sel: &Selection) -> Result<BTreeMap<Str
         ("edges", edges),
         ("events", events),
         ("facts", facts),
+        ("quarantined", quarantined),
+        ("receipts", receipts),
+        ("segments", segments),
         ("summaries", summaries),
     ]
     .into_iter()

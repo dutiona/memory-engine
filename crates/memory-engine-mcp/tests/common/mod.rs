@@ -97,6 +97,8 @@ struct Setup {
     timeout_secs: Option<u64>,
     /// Provider `llama.cpp`, declaring this `max_input_tokens`, beside a `/tokenize`.
     input_limit: Option<usize>,
+    /// The store's directory is made inside this one, which a test picks to sit on a disk.
+    store_in: Option<PathBuf>,
 }
 
 /// llama-server's `/tokenize`, counting one token per two bytes of `content`.
@@ -107,6 +109,181 @@ impl Respond for HalfByteTokens {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         let tokens = body["content"].as_str().unwrap().len() / 2;
         ResponseTemplate::new(200).set_body_json(json!({ "tokens": vec![0; tokens] }))
+    }
+}
+
+/// AC2's new prefixes, with the rule each placeholder names (#1024).
+pub const AC2: [(&str, &str); 16] = [
+    ("hf_", "huggingface-token"),
+    ("tskey-", "tailscale-key"),
+    ("glpat-", "gitlab-pat"),
+    ("gho_", "github-token"),
+    ("ghu_", "github-token"),
+    ("ghs_", "github-token"),
+    ("ghr_", "github-token"),
+    ("sk_live_", "stripe-key"),
+    ("rk_live_", "stripe-key"),
+    ("npm_", "npm-token"),
+    ("pypi-", "pypi-token"),
+    ("AGE-SECRET-KEY-1", "age-secret-key"),
+    ("xapp-", "slack-token"),
+    ("sbp_", "supabase-token"),
+    ("dckr_pat_", "docker-pat"),
+    ("dop_v1_", "digitalocean-token"),
+];
+
+/// A synthetic token for `prefix`, distinct per `i`.
+#[must_use]
+pub fn ac2_token(i: usize, prefix: &str) -> String {
+    format!("{prefix}{i:02}Zq7Xw3Rt9Lp2Vb6Nm4Kc8Hd")
+}
+
+/// A synthetic machine-token-shaped value.
+#[must_use]
+pub fn machine_token() -> String {
+    format!("me_{}", "Zq7Xw3Rt9Lp2Vb6Nm4Kc8Hd1Fs5Gj0Ay")
+}
+
+#[must_use]
+pub fn ghp() -> String {
+    format!("ghp_{}", "0123456789abcdefghij".repeat(2))
+}
+
+/// No 8-byte window of `secret` appears in `text`.
+#[must_use]
+pub fn holds_no_fragment(text: &str, secret: &str) -> bool {
+    secret
+        .as_bytes()
+        .windows(8)
+        .all(|w| !holds(text.as_bytes(), w))
+}
+
+/// The authenticated machine `name`, as the Bearer layer would produce it.
+#[must_use]
+pub fn machine(name: &str) -> memory_engine_mcp::auth::Machine {
+    let dir = tempfile::tempdir().unwrap();
+    let table = TokenTable::load(&write_token_file(dir.path(), &MACHINES)).unwrap();
+    table
+        .authenticate(format!("Bearer {}", token(name)).as_bytes())
+        .unwrap()
+        .clone()
+}
+
+/// One checked-in hook fixture: the headers the client sent and the hook input, as the outbox
+/// stores them. Each builder method changes a copy, so a test overrides what it needs.
+#[derive(Clone)]
+pub struct Fixture {
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// The names of the checked-in fixtures, sorted.
+#[must_use]
+pub fn fixture_names() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(fixtures_dir())
+        .unwrap()
+        .map(Result::unwrap)
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn fixtures_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude-code-hooks")
+}
+
+/// The fixture `name`.
+#[must_use]
+pub fn fixture(name: &str) -> Fixture {
+    let dir = fixtures_dir().join(name);
+    let headers = std::fs::read_to_string(dir.join("headers")).unwrap();
+    Fixture {
+        headers: headers
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                let (name, value) = l.split_once(": ").unwrap();
+                (name.to_owned(), value.to_owned())
+            })
+            .collect(),
+        body: std::fs::read(dir.join("body")).unwrap(),
+    }
+}
+
+impl Fixture {
+    /// Set header `name`, replacing any value.
+    #[must_use]
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+        self.headers.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    #[must_use]
+    pub fn without(mut self, name: &str) -> Self {
+        self.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+        self
+    }
+
+    #[must_use]
+    pub fn body(mut self, body: impl Into<Vec<u8>>) -> Self {
+        self.body = body.into();
+        self
+    }
+
+    /// Change the hook input's JSON.
+    #[must_use]
+    pub fn json(mut self, edit: impl FnOnce(&mut Value)) -> Self {
+        let mut value: Value = serde_json::from_slice(&self.body).unwrap();
+        edit(&mut value);
+        self.body = serde_json::to_vec(&value).unwrap();
+        self
+    }
+
+    /// The hook input as JSON.
+    #[must_use]
+    pub fn json_value(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap()
+    }
+
+    /// The event ID header.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self
+            .headers
+            .iter()
+            .find(|(n, _)| n == "ME-Event-Id")
+            .unwrap()
+            .1
+    }
+
+    /// The headers as a map, as the route reads them.
+    #[must_use]
+    pub fn header_map(&self) -> axum::http::HeaderMap {
+        let mut map = axum::http::HeaderMap::new();
+        for (name, value) in &self.headers {
+            map.append(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        map
+    }
+}
+
+/// What the route answered one event with.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Posted {
+    pub status: u16,
+    pub outcome: Option<String>,
+}
+
+impl Posted {
+    #[must_use]
+    pub fn is(&self, status: u16, outcome: Option<&str>) -> bool {
+        self.status == status && self.outcome.as_deref() == outcome
     }
 }
 
@@ -141,6 +318,16 @@ impl TestServer {
     pub async fn start_without_embedder() -> Self {
         Self::start_with(Setup {
             without_embedder: true,
+            ..Setup::default()
+        })
+        .await
+    }
+
+    /// A server with no embedder whose store lives in a new directory inside `parent`.
+    pub async fn start_without_embedder_in(parent: &Path) -> Self {
+        Self::start_with(Setup {
+            without_embedder: true,
+            store_in: Some(parent.to_owned()),
             ..Setup::default()
         })
         .await
@@ -185,7 +372,10 @@ impl TestServer {
     }
 
     async fn start_with(setup: Setup) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = setup.store_in.as_deref().map_or_else(
+            || tempfile::tempdir().unwrap(),
+            |parent| tempfile::tempdir_in(parent).unwrap(),
+        );
         let embedder = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))
@@ -528,6 +718,61 @@ impl TestServer {
         );
     }
 
+    /// Post `fixture` to `/lifecycle/events` as `machine`.
+    pub async fn post_event(&self, machine: &str, fixture: &Fixture) -> Posted {
+        let mut request = self
+            .client
+            .post(format!("{}/lifecycle/events", self.url))
+            .bearer_auth(token(machine))
+            .body(fixture.body.clone());
+        for (name, value) in &fixture.headers {
+            request = request.header(name, value);
+        }
+        let response = request.send().await.unwrap();
+        Posted {
+            status: response.status().as_u16(),
+            outcome: response
+                .headers()
+                .get("ME-Event-Outcome")
+                .map(|v| v.to_str().unwrap().to_owned()),
+        }
+    }
+
+    /// The status of a `/lifecycle/events` request whose headers are `fixture`'s and whose body
+    /// is claimed to be `claimed` bytes long and never sent: what the server decides from the
+    /// headers alone.
+    pub async fn status_from_headers(&self, machine: &str, fixture: &Fixture, claimed: u64) -> u16 {
+        use std::fmt::Write as _;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(self.url.trim_start_matches("http://"))
+            .await
+            .unwrap();
+        let mut head = format!(
+            "POST /lifecycle/events HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: {claimed}\r\n",
+            self.url.trim_start_matches("http://"),
+            token(machine)
+        );
+        for (name, value) in &fixture.headers {
+            write!(head, "{name}: {value}\r\n").unwrap();
+        }
+        head.push_str("\r\n");
+        stream.write_all(head.as_bytes()).await.unwrap();
+        let mut answer = vec![0; 12];
+        stream.read_exact(&mut answer).await.unwrap();
+        String::from_utf8(answer[9..12].to_vec())
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// One number from the store, through a second connection.
+    pub fn number(&self, sql: &str) -> i64 {
+        rusqlite::Connection::open(self.db())
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    }
+
     /// Run `sql` on the store through a second connection.
     pub fn sql(&self, sql: &str) {
         rusqlite::Connection::open(self.db())
@@ -772,6 +1017,55 @@ impl ServerProcess {
             .unwrap();
         assert_eq!(response.status(), 200);
         response.json().unwrap()
+    }
+
+    /// Post `fixture` to `/lifecycle/events` as `machine`.
+    pub fn post_event(&self, machine: &str, fixture: &Fixture) -> Posted {
+        let mut request = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap()
+            .post(format!("{}/lifecycle/events", self.url()))
+            .bearer_auth(token(machine))
+            .body(fixture.body.clone());
+        for (name, value) in &fixture.headers {
+            request = request.header(name, value);
+        }
+        let response = request.send().unwrap();
+        Posted {
+            status: response.status().as_u16(),
+            outcome: response
+                .headers()
+                .get("ME-Event-Outcome")
+                .map(|v| v.to_str().unwrap().to_owned()),
+        }
+    }
+
+    /// The status of a `/lifecycle/events` request whose headers are `fixture`'s and whose body
+    /// is claimed to be `claimed` bytes long and never sent: what the server decides from the
+    /// headers alone.
+    pub fn status_from_headers(&self, machine: &str, fixture: &Fixture, claimed: u64) -> u16 {
+        use std::fmt::Write as _;
+        use std::io::{Read, Write};
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut head = format!(
+            "POST /lifecycle/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\nContent-Length: {claimed}\r\n",
+            token(machine)
+        );
+        for (name, value) in &fixture.headers {
+            write!(head, "{name}: {value}\r\n").unwrap();
+        }
+        head.push_str("\r\n");
+        stream.write_all(head.as_bytes()).unwrap();
+        let mut answer = [0; 12];
+        stream.read_exact(&mut answer).unwrap();
+        String::from_utf8(answer[9..12].to_vec())
+            .unwrap()
+            .parse()
+            .unwrap()
     }
 
     /// Wait for the child to exit on its own, at most `timeout`.

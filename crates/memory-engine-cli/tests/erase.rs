@@ -360,7 +360,8 @@ async fn erase_prints_its_copies_and_orphans() {
         .assert()
         .success()
         .stdout(
-            "erased: activities=0 checkpoints=0 edges=1 events=0 facts=1 summaries=0\n\
+            "erased: activities=0 checkpoints=0 edges=1 events=0 facts=1 quarantined=0 receipts=0 \
+             segments=0 summaries=0\n\
              copies left: [4]\n\
              orphaned (still expired): [2]\n",
         );

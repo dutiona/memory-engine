@@ -8,7 +8,8 @@ use rusqlite::Connection;
 
 use me_types::error::{MigrationError, Result};
 
-/// Pragmas safe for read-only connections — skip WAL and synchronous.
+/// Pragmas safe for read-only connections — skip WAL and synchronous (a read-only connection
+/// never commits).
 pub(super) fn set_pragmas_read_only(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
         .map_err(StorageError::backend)?;
@@ -19,7 +20,12 @@ pub(super) fn set_pragmas(conn: &Connection) -> Result<()> {
     set_pragmas_read_only(conn)?;
     // `execute_batch` steps each statement: `journal_mode` takes effect only when stepped,
     // and a bare `query` never steps (#1040).
-    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")
+    //
+    // `FULL`, not `NORMAL`: in WAL mode it syncs the log on every commit, so a write survives an
+    // OS crash or a power loss, not only a process crash. The lifecycle route answers 204 only
+    // after its commit, and the 204 deletes the client's copy of the event, so the 204 must mean
+    // durable.
+    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")
         .map_err(StorageError::backend)?;
     Ok(())
 }

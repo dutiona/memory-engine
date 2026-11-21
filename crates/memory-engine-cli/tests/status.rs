@@ -225,9 +225,10 @@ async fn status_never_migrates_an_older_store() {
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch(
-            "DROP INDEX idx_embed_queue_due;
-             DROP TABLE embed_queue;
-             UPDATE config SET value = '16' WHERE key = 'schema_version';",
+            "DROP TABLE lifecycle_receipts;
+             DROP TABLE lifecycle_segments;
+             DROP INDEX idx_events_mcp_call;
+             UPDATE config SET value = '17' WHERE key = 'schema_version';",
         )
         .unwrap();
     }
@@ -238,7 +239,7 @@ async fn status_never_migrates_an_older_store() {
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains("16").and(predicate::str::contains("17")));
+        .stderr(predicate::str::contains("17").and(predicate::str::contains("18")));
 
     assert_eq!(std::fs::read(&db).unwrap(), before);
     let conn = rusqlite::Connection::open(&db).unwrap();
@@ -249,13 +250,61 @@ async fn status_never_migrates_an_older_store() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(version, "16");
+    assert_eq!(version, "17");
     let tables: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'embed_queue'",
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'lifecycle_receipts'",
             [],
             |r| r.get(0),
         )
         .unwrap();
     assert_eq!(tables, 0, "never migrated");
+}
+
+#[tokio::test]
+async fn status_counts_quarantined_events() {
+    use memory_engine::types::lifecycle::{BodyFault, Delivery, ParseClass, ParseFailure};
+
+    let (_dir, db, mut engine) = store(&[]).await;
+    let now = chrono::Utc::now();
+    for id in ["q1", "q2"] {
+        let delivery = Delivery {
+            machine: "laptop".into(),
+            event_id: id.into(),
+            time: now,
+            seq: 1,
+            harness: "claude-code".into(),
+            client_version: "1.0.0".into(),
+            body_sha256: [1; 32],
+            body_size: 3,
+            received_at: now,
+            home: "unscoped:laptop".into(),
+            provenance: serde_json::json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+        };
+        let fault = BodyFault::Parse(ParseFailure {
+            class: ParseClass::NotJson,
+            line: 1,
+            column: 1,
+        });
+        engine
+            .record_lifecycle_event(&delivery, Err(fault))
+            .await
+            .unwrap();
+    }
+    engine.close().await.unwrap();
+
+    cli(&db)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("lifecycle: 2 quarantined\n"));
+    assert_eq!(
+        stdout_json(cli(&db).args(["--format", "json", "status"]))["quarantined"],
+        2
+    );
+    cli(&db)
+        .args(["--format", "plain", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("quarantined=2\n"));
 }

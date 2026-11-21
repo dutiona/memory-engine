@@ -177,8 +177,10 @@ pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionE
 pub use engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, PromoteAction};
 pub use engine::builder::{File, InMemory, MemoryEngineBuilder};
 pub use engine::embed_queue::{Backoff, Settled, read_embed_queue_status};
+pub use engine::lifecycle::read_quarantined;
 pub use engine::redaction_counts::read_redaction_counts;
 pub use engine::{EngineConfig, MemoryEngine};
+pub use me_types::limits::LIFECYCLE_BODY_BYTES;
 pub use store_lock::{StoreLock, StoreLockError};
 // Explicit re-export of the full `error` public surface (the umbrella
 // `MemoryError` + the `Result` alias + each typed sub-enum). Enumerated rather
@@ -295,7 +297,7 @@ pub use me_types::types::{
 };
 
 // Storage port — tight flat re-export of the umbrella + cross-cutting types only.
-// The six bounded traits (FactGraph, EventLog, …) are the internal port surface
+// The bounded traits (FactGraph, EventLog, …) are the internal port surface
 // backends implement and tests mock; they stay reachable as
 // `memory_engine::storage::FactGraph`, not flat-re-exported, to keep the crate-root
 // namespace honest. (StorageError flat-exports with the error surface above.)
@@ -416,6 +418,11 @@ mod tests {
         let _ = std::mem::size_of::<crate::types::forgetting::ForgetPolicy>();
         let _ = std::mem::size_of::<crate::types::forgetting::PruneStats>();
 
+        // The lifecycle vocabulary is namespaced, never flat: it is reached as `types::lifecycle`
+        // through the blanket `types` re-export, and pinned here for the same reason as above.
+        let _ = std::mem::size_of::<crate::types::lifecycle::OrderKey>();
+        let _ = std::mem::size_of::<crate::types::lifecycle::NeutralRecord>();
+
         // core types
         let _ = std::mem::size_of::<crate::FactType>();
         let _ = std::mem::size_of::<crate::Fact>();
@@ -439,7 +446,7 @@ mod tests {
         // StorageError asserted in the storage-port block below; the `Result`
         // alias is asserted by `_accepts_result` above.
 
-        // storage port cross-cutting types (flat-re-exported; the six bounded
+        // storage port cross-cutting types (flat-re-exported; the bounded
         // traits stay reachable as `crate::storage::FactGraph`, asserted above).
         let _ = std::mem::size_of::<crate::FactFilter>();
         let _ = std::mem::size_of::<crate::TemporalFilter>();

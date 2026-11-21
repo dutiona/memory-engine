@@ -159,6 +159,10 @@ pub struct NewActivity {
     pub outcome_class: OutcomeClass,
     pub timestamp: DateTime<Utc>,
     pub scope_id: i64,
+    /// The machine that captured the call (ADR-0020 §4); `None` for a call the engine was
+    /// handed directly. Part of the dedup key, so two machines never share a row, and what an
+    /// erasure by machine takes the row by.
+    pub machine: Option<String>,
 }
 
 /// A session checkpoint (last-write-wins per `session_id`).

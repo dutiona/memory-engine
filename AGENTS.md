@@ -101,7 +101,7 @@ crates/
   memory-engine/           # L4 facade — src/: engine/ inspect/ resume/ bootstrap/ search/ storage/ lib.rs
   memory-engine-embed/     # HTTP embedding provider + HttpDeltaProposer
   memory-engine-cli/       # inspector binary
-  memory-engine-mcp/       # MCP server: `recall`, `remember`, `forget`, `set_level` (ADR-0020 §8)
+  memory-engine-mcp/       # MCP server: `recall`, `remember`, `forget`, `set_level` (ADR-0020 §8); session events on `POST /lifecycle/events`
   me-test-support/         # dev-only cross-crate test doubles
 tests/     # workspace integration tests    benches/  # Criterion benchmarks
 examples/  # runnable examples               fuzz/     # cargo-fuzz (detached, nightly-only)

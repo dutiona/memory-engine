@@ -22,9 +22,12 @@ struct StatusReport {
     redacted: u64,
     /// Activities stored as sensitive-path stubs, store-wide (#1024).
     stubbed: u64,
+    /// Lifecycle events whose body did not parse, held as metadata only (#1025).
+    quarantined: u64,
 }
 
-/// Report the deferred-embedding queue (#1021) and the redaction counters (#1024).
+/// Report the deferred-embedding queue (#1021), the redaction counters (#1024) and the
+/// quarantined lifecycle events (#1025).
 ///
 /// Reads through one read-only connection: it builds no engine, takes no store lock and
 /// never migrates, so it runs beside a live server. Exits 0 in every queue state; the
@@ -34,6 +37,7 @@ pub fn run(db: &Path, format: OutputFormat) -> anyhow::Result<()> {
     ensure_store_exists(db)?;
     let status = memory_engine::read_embed_queue_status(db)?;
     let counts = memory_engine::read_redaction_counts(db)?;
+    let quarantined = memory_engine::read_quarantined(db)?;
     let time = |t: Option<DateTime<Utc>>| t.map(|t| t.to_rfc3339());
     let report = StatusReport {
         waiting: status.waiting,
@@ -48,6 +52,7 @@ pub fn run(db: &Path, format: OutputFormat) -> anyhow::Result<()> {
         last_error: status.last_error,
         redacted: counts.redacted,
         stubbed: counts.stubbed,
+        quarantined,
     };
 
     match format {
@@ -74,6 +79,7 @@ pub fn run(db: &Path, format: OutputFormat) -> anyhow::Result<()> {
             println!("last_error={}", value(report.last_error.as_deref()));
             println!("redacted={}", report.redacted);
             println!("stubbed={}", report.stubbed);
+            println!("quarantined={}", report.quarantined);
         }
     }
     Ok(())
@@ -111,6 +117,7 @@ fn print_table(report: &StatusReport) {
         "redaction: {} redacted, {} stubbed",
         report.redacted, report.stubbed
     );
+    println!("lifecycle: {} quarantined", report.quarantined);
 }
 
 /// ADR-0020 §10's age: the largest whole unit of minutes, hours or days.

@@ -6,7 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use me_types::error::{MemoryError, Result};
 use me_types::types::{Activity, ActivityStatus, NewActivity, OutcomeClass};
 
-use super::parse_timestamp;
+use super::{classify, parse_timestamp};
 
 /// Store facade for the `activities` table.
 pub struct ActivityStore<'a> {
@@ -20,8 +20,9 @@ impl<'a> ActivityStore<'a> {
 
     /// Insert a new activity or deduplicate against an existing one.
     ///
-    /// Dedup key: `(session_id, tool_name, args_hash, outcome_class)` within
-    /// `dedup_window_secs` of the most recent matching activity.
+    /// Dedup key: `(session_id, tool_name, args_hash, outcome_class, scope_id, machine)` within
+    /// `dedup_window_secs` of the most recent matching activity. A `None` machine matches only
+    /// another `None`.
     ///
     /// Returns `(id, was_deduplicated)`.
     ///
@@ -46,6 +47,7 @@ impl<'a> ActivityStore<'a> {
                    AND args_hash = ?3
                    AND outcome_class = ?4
                    AND scope_id = ?5
+                   AND machine IS ?8
                    AND status IN ('recorded', 'deduplicated', 'promoted')
                    AND julianday(?6) - julianday(last_seen) < ?7 / 86400.0
                  ORDER BY last_seen DESC
@@ -58,6 +60,7 @@ impl<'a> ActivityStore<'a> {
                     activity.scope_id,
                     ts,
                     dedup_window_secs,
+                    activity.machine,
                 ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -75,7 +78,7 @@ impl<'a> ActivityStore<'a> {
                      WHERE id = ?4",
                     params![count + 1, ts, activity.result_summary, existing_id],
                 )
-                .map_err(StorageError::backend)?;
+                .map_err(classify)?;
             return Ok((existing_id, true));
         }
 
@@ -84,8 +87,8 @@ impl<'a> ActivityStore<'a> {
             .execute(
                 "INSERT INTO activities
                  (session_id, tool_name, args_hash, args, result_summary,
-                  outcome_class, status, occurrence_count, first_seen, last_seen, scope_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'recorded', 1, ?7, ?7, ?8)",
+                  outcome_class, status, occurrence_count, first_seen, last_seen, scope_id, machine)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'recorded', 1, ?7, ?7, ?8, ?9)",
                 params![
                     activity.session_id,
                     activity.tool_name,
@@ -95,9 +98,10 @@ impl<'a> ActivityStore<'a> {
                     activity.outcome_class.to_string(),
                     ts,
                     activity.scope_id,
+                    activity.machine,
                 ],
             )
-            .map_err(StorageError::backend)?;
+            .map_err(classify)?;
 
         let id = self.conn.last_insert_rowid();
         Ok((id, false))
@@ -316,6 +320,7 @@ mod tests {
             outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
+            machine: None,
         };
         let (id, deduped) = store.insert_or_dedup(&activity, 300).unwrap();
         assert!(!deduped);
@@ -325,6 +330,39 @@ mod tests {
         assert_eq!(fetched.tool_name, "Read");
         assert_eq!(fetched.occurrence_count, 1);
         assert_eq!(fetched.status, ActivityStatus::Recorded);
+    }
+
+    #[test]
+    fn activities_of_two_machines_never_deduplicate() {
+        let conn = setup();
+        let store = ActivityStore::new(&conn);
+        let from = |machine: Option<&str>| NewActivity {
+            session_id: "same-session".into(),
+            tool_name: "Bash".into(),
+            args_hash: "abc123def456abc123def456abc123de".into(),
+            args: serde_json::json!({"command": "ls"}),
+            result_summary: None,
+            outcome_class: OutcomeClass::Success,
+            timestamp: Utc::now(),
+            scope_id: 1,
+            machine: machine.map(str::to_owned),
+        };
+
+        let (laptop, deduped) = store.insert_or_dedup(&from(Some("laptop")), 300).unwrap();
+        assert!(!deduped);
+        let (desktop, deduped) = store.insert_or_dedup(&from(Some("desktop")), 300).unwrap();
+        assert!(!deduped, "another machine never joins the row");
+        assert_ne!(laptop, desktop);
+        let (none, deduped) = store.insert_or_dedup(&from(None), 300).unwrap();
+        assert!(!deduped, "a keyless call never joins a machine's row");
+        assert!(![laptop, desktop].contains(&none));
+
+        let (again, deduped) = store.insert_or_dedup(&from(Some("laptop")), 300).unwrap();
+        assert!(deduped, "the same machine still does");
+        assert_eq!(again, laptop);
+        let (again, deduped) = store.insert_or_dedup(&from(None), 300).unwrap();
+        assert!(deduped, "so do keyless calls");
+        assert_eq!(again, none);
     }
 
     /// #485 regression guard: the store setup must run with FK enforcement ON. With
@@ -346,6 +384,7 @@ mod tests {
             outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 999_999, // no such scope → FK violation when enforcement is ON
+            machine: None,
         };
         let err = store
             .insert_or_dedup(&activity, 300)
@@ -390,6 +429,7 @@ mod tests {
                 outcome_class: expected.clone(),
                 timestamp: Utc::now(),
                 scope_id: 1,
+                machine: None,
             };
             let (id, deduped) = store.insert_or_dedup(&activity, 300).unwrap();
             assert!(!deduped, "fresh args_hash must not dedup for {expected:?}");
@@ -415,6 +455,7 @@ mod tests {
             outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
+            machine: None,
         };
 
         let (id1, deduped1) = store.insert_or_dedup(&activity, 300).unwrap();
@@ -442,6 +483,7 @@ mod tests {
             outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
+            machine: None,
         };
         let failure = NewActivity {
             outcome_class: OutcomeClass::Error,
@@ -469,6 +511,7 @@ mod tests {
                 outcome_class: OutcomeClass::Success,
                 timestamp: Utc::now(),
                 scope_id: 1,
+                machine: None,
             };
             store.insert_or_dedup(&a, 300).unwrap();
         }
@@ -493,6 +536,7 @@ mod tests {
                 outcome_class: OutcomeClass::Success,
                 timestamp: Utc::now(),
                 scope_id: 1,
+                machine: None,
             };
             store.insert_or_dedup(&a, 300).unwrap();
         }
@@ -521,6 +565,7 @@ mod tests {
             outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
+            machine: None,
         };
         let (id, _) = store.insert_or_dedup(&a, 300).unwrap();
 

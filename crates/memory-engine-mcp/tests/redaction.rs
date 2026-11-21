@@ -3,7 +3,9 @@
 
 mod common;
 
-use common::{TestServer, holds, store_bytes};
+use common::{
+    AC2, TestServer, ac2_token, ghp, holds, holds_no_fragment, machine_token, store_bytes,
+};
 use serde_json::{Value, json};
 
 const ROOT: &str = "ME-Project-Root";
@@ -14,47 +16,6 @@ const ORIGIN: &str = "ME-Project-Origin-Url";
 const LAPTOP_DEV: &str = "/home/alice/perso/dev";
 const P_KEY: &str = "github.com/example/project";
 const P_HOME: &str = "user:alice/project:github.com%2Fexample%2Fproject";
-
-/// AC2's new prefixes, with the rule each placeholder names.
-const AC2: [(&str, &str); 16] = [
-    ("hf_", "huggingface-token"),
-    ("tskey-", "tailscale-key"),
-    ("glpat-", "gitlab-pat"),
-    ("gho_", "github-token"),
-    ("ghu_", "github-token"),
-    ("ghs_", "github-token"),
-    ("ghr_", "github-token"),
-    ("sk_live_", "stripe-key"),
-    ("rk_live_", "stripe-key"),
-    ("npm_", "npm-token"),
-    ("pypi-", "pypi-token"),
-    ("AGE-SECRET-KEY-1", "age-secret-key"),
-    ("xapp-", "slack-token"),
-    ("sbp_", "supabase-token"),
-    ("dckr_pat_", "docker-pat"),
-    ("dop_v1_", "digitalocean-token"),
-];
-
-/// A synthetic token for `prefix`, distinct per `i`.
-fn ac2_token(i: usize, prefix: &str) -> String {
-    format!("{prefix}{i:02}Zq7Xw3Rt9Lp2Vb6Nm4Kc8Hd")
-}
-
-fn machine_token() -> String {
-    format!("me_{}", "Zq7Xw3Rt9Lp2Vb6Nm4Kc8Hd1Fs5Gj0Ay")
-}
-
-fn ghp() -> String {
-    format!("ghp_{}", "0123456789abcdefghij".repeat(2))
-}
-
-/// No 8-byte window of `secret` appears in `text`.
-fn holds_no_fragment(text: &str, secret: &str) -> bool {
-    secret
-        .as_bytes()
-        .windows(8)
-        .all(|w| !holds(text.as_bytes(), w))
-}
 
 fn stored_id(reply: &common::Reply) -> i64 {
     assert!(!reply.is_error, "{reply:?}");

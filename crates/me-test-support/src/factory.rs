@@ -78,8 +78,46 @@ pub trait ConformanceBackend: Send + Sync + 'static {
         be: &Arc<dyn StorageBackend>,
     ) -> me_types::error::Result<()>;
 
+    /// Make every later insert of a lifecycle segment fail, so a delivery faults at its segment
+    /// step, after its event, activity, memory and queue row (the crash-injection seam for the
+    /// all-or-nothing proof). Required, with no default body: the fault is a trigger.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever the backend's `raw_exec` returns on a SQL/backend failure.
+    #[cfg(feature = "test-util")]
+    async fn refuse_segment_inserts(
+        &self,
+        be: &Arc<dyn StorageBackend>,
+    ) -> me_types::error::Result<()>;
+
+    /// A writable, file-backed backend whose store another writer holds locked, with the guard
+    /// that holds it: dropping the guard releases the lock. The backend waits only briefly for
+    /// the lock before it answers that the store is busy.
+    #[cfg(feature = "test-util")]
+    async fn make_contended(&self) -> (Arc<dyn StorageBackend>, Box<dyn Send>);
+
     /// Stable identity for assertion messages.
     fn name(&self) -> &'static str;
+}
+
+/// Holds a write lock on a store from a second pool until it is dropped.
+#[cfg(feature = "test-util")]
+struct WriteLockHeld {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    holder: Option<std::thread::JoinHandle<()>>,
+    _dir: tempfile::TempDir,
+}
+
+#[cfg(feature = "test-util")]
+impl Drop for WriteLockHeld {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(holder) = self.holder.take() {
+            // A panicked holder has nothing left to release.
+            let _ = holder.join();
+        }
+    }
 }
 
 /// The always-on `SQLite` factory (in-memory pool).
@@ -149,6 +187,55 @@ impl ConformanceBackend for SqliteFactory {
         .await
     }
 
+    #[cfg(feature = "test-util")]
+    async fn refuse_segment_inserts(
+        &self,
+        be: &Arc<dyn StorageBackend>,
+    ) -> me_types::error::Result<()> {
+        be.raw_exec(
+            "CREATE TRIGGER refuse_segment_inserts BEFORE INSERT ON lifecycle_segments \
+             BEGIN SELECT RAISE(ABORT, 'segment inserts refused by the conformance battery'); END;",
+        )
+        .await
+    }
+
+    #[cfg(feature = "test-util")]
+    async fn make_contended(&self) -> (Arc<dyn StorageBackend>, Box<dyn Send>) {
+        use me_backend_sqlite::pool::ConnectionPool;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("contended.db");
+        let pool = ConnectionPool::open(&path, DIM, 2, None).expect("open the store");
+        let be: Arc<dyn StorageBackend> = Arc::new(SqliteBackend::from_pool(
+            Arc::new(pool),
+            Arc::new(me_storage::UpcasterRegistry::new()),
+        ));
+        be.raw_exec("PRAGMA busy_timeout = 50")
+            .await
+            .expect("shorten the wait");
+
+        let rival = ConnectionPool::open(&path, DIM, 1, None).expect("open the rival pool");
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (locked, is_locked) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let conn = rival.write();
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .expect("take the write lock");
+            locked.send(()).expect("announce the lock");
+            // A closed channel is the release.
+            let _ = released.recv();
+            conn.execute_batch("ROLLBACK")
+                .expect("release the write lock");
+        });
+        is_locked.recv().expect("the rival took the lock");
+        let hold = WriteLockHeld {
+            release: Some(release),
+            holder: Some(holder),
+            _dir: dir,
+        };
+        (be, Box::new(hold))
+    }
+
     fn name(&self) -> &'static str {
         "sqlite"
     }
@@ -157,7 +244,7 @@ impl ConformanceBackend for SqliteFactory {
 /// The inert Postgres factory.
 ///
 /// #635 fills the `todo!()`s and deletes the `#[ignore]`, once `PgBackend` implements
-/// all six bounded traits and is a full `StorageBackend`; #633 added only its
+/// every bounded trait and is a full `StorageBackend`; #633 added only its
 /// `SchemaManager` + pool + migrations.
 ///
 /// Compiles under `--features backend-postgres` (the bodies typecheck via the never
@@ -188,6 +275,19 @@ impl ConformanceBackend for PgFactory {
         _be: &Arc<dyn StorageBackend>,
     ) -> me_types::error::Result<()> {
         todo!("#635: a PG trigger that refuses event inserts")
+    }
+
+    #[cfg(feature = "test-util")]
+    async fn refuse_segment_inserts(
+        &self,
+        _be: &Arc<dyn StorageBackend>,
+    ) -> me_types::error::Result<()> {
+        todo!("#634: a PG trigger that refuses lifecycle segment inserts")
+    }
+
+    #[cfg(feature = "test-util")]
+    async fn make_contended(&self) -> (Arc<dyn StorageBackend>, Box<dyn Send>) {
+        todo!("#634: a PG store whose write lock another session holds")
     }
 
     fn name(&self) -> &'static str {

@@ -692,11 +692,18 @@ mod capture {
         );
     }
 
+    /// A text over the write limit is never refused: its first window is scrubbed and cut, so
+    /// the excerpt is as redacted as a small one, and the call never deduplicates or promotes.
     #[tokio::test]
-    async fn an_oversized_input_or_result_is_omitted_not_refused() {
+    async fn an_oversized_input_or_result_keeps_a_redacted_excerpt() {
         let s = store();
         let promote = ActivityFilterConfig::new(300, [] as [&str; 0], ["write"]);
-        let huge = "w".repeat(2 * 1024 * 1024);
+        let token = ghp();
+        let huge = format!(
+            "{} {token} {}",
+            "w".repeat(100),
+            "w".repeat(2 * 1024 * 1024)
+        );
         let at = Utc::now();
         let call = || RecordActivityRequest {
             timestamp: at,
@@ -733,32 +740,44 @@ mod capture {
             .unwrap();
         assert_ne!(
             again.activity_id, first.activity_id,
-            "an omitted input never deduplicates, a replay after a restart included"
+            "an oversized input never deduplicates, a replay after a restart included"
         );
-        let literal = request("Write", json!("[omitted: over 1 MiB]"), None);
+        let rows = activities(&engine).await;
+        let excerpt = rows[0].args.as_str().expect("an excerpt of the input");
+        let result = rows[0]
+            .result_summary
+            .as_deref()
+            .expect("an excerpt of the result");
+        for text in [excerpt, result] {
+            assert!(text.len() <= 512, "{}", text.len());
+            assert!(text.contains("[REDACTED:github-pat]"), "{text}");
+            assert!(holds_no_fragment(text, &token), "{text}");
+        }
+        let literal = request("Write", rows[0].args.clone(), None);
         let third = engine
             .record_activity(&literal, None, &promote)
             .await
             .unwrap();
-        assert_ne!(third.activity_id, again.activity_id);
-        let rows = activities(&engine).await;
-        assert_eq!(rows[0].args, json!("[omitted: over 1 MiB]"));
-        assert_eq!(
-            rows[0].result_summary.as_deref(),
-            Some("[omitted: 2097152 bytes]")
+        assert_ne!(
+            third.activity_id, again.activity_id,
+            "a call whose input is the excerpt is another call"
         );
         drop(dir);
     }
 
-    /// An `Other` outcome is tool text like the result: redacted, then cut, and never scanned
-    /// over the write limit.
+    /// An `Other` outcome is tool text like the result: redacted, then cut, and over the write
+    /// limit only its first window is scanned.
     #[tokio::test]
     async fn an_other_outcome_is_redacted_then_cut() {
         let s = store();
         let config = ActivityFilterConfig::default();
         let token = ghp();
         let long = format!("{} {token} {}", "o".repeat(497), "p".repeat(600));
-        let huge = "q".repeat(2 * 1024 * 1024);
+        let huge = format!(
+            "{} {token} {}",
+            "q".repeat(100),
+            "q".repeat(2 * 1024 * 1024)
+        );
         for outcome in [long, huge] {
             let mut req = request(
                 "Bash",
@@ -773,9 +792,10 @@ mod capture {
             panic!("{:?}", rows[0].outcome_class)
         };
         assert!(cut.len() <= 512 && holds_no_fragment(cut, &token), "{cut}");
-        assert_eq!(
-            rows[1].outcome_class,
-            OutcomeClass::Other("[omitted: 2097152 bytes]".into())
-        );
+        let OutcomeClass::Other(cut) = &rows[1].outcome_class else {
+            panic!("{:?}", rows[1].outcome_class)
+        };
+        assert!(cut.len() <= 512 && holds_no_fragment(cut, &token), "{cut}");
+        assert!(cut.contains("[REDACTED:github-pat]"), "{cut}");
     }
 }

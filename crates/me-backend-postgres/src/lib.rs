@@ -18,7 +18,7 @@
 //! logical schema (see the `migrations` module), and the
 //! [`SchemaManager`](me_storage::SchemaManager) lifecycle/identity/config surface. It
 //! is **NOT** a full [`StorageBackend`](me_storage::StorageBackend): the umbrella's
-//! blanket impl requires all six bounded traits, and `PgBackend` implements only
+//! blanket impl requires every bounded trait, and `PgBackend` implements only
 //! `SchemaManager` here. Data CRUD (`FactGraph`/`EventLog`/`ConsolidationStore`/
 //! `SessionStore`) is #634; lexical+vector search (`SearchIndex`, the HNSW vector
 //! index) and the conformance-arm flip are #635. So `PgBackend` cannot back a

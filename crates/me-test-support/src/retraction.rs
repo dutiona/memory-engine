@@ -9,6 +9,7 @@ use me_types::types::{EventFilter, ForgetOutcome, NewFact, UnforgetOutcome};
 
 use super::factory::ConformanceBackend;
 use super::fixtures::{DIM, new_event, new_fact, seed_facts};
+use super::lifecycle::{deliver, key, prompt, vectorless};
 
 /// Two Homes (`h`, `u`), another scope `o`, and the forget's record path.
 struct Homes {
@@ -650,4 +651,128 @@ pub async fn erase_of_a_missing_fact_deletes_nothing<F: ConformanceBackend>(f: &
         "[{}] {err:?}",
         f.name()
     );
+}
+
+/// Two machines' captured deliveries in one project, the same session, tool and arguments:
+/// laptop's two events and a quarantine, desktop's one event and a quarantine.
+async fn seed_lifecycle(be: &Arc<dyn StorageBackend>) {
+    use me_types::types::lifecycle::{CaptureWrite, DeliveryWrite};
+
+    let capture = |machine: &str, id: &str, secs: i64, text: &str, activity: bool| {
+        let mut event = new_event("s");
+        event.payload = serde_json::json!({ "machine": machine });
+        let mut fact = vectorless(text);
+        fact.metadata = serde_json::json!({ "machine": machine });
+        let mut call = new_activity("s", "Bash");
+        call.machine = Some(machine.to_owned());
+        DeliveryWrite::Capture(Box::new(CaptureWrite {
+            home: "project:p".into(),
+            event,
+            fact: Some(fact),
+            activity: activity.then_some((call, 300)),
+            ..prompt("s", key(secs, 1, id))
+        }))
+    };
+    let quarantine = || DeliveryWrite::Quarantine(serde_json::json!({ "size": 3 }));
+    for (machine, id, write) in [
+        (
+            "laptop",
+            "e1",
+            capture("laptop", "e1", 0, "laptop one", true),
+        ),
+        (
+            "laptop",
+            "e2",
+            capture("laptop", "e2", 1, "laptop two", false),
+        ),
+        ("laptop", "q1", quarantine()),
+        (
+            "desktop",
+            "d1",
+            capture("desktop", "d1", 0, "desktop one", true),
+        ),
+        ("desktop", "dq", quarantine()),
+    ] {
+        deliver(be, machine, id, 1, write).await.unwrap();
+    }
+}
+
+/// An erasure by machine takes the machine's lifecycle rows with it: its receipts, stored and
+/// quarantined, its segments, its captured events, memories and queue rows, and the activities
+/// that sit in a project scope. Another machine's stay, its activity for the same session, tool
+/// and arguments included.
+pub async fn erase_machine_takes_its_lifecycle_rows<F: ConformanceBackend>(f: &F) {
+    use me_types::types::lifecycle::{Applied, DeliveryWrite};
+
+    let be = f.make().await;
+    let name = f.name();
+    seed_lifecycle(&be).await;
+    assert_eq!(
+        be.count_activities_by_session("s").await.unwrap(),
+        2,
+        "[{name}] one per machine"
+    );
+
+    let report = erase(&be, EraseTarget::Machine("laptop".into())).await;
+
+    let counts = [
+        ("events", 2),
+        ("facts", 2),
+        ("activities", 1),
+        ("receipts", 2),
+        ("quarantined", 1),
+        ("segments", 1),
+    ];
+    for (kind, n) in counts {
+        assert_eq!(report.deleted[kind], n, "[{name}] {kind}");
+    }
+    for id in ["e1", "e2", "q1"] {
+        let held = deliver(&be, "laptop", id, 1, DeliveryWrite::Check)
+            .await
+            .unwrap();
+        assert_eq!(held, Applied::Absent, "[{name}] laptop's key {id} goes");
+    }
+    for id in ["d1", "dq"] {
+        let held = deliver(&be, "desktop", id, 1, DeliveryWrite::Check)
+            .await
+            .unwrap();
+        assert_eq!(
+            held,
+            Applied::Duplicate,
+            "[{name}] desktop's key {id} stays"
+        );
+    }
+    assert_eq!(
+        be.count_activities_by_session("s").await.unwrap(),
+        1,
+        "[{name}]"
+    );
+    let facts = be.list_active_facts(None).await.unwrap();
+    assert_eq!(
+        facts.iter().map(|f| f.content.as_str()).collect::<Vec<_>>(),
+        ["desktop one"],
+        "[{name}]"
+    );
+    let queue = be
+        .next_embedding(Utc::now() + Duration::days(1))
+        .await
+        .unwrap();
+    assert!(
+        matches!(queue, me_types::types::NextEmbedding::Due(p) if p.content == "desktop one"),
+        "[{name}] laptop's queue rows go"
+    );
+    let captured = EventFilter {
+        source: Some("conformance".into()),
+        ..EventFilter::default()
+    };
+    assert_eq!(
+        be.count_events(&captured).await.unwrap(),
+        1,
+        "[{name}] captured events"
+    );
+    let sweep = be
+        .end_idle_segments(Utc::now() + Duration::days(1), Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(sweep, 1, "[{name}] only desktop's segment is left");
 }

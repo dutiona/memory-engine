@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 use crate::store::facts::FactStore;
 use crate::store::schema::{get_config, set_config};
 use crate::store::{
-    embedding_meta, parse_optional_timestamp, parse_timestamp, serialize_embedding,
+    classify, embedding_meta, parse_optional_timestamp, parse_timestamp, serialize_embedding,
 };
 use me_types::error::{MemoryError, Result, StorageError};
 use me_types::types::{
@@ -48,14 +48,27 @@ pub fn insert_deferred(
     let tx = conn
         .unchecked_transaction()
         .map_err(StorageError::backend)?;
-    let id = FactStore::new(&tx, embed_dim).insert_without_vector(fact)?;
+    let id = queue(&tx, fact, embed_dim, now)?;
+    tx.commit().map_err(StorageError::backend)?;
+    Ok(id)
+}
+
+/// The body of [`insert_deferred`] inside the caller's transaction: the fact row, its queue
+/// row and the dimension record. It starts no transaction, so a caller that commits several
+/// effects together (the lifecycle delivery) owns the commit.
+pub(crate) fn queue(
+    tx: &Transaction,
+    fact: &NewFact,
+    embed_dim: usize,
+    now: DateTime<Utc>,
+) -> Result<i64> {
+    let id = FactStore::new(tx, embed_dim).insert_without_vector(fact)?;
     tx.execute(
         "INSERT INTO embed_queue (fact_id, enqueued_at, next_attempt_at) VALUES (?1, ?2, ?2)",
         params![id, now.to_rfc3339()],
     )
-    .map_err(StorageError::backend)?;
-    embedding_meta::record_dim_if_unknown(&tx, embed_dim)?;
-    tx.commit().map_err(StorageError::backend)?;
+    .map_err(classify)?;
+    embedding_meta::record_dim_if_unknown(tx, embed_dim)?;
     Ok(id)
 }
 

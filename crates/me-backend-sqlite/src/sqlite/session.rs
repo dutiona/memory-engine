@@ -150,6 +150,7 @@ mod tests {
             outcome_class: OutcomeClass::Success,
             timestamp: Utc::now(),
             scope_id: 1,
+            machine: None,
         }
     }
 

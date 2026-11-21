@@ -73,8 +73,9 @@ pub trait Retraction: Send + Sync {
     ///   stays linkable through the erasure record.
     /// - [`EraseTarget::Machine`]: the facts whose `metadata.machine` names it or that sit
     ///   in its bucket subtree, the events whose top-level `payload.machine` names it or that
-    ///   sit there, the facts built on those events, and the bucket's activities and
-    ///   session checkpoints.
+    ///   sit there, the facts built on those events, the bucket's activities and session
+    ///   checkpoints, the activities it captured (wherever they sit), and its lifecycle
+    ///   receipts, quarantine records and segments.
     ///
     /// Both add every wisdom fact whose lineage names a taken fact (transitively), the
     /// summaries naming one, the activities that promoted one, and every incident edge. A

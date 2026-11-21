@@ -3,7 +3,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::store::tombstones;
 use crate::store::{
-    deserialize_embedding, parse_optional_timestamp, parse_timestamp, serialize_embedding,
+    classify, deserialize_embedding, parse_optional_timestamp, parse_timestamp, serialize_embedding,
 };
 use me_storage::ImportOutcome;
 use me_types::error::{ConflictError, MemoryError, Result, StorageError};
@@ -236,7 +236,7 @@ impl<'a> FactStore<'a> {
                     fact.base_importance, // seed importance_score from base importance
                 ],
             )
-            .map_err(StorageError::backend)?;
+            .map_err(classify)?;
         Ok(self.conn.last_insert_rowid())
     }
 

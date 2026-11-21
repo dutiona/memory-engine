@@ -74,6 +74,7 @@ pub fn new_activity(session_id: &str, tool: &str) -> NewActivity {
         outcome_class: OutcomeClass::Success,
         timestamp: Utc::now(),
         scope_id: 1,
+        machine: None,
     }
 }
 

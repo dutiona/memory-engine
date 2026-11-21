@@ -109,13 +109,14 @@ CREATE TABLE IF NOT EXISTS activities (
     first_seen       TEXT    NOT NULL,
     last_seen        TEXT    NOT NULL,
     scope_id         INTEGER NOT NULL DEFAULT 1 REFERENCES scopes(id),
-    promoted_fact_id INTEGER REFERENCES facts(id)
+    promoted_fact_id INTEGER REFERENCES facts(id),
+    machine          TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_activities_session
     ON activities(session_id);
 CREATE INDEX IF NOT EXISTS idx_activities_dedup
-    ON activities(session_id, tool_name, args_hash, outcome_class, scope_id);
+    ON activities(session_id, tool_name, args_hash, outcome_class, scope_id, machine);
 CREATE INDEX IF NOT EXISTS idx_activities_scope_recent
     ON activities(scope_id, last_seen DESC);
 CREATE INDEX IF NOT EXISTS idx_activities_status
@@ -183,6 +184,35 @@ CREATE TABLE IF NOT EXISTS embed_queue (
     last_error      TEXT,
     failed_at       TEXT
 );
+
+CREATE TABLE IF NOT EXISTS lifecycle_receipts (
+    machine     TEXT    NOT NULL,
+    event_id    TEXT    NOT NULL,
+    body_sha256 BLOB    NOT NULL CHECK(length(body_sha256) = 32),
+    received_at TEXT    NOT NULL,
+    event_row   INTEGER REFERENCES events(id),
+    call_event  INTEGER REFERENCES events(id) ON DELETE SET NULL,
+    quarantine  TEXT    CHECK(quarantine IS NULL OR json_valid(quarantine)),
+    CHECK((quarantine IS NULL) = (event_row IS NOT NULL)),
+    PRIMARY KEY (machine, event_id)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS lifecycle_segments (
+    id          INTEGER PRIMARY KEY,
+    machine     TEXT    NOT NULL,
+    session_id  TEXT    NOT NULL,
+    number      INTEGER NOT NULL,
+    start_key   TEXT    NOT NULL,
+    last_key    TEXT    NOT NULL,
+    received_at TEXT    NOT NULL,
+    counts      TEXT    NOT NULL DEFAULT '{}' CHECK(json_valid(counts)),
+    main_turns  INTEGER NOT NULL DEFAULT 0,
+    final_key   TEXT,
+    final_fact  INTEGER REFERENCES facts(id) ON DELETE SET NULL,
+    ended_by    TEXT    CHECK(ended_by IN ('session_end', 'session_start', 'gap', 'idle')),
+    ended_at    TEXT,
+    UNIQUE (machine, session_id, number)
+);
 ";
 
 pub(super) const SCOPES_DDL: &str = "
@@ -247,4 +277,11 @@ CREATE INDEX IF NOT EXISTS idx_events_origin_seq ON events(origin_node_id, seque
 CREATE INDEX IF NOT EXISTS idx_facts_source_event ON facts(source_event_id);
 CREATE INDEX IF NOT EXISTS idx_activities_promoted ON activities(promoted_fact_id);
 CREATE INDEX IF NOT EXISTS idx_embed_queue_due ON embed_queue(next_attempt_at) WHERE failed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_activities_machine ON activities(machine);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_receipts_event ON lifecycle_receipts(event_row);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_receipts_call ON lifecycle_receipts(call_event);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_receipts_quarantine ON lifecycle_receipts(machine) WHERE quarantine IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_lifecycle_segments_open ON lifecycle_segments(received_at) WHERE ended_by IS NULL;
+CREATE INDEX IF NOT EXISTS idx_lifecycle_segments_final_fact ON lifecycle_segments(final_fact);
+CREATE INDEX IF NOT EXISTS idx_events_mcp_call ON events((CASE WHEN json_valid(payload) THEN json_extract(payload, '$.call') END)) WHERE source = 'mcp';
 ";

@@ -21,7 +21,7 @@ use super::MemoryEngine;
 
 /// Compute blake3 hex hash, truncated to 32 chars (128 bits).
 /// Same policy as `FactStore::content_hash`.
-fn args_hash(canonical: &str) -> String {
+pub(super) fn args_hash(canonical: &str) -> String {
     blake3::hash(canonical.as_bytes()).to_hex()[..32].to_string()
 }
 
@@ -70,7 +70,7 @@ impl MemoryEngine {
             &req.touched_paths,
             req.cwd.as_deref(),
         )?;
-        let omitted_result = req.result.is_some() && capture.full_result.is_none();
+        let partly_scanned_result = req.result.is_some() && capture.full_result.is_none();
         if let ActivityFilterDecision::Promote(action) = &mut decision {
             // Scrubbed again after its own 200-byte cut, which can expose a match the result did
             // not hold: the tombstone check below must read the text `add_fact` stores.
@@ -99,6 +99,7 @@ impl MemoryEngine {
             outcome_class: capture.outcome,
             timestamp: req.timestamp,
             scope_id,
+            machine: None,
         };
 
         let (activity_id, was_deduplicated) = self
@@ -116,8 +117,8 @@ impl MemoryEngine {
         // Step 5: Promote (only if new, not deduplicated).
         let (status, promoted_fact_id) = if was_deduplicated {
             (ActivityStatus::Deduplicated, None)
-        } else if capture.stub || omitted_result {
-            // A stub keeps nothing to promote; an omitted result was never scanned.
+        } else if capture.stub || partly_scanned_result {
+            // A stub keeps nothing to promote; a result over the write limit was scanned in part.
             (ActivityStatus::Recorded, None)
         } else if let ActivityFilterDecision::Promote(action) = &decision {
             self.promote_activity(activity_id, action, req, embedder)

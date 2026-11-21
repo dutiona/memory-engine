@@ -100,7 +100,7 @@ Virtual workspace (no root package); the **18 crates live flat under `crates/<cr
 - `bootstrap/` — Parse Claude Code JSONL session logs into historical facts.
 - `inspect/` — Debugging APIs: `explain_fact`, `fact_history`, `replay_events`, `dump_state`, `statistics`.
 
-Sibling crates (flat under `crates/`): `crates/memory-engine-embed/` (HTTP embedding + `HttpDeltaProposer`), `crates/memory-engine-cli/`, `crates/memory-engine-mcp/` (MCP server: `recall`, `remember`, `forget`, `set_level`, ADR-0020 §8). Workspace integration tests in `tests/`, benchmarks in `benches/`, examples in `examples/`, fuzz targets in `fuzz/` (detached, nightly), third-party crates carried with a fix in `vendor/` (path dependencies, not workspace members). The Claude Code plugin is `plugins/memory-engine/` (POSIX `sh`, listed by `.claude-plugin/marketplace.json`; its gate is in AGENTS.md).
+Sibling crates (flat under `crates/`): `crates/memory-engine-embed/` (HTTP embedding + `HttpDeltaProposer`), `crates/memory-engine-cli/`, `crates/memory-engine-mcp/` (MCP server: `recall`, `remember`, `forget`, `set_level`, ADR-0020 §8; session events on `POST /lifecycle/events`). Workspace integration tests in `tests/`, benchmarks in `benches/`, examples in `examples/`, fuzz targets in `fuzz/` (detached, nightly), third-party crates carried with a fix in `vendor/` (path dependencies, not workspace members). The Claude Code plugin is `plugins/memory-engine/` (POSIX `sh`, listed by `.claude-plugin/marketplace.json`; its gate is in AGENTS.md).
 
 ## Conventions
 

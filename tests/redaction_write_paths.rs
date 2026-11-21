@@ -54,6 +54,10 @@ const GATED: &[(&str, &str)] = &[
     ("settle_embedding", "a_recorded_embedder_error_is_redacted"),
     ("record_activity", "tests/activity_stream_test.rs"),
     (
+        "record_lifecycle_event",
+        "a_captured_event_redacts_its_texts",
+    ),
+    (
         "bootstrap_session",
         "tests/bootstrap_test.rs (bootstrap's own pipeline)",
     ),
@@ -197,6 +201,8 @@ const EXEMPT: &[(&str, &str)] = &[
     ("resolve_scope_path", "read"),
     ("read_embed_queue_status", "read"),
     ("read_redaction_counts", "read"),
+    ("read_quarantined", "read"),
+    ("end_idle_segments", "ends segments by time; stores no text"),
     ("open_status_connection", "read"),
     ("load_graph_from_db", "read"),
     ("load_scope_tree", "read"),
@@ -1536,4 +1542,108 @@ async fn consolidation_summaries_are_redacted() {
     }
     let (_dir, db) = store.close().await;
     assert_store_files_clean(db.parent().unwrap(), &c);
+}
+
+/// A captured event (#1025): its prompt, tool input and result, final message and compaction
+/// summary are redacted in the payload, the memories and the activity, and counted.
+#[tokio::test]
+async fn a_captured_event_redacts_its_texts() {
+    use memory_engine::types::lifecycle::{
+        Actor, Content, Delivery, NeutralRecord, Recorded, StopOutcome, ToolOutcome,
+    };
+
+    let c = Canaries::new();
+    let store = Store::new();
+    let now = chrono::Utc::now();
+    let send = |id: &str, content: Content| {
+        let delivery = Delivery {
+            machine: "laptop".into(),
+            event_id: id.into(),
+            time: now,
+            seq: 1,
+            harness: "claude-code".into(),
+            client_version: "1.0.0".into(),
+            body_sha256: [1; 32],
+            body_size: 1,
+            received_at: now,
+            home: "user:u/project:p".into(),
+            provenance: json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+        };
+        let record = NeutralRecord {
+            session_id: "s".into(),
+            actor: Actor::Main,
+            cwd: None,
+            content,
+        };
+        let engine = &store.engine;
+        async move {
+            engine
+                .record_lifecycle_event(&delivery, Ok(record))
+                .await
+                .unwrap()
+        }
+    };
+    let texts = [
+        Content::Prompt {
+            text: Some(c.text()),
+        },
+        Content::ToolUse {
+            tool: "Bash".into(),
+            input: json!({ "command": c.text() }),
+            result: Some(c.text()),
+            outcome: ToolOutcome::Success,
+            paths: vec![],
+            call: None,
+            dedup_window_secs: Some(300),
+        },
+        Content::Stop {
+            outcome: StopOutcome::Completed,
+            message: Some(c.text()),
+        },
+        Content::Compact {
+            trigger: Some("manual".into()),
+            summary: c.text(),
+        },
+    ];
+    for (n, content) in texts.into_iter().enumerate() {
+        let stored = send(&format!("e{n}"), content).await;
+        assert!(matches!(stored, Recorded::Stored { .. }), "{stored:?}");
+    }
+
+    let payloads = events(&store.engine).await;
+    let field = |name: &str| {
+        payloads
+            .iter()
+            .find_map(|p| p.get(name).filter(|v| !v.is_null()))
+            .unwrap_or_else(|| panic!("no payload holds {name}"))
+            .clone()
+    };
+    assert_eq!(field("prompt"), SCRUBBED);
+    assert_eq!(field("result"), SCRUBBED);
+    assert_eq!(field("message"), SCRUBBED);
+    assert_eq!(field("summary"), SCRUBBED);
+    assert_eq!(field("input")["command"], SCRUBBED);
+    let memories: Vec<String> = store
+        .engine
+        .list_active_facts(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|f| f.content)
+        .collect();
+    assert_eq!(memories, [SCRUBBED, SCRUBBED]);
+    let (dir, db) = store.close().await;
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let (args, result): (String, String) = conn
+        .query_row("SELECT args, result_summary FROM activities", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert!(args.contains(SCRUBBED), "{args}");
+    assert_eq!(result, SCRUBBED);
+    drop(conn);
+    // Four secrets in each of five texts: the prompt, the input, the result, the message and
+    // the summary.
+    assert_eq!(read_redaction_counts(&db).unwrap().redacted, 20);
+    assert_store_files_clean(dir.path(), &c);
 }

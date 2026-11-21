@@ -35,15 +35,18 @@
 //!   pak file I/O stays free functions.
 //! - the tombstone store (`tombstones.rs`) → `Retraction`: forget, unforget, the block's
 //!   read, and the gate's `is_forgotten`.
+//! - the lifecycle store (`lifecycle.rs`) → `Lifecycle`: one delivery's receipt, event and
+//!   effects in one transaction, and the idle sweep.
 
 use crate::{
-    ConsolidationStore, EventLog, FactGraph, Retraction, SchemaManager, SearchIndex, SessionStore,
+    ConsolidationStore, EventLog, FactGraph, Lifecycle, Retraction, SchemaManager, SearchIndex,
+    SessionStore,
 };
 
 /// The single persistence handle the engine holds (`Arc<dyn StorageBackend>`).
 ///
-/// A pure aggregation supertrait: any type implementing all seven bounded-context
-/// traits *is* a `StorageBackend` via the blanket impl below — backends never
+/// A pure aggregation supertrait: any type implementing every bounded-context
+/// trait *is* a `StorageBackend` via the blanket impl below — backends never
 /// write `impl StorageBackend`, they implement the parts. The bounded traits stay
 /// what tests mock in isolation (a forgetting test mocks only [`FactGraph`]); this
 /// umbrella is what the engine depends on.
@@ -52,11 +55,18 @@ use crate::{
 /// it is feature-gated and held separately (`Option<Arc<dyn ColdStorage>>`), so
 /// this umbrella's type stays stable across feature sets.
 pub trait StorageBackend:
-    FactGraph + EventLog + SearchIndex + ConsolidationStore + SessionStore + SchemaManager + Retraction
+    FactGraph
+    + EventLog
+    + SearchIndex
+    + ConsolidationStore
+    + SessionStore
+    + SchemaManager
+    + Retraction
+    + Lifecycle
 {
 }
 
-/// Blanket impl: implementing the seven bounded traits is sufficient to be a
+/// Blanket impl: implementing the bounded traits is sufficient to be a
 /// `StorageBackend`. A backend cannot accidentally be "a `StorageBackend` that
 /// forgot to be a `FactGraph`".
 impl<T> StorageBackend for T where
@@ -67,6 +77,7 @@ impl<T> StorageBackend for T where
         + SessionStore
         + SchemaManager
         + Retraction
+        + Lifecycle
 {
 }
 
@@ -85,6 +96,7 @@ mod tests {
     fn _assert_session_obj_safe(_: &dyn SessionStore) {}
     fn _assert_schema_obj_safe(_: &dyn SchemaManager) {}
     fn _assert_retraction_obj_safe(_: &dyn Retraction) {}
+    fn _assert_lifecycle_obj_safe(_: &dyn Lifecycle) {}
     fn _assert_arc(_: std::sync::Arc<dyn StorageBackend>) {}
 
     #[cfg(feature = "archive")]

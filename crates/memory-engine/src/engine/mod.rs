@@ -44,6 +44,7 @@ mod graph;
 mod graph_load;
 mod ingest;
 mod inspect;
+pub(crate) mod lifecycle;
 mod lineage;
 mod outcome;
 mod query;

@@ -117,6 +117,7 @@ paused: no
 last embed success: 2026-11-17T09:12:03+00:00
 last embed error: 2026-11-17T09:10:41+00:00: embedder: embedding endpoint returned 503 Service Unavailable: …
 redaction: 12 redacted, 3 stubbed
+lifecycle: 0 quarantined
 ```
 
 - `waiting`: items not failed, due now or backing off; `oldest`: the age of the oldest of them, in its largest whole
@@ -126,15 +127,16 @@ redaction: 12 redacted, 3 stubbed
 - `last embed success`, `last embed error`: their times (RFC 3339, UTC) and the last error, or `never`.
 - `redaction`: the store-wide totals of secrets redacted on write and of activities stored as sensitive-path stubs
   (#1024, [what they count](redaction.md#counters)).
+- `lifecycle`: the lifecycle events whose body did not parse, held as metadata only (ADR-0020 §3, #1025).
 
-`--format json` prints `{"waiting","oldest_age_secs","failed","paused_since","pause_error","last_success_at","last_error_at","last_error","redacted","stubbed"}`,
+`--format json` prints `{"waiting","oldest_age_secs","failed","paused_since","pause_error","last_success_at","last_error_at","last_error","redacted","stubbed","quarantined"}`,
 each absent value `null`; `--format plain` prints the same keys as `key=value` lines, an absent value empty. Error
 texts come from the embedder, so their control characters are escaped in the table and plain formats. `status` exits 0
 in every queue state; the alarm is in the output.
 
 It builds no engine: it opens one SQLite connection with `SQLITE_OPEN_READ_ONLY` and a 5 s busy timeout, checks that
 the connection is read-only, and checks the schema version without migrating. It takes no lock, so it runs beside a
-live server and a writer and changes nothing. A store below schema v17 has no queue: `status` exits 1 with an error
+live server and a writer and changes nothing. A store below schema v18 has no lifecycle tables and one below v17 has no queue: `status` exits 1 with an error
 naming the migration it needs (a store newer than the binary is refused too), and the store stays as it was.
 
 A store whose facts all wait has no embedding identity yet; its first fact, or the `import` that restored it,
@@ -150,7 +152,9 @@ memory-engine-cli export -o backup.json.gz --export-format json-gz
 memory-engine-cli export -o backup.json.zst --export-format json-zst
 ```
 
-Exports the full engine state. JSON is human-readable; SQLite is a WAL-safe binary copy; compressed formats save space. Every format opens the store read-only, so an export runs against a live store, beside a running server.
+Exports the full engine state. JSON is human-readable; SQLite is a WAL-safe binary copy; compressed formats save space. Every format opens the store read-only, so an export runs against a live store, beside a running server. A JSON export reads every
+collection inside one read transaction, which in WAL mode is one snapshot of the store: an event the running server
+commits while the export runs is in none of them, so a receipt never names an event the export lacks.
 
 #### `import <snapshot>` — Restore from Snapshot
 
@@ -160,6 +164,13 @@ memory-engine-cli --db new-agent.db import backup.json.gz --embed-dim 384
 ```
 
 Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots.
+
+A JSON snapshot carries the lifecycle route's two tables, `lifecycle_receipts` and `lifecycle_segments` (#1025), so a
+restored store keeps its idempotency keys (a client's resend of an event the old store had stored is still a
+`duplicate`), its quarantine count and its segment checkpoints. `import` refuses a snapshot whose receipt names an event
+or a call record the snapshot lacks, holds both an event and a quarantine record or neither, or whose segment names a
+fact it lacks, and a target holding only receipts or segments counts as not empty. A snapshot from before schema v18 has
+no such sections and loads as it did. The `activities` table is outside the snapshot, as before.
 
 #### `batch-ingest` — Bulk Fact Loading from JSONL
 
@@ -264,14 +275,18 @@ The one operation that deletes (ADR-0020 §8, #1023). Exactly one target:
   `unscoped:<name>` bucket or below it, user-level facts it stamped included; the events whose top-level
   `payload.machine` is the name or that sit there; the facts built on those events; the bucket's activities, and the
   session checkpoints whose `scope_path` is the bucket or below it (a checkpoint with no `scope_path`, or an activity
-  of its sessions filed elsewhere, is not taken: neither carries a machine).
+  of its sessions filed elsewhere, is not taken: neither carries a machine). It also takes what the lifecycle route
+  captured for the machine (#1025): its receipts, counted apart as `receipts` (events it stored) and `quarantined`
+  (bodies it could not parse), its `segments`, and the activities of its captured tool calls, which sit in a project
+  scope the bucket rule does not reach. The captured events and memories go with it through `payload.machine`,
+  `metadata.machine` and their source events.
 
 Both also take every wisdom fact derived from a taken fact, the summaries naming one, the activities that promoted
 one, every incident edge, and the embedding queue's last error and pause error when a taken fact's attempt left them
 (an embedder may echo its input; their times stay, and so does a pause), in one transaction. A forgotten fact's
 tombstone keeps its hash and loses its reason, so the content stays blocked from re-import; an erased fact that was
 never forgotten can come back from a source that still holds it. Expired facts a taken fact had replaced are listed as `orphaned` and stay expired; facts left with the
-same content are listed as `copies`. Output: `erased: activities=0 checkpoints=0 edges=2 events=0 facts=1 summaries=0`
+same content are listed as `copies`. Output: `erased: activities=0 checkpoints=0 edges=2 events=0 facts=1 quarantined=0 receipts=0 segments=0 summaries=0`
 (every kind, so a new table needs no CLI change) and the copies and orphans when there are any; the JSON report; or one
 `kind=N` per line.
 
