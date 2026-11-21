@@ -602,3 +602,878 @@ async fn an_upload_redacts_with_the_author_denylist() {
     );
     assert!(facts.iter().all(|f| !f.contains("verbose")));
 }
+
+// ── The acceptance (#1026) ───────────────────────────────────────────────────
+
+/// The project facts of the upload's manifest row, as a session of that project sends them.
+fn project_session() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("ME-Project-Root", b"/work/fixture/p".to_vec()),
+        ("ME-Project-Dev-Root", b"/work/fixture".to_vec()),
+        (
+            "ME-Project-Origin-Url",
+            b"https://example.com/example/p.git".to_vec(),
+        ),
+    ]
+}
+
+fn other_project() -> Vec<(&'static str, Vec<u8>)> {
+    vec![(
+        "ME-Project-Origin-Url",
+        b"https://example.com/example/q.git".to_vec(),
+    )]
+}
+
+/// What `recall` of `query` finds for a session with `facts`: each result's content and kind.
+async fn recall(
+    server: &TestServer,
+    facts: &[(&'static str, Vec<u8>)],
+    query: &str,
+) -> Vec<(i64, String, String)> {
+    let borrowed: Vec<(&str, &[u8])> = facts.iter().map(|(n, v)| (*n, v.as_slice())).collect();
+    let reply = server
+        .tool_with("laptop", &borrowed, "recall", json!({ "query": query }))
+        .await;
+    assert!(!reply.is_error, "{reply:?}");
+    let mut found: Vec<(i64, String, String)> = reply.json()["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["id"].as_i64().unwrap(),
+                r["content"].as_str().unwrap().to_owned(),
+                r["kind"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// The imported events' payloads, in order-key order.
+fn imported_events(server: &TestServer) -> Vec<Value> {
+    let conn = rusqlite::Connection::open(server.db()).unwrap();
+    let payloads: Vec<String> = conn
+        .prepare(
+            "SELECT payload FROM events WHERE source = 'backfill' ORDER BY timestamp,
+                    CAST(json_extract(payload, '$.seq') AS INTEGER),
+                    json_extract(payload, '$.event_id')",
+        )
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    payloads
+        .iter()
+        .map(|p| serde_json::from_str(p).unwrap())
+        .collect()
+}
+
+/// Every table's row count, and the facts' summed access counts.
+fn table_counts(server: &TestServer) -> Vec<(String, i64)> {
+    let conn = rusqlite::Connection::open(server.db()).unwrap();
+    let names: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let mut counts: Vec<(String, i64)> = names
+        .into_iter()
+        .map(|name| {
+            let n = conn
+                .query_row(&format!("SELECT COUNT(*) FROM \"{name}\""), [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            (name, n)
+        })
+        .collect();
+    counts.push((
+        "access_count".into(),
+        server.number("SELECT COALESCE(SUM(access_count), 0) FROM facts"),
+    ));
+    counts
+}
+
+/// One transcript line of session `s`, at `time`, with `rest`.
+fn entry(uuid: &str, kind: &str, time: &str, cwd: &str, rest: &Value) -> String {
+    let mut entry = json!({
+        "type": kind, "uuid": uuid, "timestamp": time, "sessionId": "s",
+        "cwd": cwd, "version": "2.1.310",
+    });
+    entry
+        .as_object_mut()
+        .unwrap()
+        .extend(rest.as_object().unwrap().clone());
+    entry.to_string()
+}
+
+/// A transcript of one turn: a prompt, a tool call and its result, a final message, a summary.
+fn one_turn(prefix: &str, cwd: &str, text: &dyn Fn(&str) -> String) -> Vec<u8> {
+    let at = |s: u32| format!("2026-03-19T10:00:0{s}.000Z");
+    let lines = [
+        entry(
+            &format!("{prefix}1"),
+            "user",
+            &at(0),
+            cwd,
+            &json!({ "message": { "content": text("prompt") } }),
+        ),
+        entry(
+            &format!("{prefix}2"),
+            "assistant",
+            &at(1),
+            cwd,
+            &json!({ "message": { "id": format!("{prefix}m1"), "content": [
+            { "type": "tool_use", "id": format!("{prefix}t"), "name": "Bash", "input": { "command": text("input") } },
+        ], "stop_reason": "tool_use" } }),
+        ),
+        entry(
+            &format!("{prefix}3"),
+            "user",
+            &at(2),
+            cwd,
+            &json!({ "message": { "content": [
+            { "type": "tool_result", "tool_use_id": format!("{prefix}t"), "content": text("result") },
+        ] } }),
+        ),
+        entry(
+            &format!("{prefix}4"),
+            "assistant",
+            &at(3),
+            cwd,
+            &json!({ "message": { "id": format!("{prefix}m2"), "content": [
+            { "type": "text", "text": text("final") },
+        ], "stop_reason": "end_turn" } }),
+        ),
+        entry(
+            &format!("{prefix}5"),
+            "user",
+            &at(4),
+            cwd,
+            &json!({ "isCompactSummary": true, "message": { "content": text("summary") } }),
+        ),
+    ];
+    let mut body = lines.join("\n");
+    body.push('\n');
+    body.into_bytes()
+}
+
+/// An uploaded transcript is imported as if captured live: every event in the log, in order,
+/// with its outcome, tool I/O cut to 512 bytes, and the final messages and the summary
+/// recalled in their project, never in another.
+#[tokio::test]
+async fn a_transcript_imports_as_if_captured_live() {
+    let server = TestServer::start_with_denylist(&[]).await;
+
+    let (_, write) = dry_run_then_write(&server, &Upload::transcript()).await;
+
+    let events = imported_events(&server);
+    let seen: Vec<String> = events
+        .iter()
+        .map(|p| {
+            let outcome = p["outcome"]
+                .as_str()
+                .map(|o| format!(" {o}"))
+                .unwrap_or_default();
+            let tool = p["tool"]
+                .as_str()
+                .map(|t| format!(" {t}"))
+                .unwrap_or_default();
+            format!("{}{tool}{outcome}", p["kind"].as_str().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            "prompt",
+            "tool_use Bash success",
+            "tool_use Read failure",
+            "tool_use Read success",
+            "tool_use mcp__me__recall success",
+            "stop completed",
+            "prompt",
+            "tool_use Bash interrupted",
+            "prompt",
+            "tool_use Grep success",
+            "prompt",
+            "stop api_error",
+            "prompt",
+            "stop completed",
+            "compact",
+            "prompt",
+            "stop completed",
+            "prompt",
+            "tool_use Task success",
+            "stop completed",
+            "prompt",
+        ]
+    );
+    assert_eq!(write["events"]["stored"], 21, "{write}");
+    assert_eq!(write["events"]["duplicate"], 1, "the forked entry");
+    assert_eq!(write["events"]["pending"], 1);
+    assert_eq!(write["census"]["incomplete_turn"], 4);
+    for payload in events.iter().filter(|p| p["kind"] == "tool_use") {
+        assert!(payload["input"].to_string().len() <= 512 + 2, "{payload}");
+        assert!(payload["result"].as_str().is_none_or(|r| r.len() <= 512));
+        assert_eq!(
+            payload["source"],
+            Value::Null,
+            "the payload is live capture's"
+        );
+        assert_eq!(payload["machine"], "laptop");
+    }
+    // Once embedded (the mock gives every text one vector), recall finds every memory of the
+    // project, and none from another project or a keyless session.
+    server.wait_drained().await;
+    let mut kinds: Vec<String> = recall(&server, &project_session(), "flag")
+        .await
+        .into_iter()
+        .map(|(_, _, kind)| kind)
+        .collect();
+    kinds.sort();
+    assert_eq!(
+        kinds,
+        [
+            "compaction summary",
+            "final message",
+            "final message",
+            "final message",
+            "final message"
+        ]
+    );
+    assert_eq!(recall(&server, &other_project(), "flag").await.len(), 0);
+    assert!(
+        recall(&server, &[], "flag").await.is_empty(),
+        "a keyless session"
+    );
+}
+
+/// Facts are filed under the key the upload's project facts derive: the remote's, else the path
+/// key `<machine>:<path>` below the dev root, else the machine's bucket.
+#[tokio::test]
+async fn facts_are_filed_under_the_uploads_key() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let memory = || Upload::memory("feedback_tests_first.md", "2026-03-20T08:00:00Z");
+    let cases = [
+        (memory(), "user:alice/project:example.com%2Fexample%2Fp"),
+        (
+            memory().without("ME-Project-Origin-Url"),
+            "user:alice/project:laptop%3Ap",
+        ),
+        (
+            memory()
+                .without("ME-Project-Origin-Url")
+                .without("ME-Project-Root")
+                .without("ME-Project-Dev-Root"),
+            "unscoped:laptop",
+        ),
+    ];
+    for (upload, home) in cases {
+        let (_, write) = dry_run_then_write(&server, &upload).await;
+        assert_eq!(write["project"]["home"], home, "{write}");
+        assert_eq!(write["facts"]["items"][0]["home"], home);
+        let scope = server.engine.resolve_scope_path(home).unwrap();
+        let filed = server.number(&format!(
+            "SELECT COUNT(*) FROM facts WHERE scope_id = {scope}"
+        ));
+        assert_eq!(filed, 1, "{home}");
+    }
+}
+
+/// Redaction applies to every text an upload stores: placeholders stored and counted, and no
+/// canary, nor the denylist literal, in the store's files or in the report.
+#[tokio::test]
+async fn redaction_applies_to_every_imported_text() {
+    let server = TestServer::start_with_denylist(&["fixturehost"]).await;
+    let aws = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+    let ghp = common::ghp();
+    let text = |what: &str| format!("{what} {aws} {ghp} on fixturehost");
+    let body = one_turn("r", &format!("/work/fixturehost/{aws}"), &text);
+    let transcript = Upload::transcript().body(body);
+    let memory = Upload::memory("user_role.md", "2026-03-20T08:00:00Z").body(format!(
+        "---\nname: x\nmetadata:\n  type: user\n---\n{}\n",
+        text("memory")
+    ));
+
+    let mut reports = Vec::new();
+    for upload in [transcript, memory] {
+        let (dry, write) = dry_run_then_write(&server, &upload).await;
+        reports.push(dry);
+        reports.push(write);
+    }
+
+    let placeholders = &reports[1]["redaction"]["placeholders"];
+    for rule in ["aws-access-key", "github-pat", "denylist"] {
+        assert!(
+            placeholders[rule].as_u64().unwrap() >= 5,
+            "{rule}: {placeholders}"
+        );
+    }
+    assert!(reports[1]["redaction"]["found"].as_u64().unwrap() >= 15);
+    let events = imported_events(&server);
+    assert_eq!(
+        events[0]["prompt"],
+        "prompt [REDACTED:aws-access-key] [REDACTED:github-pat] on [REDACTED:denylist]"
+    );
+    assert_eq!(
+        events[0]["cwd"],
+        "/work/[REDACTED:denylist]/[REDACTED:aws-access-key]"
+    );
+    for canary in [aws.as_str(), ghp.as_str(), "fixturehost"] {
+        for report in &reports {
+            assert!(
+                !report.to_string().contains(canary),
+                "the report holds {canary}"
+            );
+        }
+        for (name, bytes) in store_bytes(&server) {
+            assert!(!holds(&bytes, canary.as_bytes()), "{name} holds {canary}");
+        }
+    }
+}
+
+/// A call that touches a sensitive path is a stub: its tool, path, outcome and time, and
+/// nothing of its input or result.
+#[tokio::test]
+async fn a_sensitive_path_call_is_a_stub() {
+    let server = TestServer::start_with_denylist(&[]).await;
+
+    let (dry, write) = dry_run_then_write(&server, &Upload::transcript()).await;
+
+    let stub = imported_events(&server)
+        .into_iter()
+        .find(|p| p["input"]["sensitive_path"].is_string())
+        .expect("a stub");
+    assert_eq!(stub["tool"], "Read");
+    assert_eq!(
+        stub["input"],
+        json!({ "sensitive_path": "/work/fixture/p/.env" })
+    );
+    assert_eq!(stub["result"], Value::Null);
+    assert_eq!(stub["outcome"], "success");
+    assert_eq!(
+        dry["stubs"],
+        json!([{ "tool": "Read", "path": "/work/fixture/p/.env", "time": "2026-03-19T10:00:05Z" }])
+    );
+    assert_eq!(write["redaction"]["stubbed"], 1);
+    for (name, bytes) in store_bytes(&server) {
+        assert!(
+            !holds(&bytes, b"FIXTURE_MODE"),
+            "{name} holds the file's content"
+        );
+    }
+}
+
+/// With the embedder down an upload stores and queues its memories: full-text recall finds them
+/// at once, and the drain gives them their vectors once the embedder is up.
+#[tokio::test]
+async fn an_upload_with_the_embedder_down_stores_and_queues() {
+    let mut server = TestServer::start_unreachable_with_denylist(&[]).await;
+
+    let (_, write) = dry_run_then_write(&server, &Upload::transcript()).await;
+
+    assert_eq!(write["facts"]["created"], 5, "{write}");
+    assert_eq!(server.number("SELECT COUNT(*) FROM embed_queue"), 5);
+    let found = recall(&server, &project_session(), "flag").await;
+    assert_eq!(
+        found.len(),
+        3,
+        "full-text recall, the embedder down: {found:?}"
+    );
+    server.bring_embedder_up().await;
+    server.wait_drained().await;
+    for (id, _, _) in found {
+        assert!(server.has_vector(id).await, "fact {id}");
+    }
+}
+
+/// The same file again, of either kind, adds no row and reinforces nothing.
+#[tokio::test]
+async fn re_uploading_the_same_file_adds_no_rows() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let uploads = [
+        Upload::transcript(),
+        Upload::memory("feedback_tests_first.md", "2026-03-20T08:00:00Z"),
+    ];
+    for upload in &uploads {
+        dry_run_then_write(&server, upload).await;
+    }
+    server.wait_drained().await;
+    let before = table_counts(&server);
+
+    for upload in &uploads {
+        let (dry, write) = dry_run_then_write(&server, upload).await;
+        assert_eq!(dry["events"]["stored"], 0, "{dry}");
+        assert_eq!(write["facts"]["items"], json!([]));
+    }
+
+    assert_eq!(table_counts(&server), before);
+}
+
+/// A forgotten fact stays absent: neither the same file again nor another file holding the same
+/// text brings it back.
+#[tokio::test]
+async fn a_forgotten_fact_stays_absent_after_its_source_is_re_uploaded() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    dry_run_then_write(&server, &Upload::transcript()).await;
+    let text = "A terminal showing the new --verbose flag.";
+    let (id, _, _) = recall(&server, &project_session(), "terminal")
+        .await
+        .into_iter()
+        .find(|(_, content, _)| content == text)
+        .expect("the final message is recalled");
+    let facts = project_session();
+    let borrowed: Vec<(&str, &[u8])> = facts.iter().map(|(n, v)| (*n, v.as_slice())).collect();
+    let reply = server
+        .tool_with(
+            "laptop",
+            &borrowed,
+            "forget",
+            json!({ "id": id, "reason": "wrong" }),
+        )
+        .await;
+    assert!(!reply.is_error, "{reply:?}");
+
+    let (again, _) = dry_run_then_write(&server, &Upload::transcript()).await;
+    assert_eq!(
+        again["facts"]["items"],
+        json!([]),
+        "the same file: all duplicates"
+    );
+    let copy = one_turn("f", "/work/fixture/p", &|what| {
+        if what == "final" {
+            text.to_owned()
+        } else {
+            format!("a {what}")
+        }
+    });
+    let (other, _) = dry_run_then_write(&server, &Upload::transcript().body(copy)).await;
+    let outcomes: Vec<(&str, &str)> = other["facts"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["capture"].as_str().unwrap(),
+                f["outcome"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("final_message", "blocked"),
+            ("compaction_summary", "created")
+        ]
+    );
+    assert!(
+        recall(&server, &project_session(), "terminal")
+            .await
+            .iter()
+            .all(|(_, content, _)| content != text)
+    );
+}
+
+/// A copy of a session that grew since the last upload adds only its new entries.
+#[tokio::test]
+async fn a_grown_transcript_adds_only_its_new_entries() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let file = transcript();
+    let text = std::str::from_utf8(&file).unwrap();
+    let mut head: String = text.lines().take(30).collect::<Vec<_>>().join("\n");
+    head.push('\n');
+
+    let (_, first) = dry_run_then_write(&server, &Upload::transcript().body(head)).await;
+    let (grown, _) = dry_run_then_write(&server, &Upload::transcript()).await;
+
+    let stored = first["events"]["stored"].as_u64().unwrap();
+    assert_eq!(
+        grown["events"]["duplicate"].as_u64().unwrap(),
+        stored + 1,
+        "and the fork"
+    );
+    assert_eq!(
+        stored + grown["events"]["stored"].as_u64().unwrap(),
+        21,
+        "every event once"
+    );
+    assert_eq!(imported_events(&server).len(), 21);
+}
+
+/// A session the plugin captured live imports only what came before its first live event.
+#[tokio::test]
+async fn a_session_captured_live_imports_only_what_came_before() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    for (name, time) in [
+        ("user-prompt-submit", "2026-03-19T10:51:00Z"),
+        ("stop", "2026-03-19T10:51:03Z"),
+    ] {
+        let live = fixture(name)
+            .header("ME-Event-Time", time)
+            .header("ME-Event-Seq", "000001")
+            .json(|b| b["session_id"] = json!(SESSION));
+        assert!(
+            server
+                .post_event("laptop", &live)
+                .await
+                .is(204, Some("stored"))
+        );
+    }
+
+    let (dry, _) = dry_run_then_write(&server, &Upload::transcript()).await;
+
+    let session = dry["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == SESSION)
+        .unwrap()
+        .clone();
+    assert_eq!(session["live_since"], "2026-03-19T10:51:00Z");
+    assert_eq!(dry["events"]["live_overlap"], 8, "{dry}");
+    let times: Vec<String> = imported_events(&server)
+        .iter()
+        .map(|p| p["time"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(times.len(), 13);
+    assert!(
+        times.iter().all(|t| t.as_str() <= "2026-03-19T10:51:00Z"),
+        "{times:?}"
+    );
+}
+
+/// A parent and its subagent file store the same events, order keys and memories whichever is
+/// uploaded first.
+#[tokio::test]
+async fn a_parent_and_its_subagent_file_store_the_same_in_either_order() {
+    let parent = Upload::transcript();
+    let child = Upload::transcript().header(
+        "ME-Backfill-Source",
+        &format!("projects/-work-fixture-p/{SESSION}/subagents/agent-a3c91f2.jsonl"),
+    );
+    let child = child.body(subagent());
+    let mut stored = Vec::new();
+    for order in [[&parent, &child], [&child, &parent]] {
+        let server = TestServer::start_with_denylist(&[]).await;
+        for upload in order {
+            dry_run_then_write(&server, upload).await;
+        }
+        let mut events: Vec<(String, String, u64, String, String)> = imported_events(&server)
+            .iter()
+            .map(|p| {
+                (
+                    p["event_id"].as_str().unwrap().to_owned(),
+                    p["time"].as_str().unwrap().to_owned(),
+                    p["seq"].as_u64().unwrap(),
+                    p["kind"].as_str().unwrap().to_owned(),
+                    p["actor"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        events.sort();
+        let conn = rusqlite::Connection::open(server.db()).unwrap();
+        let mut facts: Vec<(String, String)> = conn
+            .prepare("SELECT content, t_created FROM facts")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        facts.sort();
+        stored.push((events, facts));
+    }
+    assert_eq!(stored[0].0.len(), 21 + 3);
+    assert_eq!(stored[0], stored[1]);
+}
+
+/// A native auto-memory file in the `my-dotfiles#134` format imports correctly: its type, its
+/// Home, its metadata, its date by priority, found by `recall`; the index is skipped and a
+/// `user` memory carries the `set_level` hint.
+#[tokio::test]
+async fn a_native_auto_memory_file_imports_correctly() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let mtime = "2026-03-20T08:00:00Z";
+    let home = "user:alice/project:example.com%2Fexample%2Fp";
+    let cases = [
+        (
+            "user_role.md",
+            "Semantic",
+            mtime,
+            "created",
+            Some("set_level"),
+        ),
+        (
+            "feedback_tests_first.md",
+            "Procedural",
+            mtime,
+            "created",
+            None,
+        ),
+        (
+            "feedback_red_before_green.md",
+            "Procedural",
+            mtime,
+            "reinforced",
+            None,
+        ),
+        (
+            "project_release_2026_03_14.md",
+            "Episodic",
+            "2026-03-14T00:00:00Z",
+            "created",
+            None,
+        ),
+        (
+            "reference_fixture_docs.md",
+            "Semantic",
+            "2026-02-01T09:00:00Z",
+            "created",
+            None,
+        ),
+    ];
+    for (name, fact_type, date, outcome, hint) in cases {
+        let (_, write) = dry_run_then_write(&server, &Upload::memory(name, mtime)).await;
+        let item = &write["facts"]["items"][0];
+        assert_eq!(
+            item["fact_type"],
+            fact_type.to_lowercase(),
+            "{name}: {write}"
+        );
+        assert_eq!(item["t_created"], date, "{name}");
+        assert_eq!(item["outcome"], outcome, "{name}");
+        assert_eq!(item["hint"], json!(hint), "{name}");
+        assert_eq!(item["home"], home, "{name}");
+    }
+    server.wait_drained().await;
+    for name in ["MEMORY.md", "project_empty_stub.md"] {
+        let before = table_counts(&server);
+        let (status, report) = send(&server, "laptop", &Upload::memory(name, mtime)).await;
+        assert_eq!(status, 200, "{report}");
+        let reason = if name == "MEMORY.md" {
+            "index"
+        } else {
+            "empty"
+        };
+        assert_eq!(report["census"]["skipped"][reason], 1, "{report}");
+        assert_eq!(table_counts(&server), before);
+    }
+    let conn = rusqlite::Connection::open(server.db()).unwrap();
+    let metadata: String = conn
+        .query_row(
+            "SELECT metadata FROM facts WHERE content LIKE 'The fixture CLI documents%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let metadata: Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(
+        metadata,
+        json!({
+            "source": "memory-dir", "file": "reference_fixture_docs.md", "name": "fixture-docs",
+            "description": "Where the fixture docs live", "memory_type": "reference",
+            "route": "knowledge-base", "machine": "laptop",
+        })
+    );
+    let found = recall(&server, &project_session(), "documents").await;
+    assert!(
+        found.iter().any(|(_, content, kind)| content
+            == "The fixture CLI documents its flags in docs/flags.md."
+            && kind == "remembered"),
+        "{found:?}"
+    );
+    assert_eq!(
+        recall(&server, &other_project(), "documents").await.len(),
+        0
+    );
+}
+
+/// The operator's `erase --machine`, with the server stopped, takes every row a machine's
+/// uploads wrote, even when the machine's name is in the denylist; another machine's stay.
+#[test]
+fn erasing_a_machine_takes_its_imported_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let denylist = dir.path().join("denylist");
+    std::fs::write(&denylist, "laptop\n").unwrap();
+    let mut server = common::ServerProcess::spawn(
+        dir.path(),
+        &[],
+        &[(DENYLIST_VARIABLE, denylist.to_str().unwrap())],
+    );
+    server.wait_ready().unwrap();
+    let client = reqwest::blocking::Client::new();
+    let post = |machine: &str, upload: &Upload| -> Value {
+        let mut answers = Vec::new();
+        let mut upload = upload.clone();
+        for _ in 0..2 {
+            let mut request = client
+                .post(format!("{}/backfill/uploads", server.url()))
+                .bearer_auth(token(machine))
+                .body(upload.body.clone());
+            for (name, value) in &upload.headers {
+                request = request.header(name, value);
+            }
+            let response = request.send().unwrap();
+            assert_eq!(response.status(), 200);
+            let report: Value = response.json().unwrap();
+            upload = upload.write(report["preview"].as_str().unwrap());
+            answers.push(report);
+        }
+        answers.pop().unwrap()
+    };
+    // Markers that hold no denylist literal: redaction leaves them whole.
+    let (laptop, desktop) = ("zqxjvkpwqqalpha", "zqxjvkpwqqbravo");
+    for (machine, marker) in [("laptop", laptop), ("desktop", desktop)] {
+        let body = one_turn(&machine[..1], "/work/p", &|what| format!("{what} {marker}"));
+        let write = post(machine, &Upload::transcript().body(body));
+        assert_eq!(write["committed"], true);
+        let memory = Upload::memory("user_role.md", "2026-03-20T08:00:00Z").body(format!(
+            "---\nname: x\nmetadata:\n  type: user\n---\n{marker} memory\n"
+        ));
+        assert_eq!(post(machine, &memory)["committed"], true);
+    }
+    assert!(server.terminate().success(), "{}", server.stderr());
+    let db = dir.path().join("memory.db");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test stands in for the operator's `erase` command, run with the server stopped"
+    )]
+    let report = runtime.block_on(async {
+        let mut engine = memory_engine::MemoryEngine::builder(common::DIM)
+            .path(&db)
+            .build()
+            .unwrap();
+        let report = engine
+            .erase(&memory_engine::types::EraseTarget::Machine("laptop".into()))
+            .await
+            .unwrap();
+        engine.close().await.unwrap();
+        report
+    });
+
+    assert!(report.purged, "{report:?}");
+    let count = |sql: &str| -> i64 {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    };
+    for (table, machine) in [
+        ("events", "json_extract(payload, '$.machine')"),
+        ("facts", "json_extract(metadata, '$.machine')"),
+        ("lifecycle_receipts", "machine"),
+        ("lifecycle_segments", "machine"),
+        ("activities", "machine"),
+    ] {
+        let by = |name: &str| {
+            count(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE {machine} = '{name}'"
+            ))
+        };
+        assert_eq!(by("laptop"), 0, "{table}");
+        assert!(by("desktop") > 0, "{table}");
+    }
+    assert_eq!(
+        count("SELECT COUNT(*) FROM embed_queue"),
+        3,
+        "desktop's final message, summary and memory wait for their vectors"
+    );
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name().to_string_lossy().starts_with("memory.db") {
+            let bytes = std::fs::read(entry.path()).unwrap();
+            assert!(!holds(&bytes, laptop.as_bytes()), "{:?}", entry.file_name());
+        }
+    }
+}
+
+/// A dry run writes nothing, and its report is the write's but for its mode and commit.
+#[tokio::test]
+async fn a_dry_run_writes_nothing_and_matches_the_write() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let before = table_counts(&server);
+
+    let (status, dry) = send(&server, "laptop", &Upload::transcript()).await;
+
+    assert_eq!(status, 200);
+    assert_eq!(table_counts(&server), before, "nothing written");
+    let preview = dry["preview"].as_str().unwrap();
+    let (status, mut write) = send(&server, "laptop", &Upload::transcript().write(preview)).await;
+    assert_eq!(status, 200);
+    assert_ne!(table_counts(&server), before);
+    assert_eq!(
+        (&write["mode"], &write["committed"]),
+        (&json!("write"), &json!(true))
+    );
+    write["mode"] = dry["mode"].clone();
+    write["committed"] = dry["committed"].clone();
+    assert_eq!(write, dry);
+}
+
+/// The cost of a large upload (#1026): a synthetic 50,000-event transcript, as a dry run and as
+/// its write, on a store in `ME_LATENCY_DIR`, which must be a directory on disk (not tmpfs).
+#[tokio::test]
+#[ignore = "a timing, run by hand: ME_LATENCY_DIR=<dir on disk> cargo test --test backfill_upload backfill_upload_latency -- --ignored --nocapture"]
+async fn backfill_upload_latency() {
+    let parent = PathBuf::from(std::env::var("ME_LATENCY_DIR").expect("ME_LATENCY_DIR"));
+    let server = TestServer::start_with_denylist_in(&["fixturehost"], &parent).await;
+    let mut lines = Vec::new();
+    let mut ms: i64 = 0;
+    let mut at = || {
+        ms += 7;
+        (chrono::DateTime::from_timestamp_millis(1_773_914_400_000 + ms).unwrap())
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    // 10,000 turns of five events: a prompt, three tool calls and a final message.
+    for turn in 0..10_000 {
+        let cwd = "/work/fixture/p";
+        lines.push(entry(
+            &format!("p{turn}"),
+            "user",
+            &at(),
+            cwd,
+            &json!({ "message": { "content": format!("turn {turn}: change the parser") } }),
+        ));
+        for call in 0..3 {
+            let id = format!("t{turn}-{call}");
+            lines.push(entry(&format!("a{turn}-{call}"), "assistant", &at(), cwd, &json!({ "message": { "id": format!("m{turn}-{call}"), "content": [
+                { "type": "tool_use", "id": id, "name": "Read", "input": { "file_path": format!("src/file{call}.rs") } },
+            ], "stop_reason": "tool_use" } })));
+            lines.push(entry(&format!("r{turn}-{call}"), "user", &at(), cwd, &json!({ "message": { "content": [
+                { "type": "tool_result", "tool_use_id": id, "content": "fn parse() {}\n".repeat(20) },
+            ] } })));
+        }
+        lines.push(entry(
+            &format!("s{turn}"),
+            "assistant",
+            &at(),
+            cwd,
+            &json!({ "message": { "id": format!("f{turn}"), "content": [
+            { "type": "text", "text": format!("Turn {turn} changed the parser.") },
+        ], "stop_reason": "end_turn" } }),
+        ));
+    }
+    let upload = Upload::transcript().body(lines.join("\n").into_bytes());
+
+    let started = std::time::Instant::now();
+    let (status, dry) = send(&server, "laptop", &upload).await;
+    let dry_run = started.elapsed();
+    assert_eq!(status, 200);
+    assert_eq!(dry["events"]["stored"], 50_000);
+    let preview = dry["preview"].as_str().unwrap().to_owned();
+    let started = std::time::Instant::now();
+    let (status, write) = send(&server, "laptop", &upload.clone().write(&preview)).await;
+    let committed = started.elapsed();
+    assert_eq!((status, &write["committed"]), (200, &json!(true)));
+    println!(
+        "backfill_upload_latency: {} bytes, 50,000 events: dry run {dry_run:?}, write {committed:?}",
+        upload.body.len()
+    );
+}
