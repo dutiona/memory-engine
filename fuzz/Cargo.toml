@@ -35,10 +35,11 @@ tokio = { version = "1", features = ["rt"] }
 memory-engine = { path = "../crates/memory-engine", features = ["ann", "compress-gzip", "compress-zstd", "archive"] }
 memory-engine-embed = { path = "../crates/memory-engine-embed" }
 # Drives the MCP tool dispatcher (`MemoryMcpServer::dispatch`), the server's primary
-# untrusted-input entry point (#321).
+# untrusted-input entry point (#321), and the lifecycle route's seam
+# (`MemoryMcpServer::record_lifecycle`, #1025).
 memory-engine-mcp = { path = "../crates/memory-engine-mcp" }
-# The header map the dispatch target builds its project facts from; the version axum 0.8
-# uses, so `ProjectFacts::from_headers` takes it as is.
+# The header map the dispatch and lifecycle_event targets build their headers from; the version
+# axum 0.8 uses, so `ProjectFacts::from_headers` and `Envelope::from_headers` take it as is.
 http = "1"
 
 # Detach from the parent workspace: an empty `[workspace]` makes this its own
@@ -114,6 +115,13 @@ bench = false
 [[bin]]
 name = "read_pak"
 path = "fuzz_targets/read_pak.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lifecycle_event"
+path = "fuzz_targets/lifecycle_event.rs"
 test = false
 doc = false
 bench = false
