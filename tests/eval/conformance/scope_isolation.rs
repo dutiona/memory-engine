@@ -544,3 +544,16 @@ async fn assert_filtered_before_top_k(engine: &memory_engine::engine::MemoryEngi
 async fn exact_set_filters_before_top_k_on_every_channel() {
     assert_filtered_before_top_k(&eval_engine()).await;
 }
+
+/// C16 over the HNSW strategy (#1074): the vector channel widens its window up to the index
+/// size, which the HNSW walk does not reach.
+#[cfg(feature = "ann")]
+#[tokio::test]
+async fn exact_set_filters_before_top_k_on_every_channel_with_hnsw() {
+    use memory_engine::search::SearchConfig;
+    let engine = memory_engine::engine::MemoryEngine::builder(crate::helpers::DIM)
+        .search_config(SearchConfig { ann_threshold: 0 })
+        .build()
+        .expect("failed to create in-memory HNSW engine");
+    assert_filtered_before_top_k(&engine).await;
+}
