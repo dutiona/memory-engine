@@ -388,3 +388,733 @@ async fn a_ten_megabyte_tool_result_is_stored_truncated() {
         );
     }
 }
+// --- The capture contract over HTTP (ADR-0020 §5, §6, §8, §11) ---
+
+/// The client's clock, `secs` after a fixed second.
+fn at(secs: i64) -> String {
+    use chrono::TimeZone;
+    (chrono::Utc.with_ymd_and_hms(2026, 11, 21, 9, 0, 0).unwrap() + chrono::Duration::seconds(secs))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
+/// Fixture `name` as event `id`, `secs` into the client's clock with tie-break `seq`.
+fn event(name: &str, id: &str, secs: i64, seq: u32) -> common::Fixture {
+    fixture(name)
+        .header("ME-Event-Id", id)
+        .header("ME-Event-Time", &at(secs))
+        .header("ME-Event-Seq", &seq.to_string())
+}
+
+fn saying(fixture: common::Fixture, member: &str, text: &str) -> common::Fixture {
+    fixture.json(|v| v[member] = json!(text))
+}
+
+async fn stored(server: &TestServer, fixture: &common::Fixture) {
+    let posted = server.post_event("laptop", fixture).await;
+    assert!(
+        posted.is(204, Some("stored")),
+        "{}: {posted:?}",
+        fixture.id()
+    );
+}
+
+/// One row of `lifecycle_segments`.
+#[derive(Debug, Clone, PartialEq)]
+struct Segment {
+    number: i64,
+    counts: Value,
+    main_turns: i64,
+    final_fact: Option<i64>,
+    ended_by: Option<String>,
+    last_key: String,
+}
+
+fn segments(server: &TestServer, session: &str) -> Vec<Segment> {
+    let conn = rusqlite::Connection::open(server.db()).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT number, counts, main_turns, final_fact, ended_by, last_key
+               FROM lifecycle_segments WHERE session_id = ?1 ORDER BY number",
+        )
+        .unwrap();
+    stmt.query_map([session], |r| {
+        Ok(Segment {
+            number: r.get(0)?,
+            counts: serde_json::from_str(&r.get::<_, String>(1)?).unwrap(),
+            main_turns: r.get(2)?,
+            final_fact: r.get(3)?,
+            ended_by: r.get(4)?,
+            last_key: r.get(5)?,
+        })
+    })
+    .unwrap()
+    .map(std::result::Result::unwrap)
+    .collect()
+}
+
+/// The payload of the one captured event `id`.
+fn payload_of(server: &TestServer, id: &str) -> Value {
+    let payload: String = rusqlite::Connection::open(server.db())
+        .unwrap()
+        .query_row(
+            "SELECT e.payload FROM events e JOIN lifecycle_receipts r ON r.event_row = e.id
+              WHERE r.event_id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&payload).unwrap()
+}
+
+/// The fact made from event `id`.
+fn fact_of(server: &TestServer, id: &str) -> i64 {
+    server.number(&format!(
+        "SELECT f.id FROM facts f JOIN lifecycle_receipts r ON r.event_row = f.source_event_id
+          WHERE r.event_id = '{id}'"
+    ))
+}
+
+#[tokio::test]
+async fn provenance_is_stored() {
+    let server = TestServer::start().await;
+    let call = event("post-tool-use-bash-subagent", "p1", 0, 1);
+    let session = call.json_value()["session_id"].as_str().unwrap().to_owned();
+    stored(&server, &call).await;
+
+    let payload = payload_of(&server, "p1");
+
+    assert_eq!(payload["machine"], "laptop");
+    assert_eq!(payload["event_id"], "p1");
+    assert_eq!(payload["harness"], "claude-code");
+    assert_eq!(payload["client_version"], "0.1.0");
+    assert!(payload["harness_version"].is_null());
+    assert_eq!(payload["kind"], "tool_use");
+    assert_eq!(payload["actor"], "subagent");
+    assert!(payload["agent_id"].is_string());
+    assert!(payload["agent_type"].is_string());
+    assert_eq!(payload["cwd"], "/work/fixture-home/dev/proj");
+    let project = &payload["project"];
+    assert_eq!(project["facts"]["root"], "/work/fixture-home/dev/proj");
+    assert_eq!(project["facts"]["branch"], "main");
+    assert_eq!(project["key"], "example.com/example/proj");
+    assert_eq!(project["rules"], 1);
+    let column: String = rusqlite::Connection::open(server.db())
+        .unwrap()
+        .query_row(
+            "SELECT e.session_id FROM events e JOIN lifecycle_receipts r ON r.event_row = e.id
+              WHERE r.event_id = 'p1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(column, session);
+}
+
+#[tokio::test]
+async fn events_order_by_time_seq_and_id() {
+    let server = TestServer::start().await;
+    stored(&server, &event("session-start-startup", "a", 0, 1)).await;
+    // The same second: seq 10 arrives first, then seq 9, which sorts before it.
+    stored(
+        &server,
+        &saying(
+            event("stop", "ten", 5, 10),
+            "last_assistant_message",
+            "seq ten",
+        ),
+    )
+    .await;
+    stored(
+        &server,
+        &saying(
+            event("stop", "nine", 5, 9),
+            "last_assistant_message",
+            "seq nine",
+        ),
+    )
+    .await;
+    stored(&server, &event("session-end", "z", 6, 1)).await;
+
+    let session = fixture("stop").json_value()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let rows = segments(&server, &session);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].ended_by.as_deref(), Some("session_end"));
+    assert_eq!(rows[0].main_turns, 2);
+    assert_eq!(
+        rows[0].final_fact,
+        Some(fact_of(&server, "ten")),
+        "the greater key's message, though it arrived first"
+    );
+}
+
+#[tokio::test]
+async fn a_late_event_is_applied_without_reopening_its_segment() {
+    let server = TestServer::start().await;
+    stored(&server, &event("session-start-startup", "a", 0, 1)).await;
+    stored(
+        &server,
+        &saying(event("stop", "s", 5, 1), "last_assistant_message", "first"),
+    )
+    .await;
+    stored(&server, &event("session-end", "z", 10, 1)).await;
+    let session = fixture("stop").json_value()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let before = segments(&server, &session);
+    assert_eq!(before[0].ended_by.as_deref(), Some("session_end"));
+    let facts = server.number("SELECT COUNT(*) FROM facts");
+
+    // A late prompt, a late final message and a late resume.
+    stored(&server, &event("user-prompt-submit", "late-prompt", 3, 1)).await;
+    stored(
+        &server,
+        &saying(
+            event("stop", "late-stop", 4, 1),
+            "last_assistant_message",
+            "late",
+        ),
+    )
+    .await;
+    stored(&server, &event("session-start-resume", "late-resume", 2, 1)).await;
+
+    assert_eq!(
+        segments(&server, &session),
+        before,
+        "the ended row is as it was"
+    );
+    assert_eq!(
+        server.number("SELECT COUNT(*) FROM facts"),
+        facts + 1,
+        "a late final message still becomes a memory"
+    );
+    assert_eq!(server.number(EVENTS), 6);
+}
+
+#[tokio::test]
+async fn a_resumed_session_keeps_capturing() {
+    let server = TestServer::start().await;
+    stored(&server, &event("session-start-startup", "a", 0, 1)).await;
+    stored(
+        &server,
+        &saying(
+            event("stop", "s1", 5, 1),
+            "last_assistant_message",
+            "first run",
+        ),
+    )
+    .await;
+    stored(&server, &event("session-end", "z", 6, 1)).await;
+
+    stored(&server, &event("session-start-resume", "r", 100, 1)).await;
+    stored(
+        &server,
+        &saying(
+            event("stop", "s2", 105, 1),
+            "last_assistant_message",
+            "second run",
+        ),
+    )
+    .await;
+
+    let session = fixture("stop").json_value()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let rows = segments(&server, &session);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].ended_by.as_deref(), Some("session_end"));
+    assert_eq!(rows[1].ended_by, None);
+    assert_eq!(rows[1].final_fact, Some(fact_of(&server, "s2")));
+}
+
+#[tokio::test]
+async fn a_session_idle_past_the_threshold_keeps_capturing() {
+    let server = TestServer::start().await;
+    stored(&server, &event("user-prompt-submit", "a", 0, 1)).await;
+    // Exactly 30 minutes is not a gap.
+    stored(&server, &event("user-prompt-submit", "b", 1800, 1)).await;
+    let session = fixture("stop").json_value()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(segments(&server, &session).len(), 1);
+
+    // 30 minutes and a second after the last event is.
+    stored(
+        &server,
+        &saying(
+            event("stop", "c", 1800 + 1801, 1),
+            "last_assistant_message",
+            "after the gap",
+        ),
+    )
+    .await;
+    stored(
+        &server,
+        &saying(
+            event("stop", "d", 1800 + 1900, 1),
+            "last_assistant_message",
+            "and after",
+        ),
+    )
+    .await;
+
+    let rows = segments(&server, &session);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].ended_by.as_deref(), Some("gap"));
+    assert_eq!(rows[1].final_fact, Some(fact_of(&server, "d")));
+    assert_eq!(server.number(EVENTS), 4);
+}
+
+#[tokio::test]
+async fn captured_events_are_redacted_over_http() {
+    let mut server = TestServer::start().await;
+    let tokens: Vec<String> = common::AC2
+        .iter()
+        .enumerate()
+        .map(|(i, (prefix, _))| common::ac2_token(i, prefix))
+        .collect();
+    let text = format!(
+        "keys {} and {} end",
+        tokens.join(" "),
+        common::machine_token()
+    );
+    let placeholders: Vec<String> = common::AC2
+        .iter()
+        .map(|(_, rule)| format!("[REDACTED:{rule}]"))
+        .collect();
+    let want = format!(
+        "keys {} and [REDACTED:machine-token] end",
+        placeholders.join(" ")
+    );
+
+    stored(
+        &server,
+        &saying(event("user-prompt-submit", "a", 0, 1), "prompt", &text),
+    )
+    .await;
+    stored(
+        &server,
+        &event("post-tool-use-bash", "b", 1, 1).json(|v| v["tool_response"] = json!(text)),
+    )
+    .await;
+    stored(
+        &server,
+        &saying(event("stop", "c", 2, 1), "last_assistant_message", &text),
+    )
+    .await;
+
+    assert_eq!(payload_of(&server, "a")["prompt"], want);
+    assert_eq!(payload_of(&server, "c")["message"], want);
+    let result = payload_of(&server, "b")["result"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        result.len() <= 512 && result.starts_with("keys [REDACTED:huggingface-token]"),
+        "{result}"
+    );
+    assert_eq!(
+        server
+            .engine
+            .get_fact(fact_of(&server, "c"))
+            .await
+            .unwrap()
+            .content,
+        want
+    );
+    let counts = memory_engine::read_redaction_counts(&server.db()).unwrap();
+    assert_eq!(
+        counts.redacted,
+        3 * 17,
+        "seventeen secrets in each of three texts"
+    );
+    server.wait_drained().await;
+    let mut secrets = tokens;
+    secrets.push(common::machine_token());
+    for request in server.embedder.received_requests().await.unwrap() {
+        let body = String::from_utf8_lossy(&request.body);
+        for secret in &secrets {
+            assert!(!body.contains(secret.as_str()), "the embedder saw {secret}");
+        }
+    }
+    server.stop().await;
+    for (name, bytes) in &store_bytes(&server) {
+        for secret in &secrets {
+            assert!(!holds(bytes, secret.as_bytes()), "{name} holds {secret}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_tool_call_on_a_sensitive_path_is_a_stub() {
+    let mut server = TestServer::start().await;
+    let secret_file = format!("/work/fixture/{}", ".env");
+    let contents = "kestrel-secret-contents";
+    let read = event("post-tool-use-read", "a", 0, 1).json(|v| {
+        v["tool_input"]["file_path"] = json!(secret_file);
+        v["tool_response"] = json!({ "content": contents });
+    });
+
+    stored(&server, &read).await;
+
+    let payload = payload_of(&server, "a");
+    assert_eq!(payload["input"], json!({ "sensitive_path": secret_file }));
+    assert!(payload["result"].is_null());
+    assert_eq!(payload["tool"], "Read");
+    assert_eq!(payload["outcome"], "success");
+    assert_eq!(
+        memory_engine::read_redaction_counts(&server.db())
+            .unwrap()
+            .stubbed,
+        1
+    );
+    let stub: String = rusqlite::Connection::open(server.db())
+        .unwrap()
+        .query_row("SELECT args FROM activities", [], |r| r.get(0))
+        .unwrap();
+    assert!(!stub.contains(contents), "{stub}");
+    server.stop().await;
+    for (name, bytes) in &store_bytes(&server) {
+        assert!(
+            !holds(bytes, contents.as_bytes()),
+            "{name} holds the file's contents"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_activity_filter_classifies_for_the_stream_only() {
+    let server = TestServer::start().await;
+    let activities = "SELECT COUNT(*) FROM activities";
+
+    // An ignored tool: its event is stored, no activity is.
+    stored(
+        &server,
+        &event("post-tool-use-bash", "fmt", 0, 1).json(|v| v["tool_name"] = json!("prettier")),
+    )
+    .await;
+    assert_eq!((server.number(EVENTS), server.number(activities)), (1, 0));
+
+    // One Bash twice within 300 s: one activity, counted twice, and two events.
+    stored(&server, &event("post-tool-use-bash", "one", 10, 1)).await;
+    stored(&server, &event("post-tool-use-bash", "two", 20, 1)).await;
+    assert_eq!(server.number(EVENTS), 3);
+    assert_eq!(server.number(activities), 1);
+    assert_eq!(server.number("SELECT occurrence_count FROM activities"), 2);
+    // Past the window it is another row.
+    stored(&server, &event("post-tool-use-bash", "three", 20 + 301, 1)).await;
+    assert_eq!(server.number(activities), 2);
+}
+
+#[tokio::test]
+async fn capture_succeeds_with_the_embedder_down() {
+    let mut server = TestServer::start_unreachable().await;
+    let text = "the kestrel nests in the tower";
+    stored(
+        &server,
+        &saying(event("stop", "a", 0, 1), "last_assistant_message", text),
+    )
+    .await;
+
+    let id = fact_of(&server, "a");
+    assert!(
+        !server.has_vector(id).await,
+        "no vector without the embedder"
+    );
+    assert!(server.queue(id).is_some(), "the fact waits in the queue");
+    let facts: Vec<(&str, Vec<u8>)> = vec![
+        ("ME-Project-Root", b"/work/fixture-home/dev/proj".to_vec()),
+        ("ME-Project-Dev-Root", b"/work/fixture-home/dev".to_vec()),
+        (
+            "ME-Project-Origin-Url",
+            b"https://example.com/example/proj.git".to_vec(),
+        ),
+    ];
+    let borrowed: Vec<(&str, &[u8])> = facts.iter().map(|(n, v)| (*n, v.as_slice())).collect();
+    let reply = server
+        .tool_with("laptop", &borrowed, "recall", json!({ "query": "kestrel" }))
+        .await;
+    assert!(!reply.is_error, "{reply:?}");
+    let found: Vec<i64> = reply.json()["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(found, [id], "full-text search finds it at once");
+
+    server.bring_embedder_up().await;
+    server.wait_drained().await;
+    assert!(
+        server.has_vector(id).await,
+        "a vector once the embedder is up"
+    );
+}
+
+/// A project session's headers for the checked-in fixture's repository, or another one.
+fn session_in(name: &str) -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        (
+            "ME-Project-Root",
+            format!("/work/fixture-home/dev/{name}").into_bytes(),
+        ),
+        ("ME-Project-Dev-Root", b"/work/fixture-home/dev".to_vec()),
+        (
+            "ME-Project-Origin-Url",
+            format!("https://example.com/example/{name}.git").into_bytes(),
+        ),
+    ]
+}
+
+async fn recalled(server: &TestServer, facts: &[(&'static str, Vec<u8>)]) -> Vec<(String, String)> {
+    let borrowed: Vec<(&str, &[u8])> = facts.iter().map(|(n, v)| (*n, v.as_slice())).collect();
+    let reply = server
+        .tool_with("laptop", &borrowed, "recall", json!({ "query": "kestrel" }))
+        .await;
+    assert!(!reply.is_error, "{reply:?}");
+    let mut found: Vec<(String, String)> = reply.json()["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["content"].as_str().unwrap().to_owned(),
+                r["kind"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+#[tokio::test]
+async fn final_messages_and_summaries_are_recalled_in_their_project_only() {
+    let server = TestServer::start().await;
+    stored(
+        &server,
+        &saying(
+            event("stop", "a", 0, 1),
+            "last_assistant_message",
+            "kestrel final",
+        ),
+    )
+    .await;
+    stored(
+        &server,
+        &saying(
+            event("post-compact", "b", 1, 1),
+            "compact_summary",
+            "kestrel summary",
+        ),
+    )
+    .await;
+    // A subagent's final message and a failed stop are never recalled.
+    stored(
+        &server,
+        &saying(
+            event("subagent-stop", "c", 2, 1),
+            "last_assistant_message",
+            "kestrel sub",
+        ),
+    )
+    .await;
+    stored(
+        &server,
+        &saying(
+            event("stop-failure", "d", 3, 1),
+            "last_assistant_message",
+            "kestrel error",
+        ),
+    )
+    .await;
+
+    // Another session of the same project finds both, under their kinds.
+    let want = [
+        ("kestrel final".to_owned(), "final message".to_owned()),
+        (
+            "kestrel summary".to_owned(),
+            "compaction summary".to_owned(),
+        ),
+    ];
+    assert_eq!(recalled(&server, &session_in("proj")).await, want);
+    // Another project, and a session with no project key, find neither.
+    assert!(
+        recalled(&server, &session_in("other")).await.is_empty(),
+        "another project finds nothing"
+    );
+    assert!(
+        recalled(&server, &[]).await.is_empty(),
+        "a keyless session finds nothing"
+    );
+}
+
+#[tokio::test]
+async fn an_me_call_is_linked_through_its_call_id() {
+    let server = TestServer::start().await;
+    let recall = server
+        .tool("laptop", "recall", json!({ "query": "anything" }))
+        .await;
+    let record: i64 = server.number(&format!(
+        "SELECT id FROM events WHERE source = 'mcp' AND json_extract(payload, '$.call') = '{}'",
+        recall.call
+    ));
+    let linking = |id: &str, call: &str| {
+        event("post-tool-use-mcp-me-recall", id, 0, 1).json(|v| {
+            v["tool_response"] = json!([{ "type": "text", "text": format!("call {call}\n{{}}") }]);
+        })
+    };
+    let link_of = |machine: &str, id: &str| -> Option<i64> {
+        rusqlite::Connection::open(server.db())
+            .unwrap()
+            .query_row(
+                "SELECT call_event FROM lifecycle_receipts WHERE machine = ?1 AND event_id = ?2",
+                [machine, id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+
+    let own = linking("own", &recall.call);
+    assert!(
+        server
+            .post_event("laptop", &own)
+            .await
+            .is(204, Some("stored"))
+    );
+    let desktop = linking("desktop", &recall.call);
+    assert!(
+        server
+            .post_event("desktop", &desktop)
+            .await
+            .is(204, Some("stored"))
+    );
+    let forged = linking("forged", "0123456789abcdef");
+    assert!(
+        server
+            .post_event("laptop", &forged)
+            .await
+            .is(204, Some("stored"))
+    );
+
+    assert_eq!(link_of("laptop", "own"), Some(record));
+    assert_eq!(
+        link_of("desktop", "desktop"),
+        None,
+        "another machine's call"
+    );
+    assert_eq!(
+        link_of("laptop", "forged"),
+        None,
+        "a forged line matches nothing"
+    );
+}
+
+/// The operator's `erase`, with the server stopped: laptop's captured rows are gone from the
+/// tables and from the files, desktop's are not.
+#[test]
+fn erasing_a_machine_takes_its_captured_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = common::ServerProcess::spawn(dir.path(), &[], &[]);
+    server.wait_ready().unwrap();
+    let (laptop, desktop) = ("zqxjvkpwqqlaptop", "zqxjvkpwqqdesktop");
+    for (machine, marker) in [("laptop", laptop), ("desktop", desktop)] {
+        let prefix = &machine[..1];
+        let stop = saying(
+            event("stop", &format!("{prefix}-stop"), 0, 1),
+            "last_assistant_message",
+            &format!("{marker} final"),
+        );
+        let bash = event("post-tool-use-bash", &format!("{prefix}-bash"), 1, 1);
+        let torn =
+            event("stop", &format!("{prefix}-torn"), 2, 1).body(format!("{{\"torn\": \"{marker}"));
+        for (event, outcome) in [(stop, "stored"), (bash, "stored"), (torn, "quarantined")] {
+            let posted = server.post_event(machine, &event);
+            assert!(
+                posted.is(204, Some(outcome)),
+                "{machine} {}: {posted:?}",
+                event.id()
+            );
+        }
+    }
+    assert!(server.terminate().success(), "{}", server.stderr());
+    let db = dir.path().join("memory.db");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test stands in for the operator's `erase` command, run with the server stopped"
+    )]
+    let report = runtime.block_on(async {
+        let mut engine = memory_engine::MemoryEngine::builder(common::DIM)
+            .path(&db)
+            .build()
+            .unwrap();
+        let report = engine
+            .erase(&memory_engine::types::EraseTarget::Machine("laptop".into()))
+            .await
+            .unwrap();
+        engine.close().await.unwrap();
+        report
+    });
+
+    assert!(report.purged, "{report:?}");
+    let count = |sql: &str| -> i64 {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    };
+    for table in ["lifecycle_receipts", "lifecycle_segments"] {
+        let by = |machine: &str| {
+            count(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE machine = '{machine}'"
+            ))
+        };
+        assert_eq!(by("laptop"), 0, "{table}");
+        assert!(by("desktop") > 0, "{table}");
+    }
+    assert_eq!(
+        count("SELECT COUNT(*) FROM events WHERE json_extract(payload, '$.machine') = 'laptop'"),
+        0
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM events WHERE source = 'lifecycle'"),
+        2,
+        "desktop's stop and call"
+    );
+    assert_eq!(count("SELECT COUNT(*) FROM facts"), 1, "desktop's memory");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM activities WHERE machine = 'laptop'"),
+        0
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM activities WHERE machine = 'desktop'"),
+        1
+    );
+    assert_eq!(
+        memory_engine::read_quarantined(&db).unwrap(),
+        1,
+        "desktop's quarantine row"
+    );
+    let files: Vec<Vec<u8>> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| std::fs::read(e.unwrap().path()).unwrap())
+        .collect();
+    assert!(
+        files.iter().all(|bytes| !holds(bytes, laptop.as_bytes())),
+        "a laptop marker is on disk"
+    );
+    assert!(
+        files.iter().any(|bytes| holds(bytes, desktop.as_bytes())),
+        "desktop's text is intact"
+    );
+}

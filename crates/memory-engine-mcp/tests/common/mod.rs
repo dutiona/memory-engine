@@ -240,6 +240,12 @@ impl Fixture {
         self
     }
 
+    /// The hook input as JSON.
+    #[must_use]
+    pub fn json_value(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap()
+    }
+
     /// The event ID header.
     #[must_use]
     pub fn id(&self) -> &str {
