@@ -1179,3 +1179,41 @@ async fn the_server_ends_idle_segments_at_start() {
         "a second start changes nothing"
     );
 }
+
+/// How long a client waits for the 204 of one captured prompt, p50, p95 and p99 over 500 events
+/// posted one at a time to a server whose store lives in `ME_LATENCY_DIR`. The 204 means durable,
+/// so this is the price of a synced commit; run it where `fsync` costs something, never on tmpfs:
+///
+/// ```text
+/// ME_LATENCY_DIR=<a directory on disk> cargo test -p memory-engine-mcp --test lifecycle_endpoint \
+///     lifecycle_write_latency -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "a measurement: needs ME_LATENCY_DIR, a directory on disk"]
+async fn lifecycle_write_latency() {
+    let parent = std::env::var("ME_LATENCY_DIR").expect("ME_LATENCY_DIR names a directory on disk");
+    std::fs::create_dir_all(&parent).unwrap();
+    let server = TestServer::start_without_embedder_in(std::path::Path::new(&parent)).await;
+    let mut micros = Vec::new();
+    for i in 0..500_u32 {
+        let prompt = event(
+            "user-prompt-submit",
+            &format!("lat-{i}"),
+            i64::from(i),
+            i + 1,
+        );
+        let start = std::time::Instant::now();
+        let posted = server.post_event("laptop", &prompt).await;
+        micros.push(start.elapsed().as_micros());
+        assert!(posted.is(204, Some("stored")), "{posted:?}");
+    }
+    micros.sort_unstable();
+    let at = |percent: usize| micros[(micros.len() * percent / 100).min(micros.len() - 1)];
+    println!(
+        "lifecycle write latency over {} posts in {parent}: p50 {} us, p95 {} us, p99 {} us",
+        micros.len(),
+        at(50),
+        at(95),
+        at(99)
+    );
+}

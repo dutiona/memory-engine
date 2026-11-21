@@ -97,6 +97,8 @@ struct Setup {
     timeout_secs: Option<u64>,
     /// Provider `llama.cpp`, declaring this `max_input_tokens`, beside a `/tokenize`.
     input_limit: Option<usize>,
+    /// The store's directory is made inside this one, which a test picks to sit on a disk.
+    store_in: Option<PathBuf>,
 }
 
 /// llama-server's `/tokenize`, counting one token per two bytes of `content`.
@@ -321,6 +323,16 @@ impl TestServer {
         .await
     }
 
+    /// A server with no embedder whose store lives in a new directory inside `parent`.
+    pub async fn start_without_embedder_in(parent: &Path) -> Self {
+        Self::start_with(Setup {
+            without_embedder: true,
+            store_in: Some(parent.to_owned()),
+            ..Setup::default()
+        })
+        .await
+    }
+
     /// A server whose provider carries `instruction` as its configured query instruction.
     pub async fn start_with_query_instruction(instruction: &str) -> Self {
         Self::start_with(Setup {
@@ -360,7 +372,10 @@ impl TestServer {
     }
 
     async fn start_with(setup: Setup) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = setup.store_in.as_deref().map_or_else(
+            || tempfile::tempdir().unwrap(),
+            |parent| tempfile::tempdir_in(parent).unwrap(),
+        );
         let embedder = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))

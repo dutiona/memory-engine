@@ -2945,3 +2945,32 @@ fn a_receipt_names_an_event_or_a_quarantine_never_both_nor_neither() {
         "a quarantine that is not JSON"
     );
 }
+
+// --- durable commits (#1025) ---
+
+fn synchronous(conn: &Connection) -> i64 {
+    conn.pragma_query_value(None, "synchronous", |r| r.get(0))
+        .unwrap()
+}
+
+/// In WAL mode `FULL` syncs the log on every commit, so an acknowledged write survives an OS crash
+/// or a power loss, not only a process crash. A read-only connection never commits and keeps
+/// `SQLite`'s own default.
+#[test]
+fn writable_connections_sync_fully() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("durable.db");
+    let path = path.to_str().unwrap();
+    let writer = open_connection(path).unwrap();
+    assert_eq!(synchronous(&writer), 2, "a writable connection syncs fully");
+    init_schema(&writer).unwrap();
+    assert_eq!(synchronous(&open_memory().unwrap()), 2);
+
+    let reader = open_connection_read_only(path).unwrap();
+    let default = synchronous(&Connection::open_in_memory().unwrap());
+    assert_eq!(
+        synchronous(&reader),
+        default,
+        "a read-only open leaves it alone"
+    );
+}

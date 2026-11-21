@@ -788,7 +788,7 @@ mod tests {
                 .pragma_query_value(None, "journal_mode", |r| r.get(0))
                 .unwrap();
             assert_eq!(journal, "wal");
-            assert_eq!(pragma_int(conn, "synchronous"), 1, "synchronous = NORMAL");
+            assert_eq!(pragma_int(conn, "synchronous"), 2, "synchronous = FULL");
             assert_eq!(pragma_int(conn, "foreign_keys"), 1);
             assert_eq!(pragma_int(conn, "busy_timeout"), 5000);
         }
