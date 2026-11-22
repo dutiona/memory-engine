@@ -42,7 +42,7 @@ pub struct EmbeddingSection {
     /// Model name to request (e.g. `nomic-embed-text`).
     pub model: String,
 
-    /// API key (optional — for authenticated endpoints).
+    /// API key (optional — for authenticated endpoints). Never beside `--embed-api-key-file`.
     pub api_key: Option<String>,
 
     /// Operator-declared serving backend (e.g. `llama.cpp`, `ollama`, `tei`, `openai`). Cannot
@@ -118,6 +118,11 @@ pub struct EmbeddingOverrides {
     )]
     pub api_key: Option<String>,
 
+    /// A file holding the embedding API key, with one trailing newline allowed (#1101);
+    /// the one key source when set, beside neither `--embed-api-key` nor `api_key`.
+    #[arg(long = "embed-api-key-file", env = "MEMORY_MCP_EMBED_API_KEY_FILE")]
+    pub api_key_file: Option<PathBuf>,
+
     /// Embedding serving backend (e.g. `llama.cpp`, `ollama`, `tei`, `openai`) —
     /// operator-declared, feeds the fingerprint. Free-form; unrecognized values warn.
     #[arg(long = "embed-provider", env = "MEMORY_MCP_EMBED_PROVIDER")]
@@ -187,8 +192,10 @@ pub struct ResolvedEmbedding {
 ///
 /// # Errors
 ///
-/// [`MemoryError::Conflict`] (`PolicyParameter`) when any embedder setting is given
-/// without both a URL and a model, when the served artifact is partial or
+/// [`MemoryError::Conflict`] (`PolicyParameter`) when the key is set twice (the key file
+/// beside the key, from a flag, the environment or `api_key`), when the key file cannot be
+/// read ([`read_api_key_file`](memory_engine_embed::read_api_key_file)), when any embedder
+/// setting is given without both a URL and a model, when the served artifact is partial or
 /// invalid ([`ServedArtifact::from_parts`]), when `mrl_dim` differs from `engine_dim`, or
 /// when, without MRL, the native dimension differs from `engine_dim`.
 ///
@@ -216,7 +223,25 @@ pub fn resolve_embedding(
     let pick = |cli: &Option<String>, toml: Option<String>| cli.clone().or(toml);
     let url = pick(&overrides.url, section.map(|b| b.endpoint.clone()));
     let model = pick(&overrides.model, section.map(|b| b.model.clone()));
-    let api_key = pick(&overrides.api_key, section.and_then(|b| b.api_key.clone()));
+    let api_key = match &overrides.api_key_file {
+        Some(file) => {
+            let other = if overrides.api_key.is_some() {
+                Some("--embed-api-key / MEMORY_MCP_EMBED_API_KEY")
+            } else if section.is_some_and(|b| b.api_key.is_some()) {
+                Some("api_key in [embedding]")
+            } else {
+                None
+            };
+            if let Some(other) = other {
+                return Err(invalid(format!(
+                    "the embedder key is set twice: --embed-api-key-file / \
+                     MEMORY_MCP_EMBED_API_KEY_FILE and {other}; set one"
+                )));
+            }
+            Some(memory_engine_embed::read_api_key_file(file)?)
+        }
+        None => pick(&overrides.api_key, section.and_then(|b| b.api_key.clone())),
+    };
     let provider = pick(&overrides.provider, section.map(|b| b.provider.clone()));
     let query_instruction = pick(
         &overrides.query_instruction,

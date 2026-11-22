@@ -1213,3 +1213,83 @@ async fn query_embeds_the_redacted_text() {
         );
     }
 }
+
+// --- #1101: the embedder key from a file ---
+
+/// `cli()` with neither key setting inherited from the host.
+fn cli_without_keys() -> Command {
+    let mut cmd = cli();
+    cmd.env_remove("MEMORY_ENGINE_EMBED_API_KEY")
+        .env_remove("MEMORY_ENGINE_EMBED_API_KEY_FILE");
+    cmd
+}
+
+#[tokio::test]
+async fn query_sends_the_key_from_a_key_file() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let (dir, db_path) = create_test_db().await;
+    let key = format!("file-key-{}", std::process::id());
+    let key_file = dir.path().join("embed-key");
+    std::fs::write(&key_file, format!("{key}\n")).unwrap();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .and(header("Authorization", format!("Bearer {key}").as_str()))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "data": [{ "embedding": [0.1, 0.2, 0.3, 0.4] }] }),
+            ),
+        )
+        .expect(1..)
+        .mount(&server)
+        .await;
+    let url = format!("{}/v1/embeddings", server.uri());
+    let output = cli_without_keys()
+        .args(["--db", db_path.to_str().unwrap(), "query", "blue sky"])
+        .args(["--embed-url", &url, "--embed-model", "mock"])
+        .args(["--embed-provider", "test"])
+        .arg("--embed-api-key-file")
+        .arg(&key_file)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn an_fts_only_query_refuses_a_bad_key_setting() {
+    let (dir, db_path) = create_test_db().await;
+    let key = format!("file-key-{}", std::process::id());
+    let empty = dir.path().join("empty-key");
+    std::fs::write(&empty, "").unwrap();
+    let good = dir.path().join("good-key");
+    std::fs::write(&good, &key).unwrap();
+    let missing = dir.path().join("missing-key");
+    let flag = format!("flag-key-{}", std::process::id());
+    let cases: [(&[&str], &std::path::Path, String); 3] = [
+        (&[], &missing, missing.display().to_string()),
+        (&[], &empty, empty.display().to_string()),
+        (
+            &["--embed-api-key", &flag],
+            &good,
+            "MEMORY_ENGINE_EMBED_API_KEY_FILE".into(),
+        ),
+    ];
+    for (extra, file, marker) in cases {
+        let output = cli_without_keys()
+            .args(["--db", db_path.to_str().unwrap(), "query", "blue sky"])
+            .args(extra)
+            .arg("--embed-api-key-file")
+            .arg(file)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_clean_failure(&output, &marker);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains(&key) && !stderr.contains(&flag),
+            "{stderr}"
+        );
+    }
+}

@@ -200,6 +200,7 @@ fn every_override_wins_over_toml_field_by_field() {
         url: Some("http://cli-host:8080/embed".into()),
         model: Some("cli-model".into()),
         api_key: Some("cli-key".into()),
+        api_key_file: None,
         provider: Some("llama.cpp".into()),
         query_instruction: Some(String::new()),
         artifact_sha256: Some("0".repeat(64)),
@@ -375,4 +376,79 @@ api_key = "embed-key-sentinel"
     let debug = format!("{config:?}");
     assert!(debug.contains("api_key"), "{debug}");
     assert!(!debug.contains("embed-key-sentinel"), "{debug}");
+}
+
+// --- #1101: the embedder key from a file ---
+
+/// A key built at run time, written to a fresh file; the caller keeps the directory.
+fn key_file() -> (TempDir, std::path::PathBuf, String) {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("embed-key");
+    let key = format!("file-key-{}", std::process::id());
+    std::fs::write(&path, format!("{key}\n")).unwrap();
+    (dir, path, key)
+}
+
+fn file_overrides(path: &std::path::Path) -> EmbeddingOverrides {
+    EmbeddingOverrides {
+        url: Some("http://cli-host:8080/embed".into()),
+        model: Some("cli-model".into()),
+        api_key_file: Some(path.to_path_buf()),
+        ..EmbeddingOverrides::default()
+    }
+}
+
+#[test]
+fn the_key_file_supplies_the_api_key() {
+    let (_dir, path, key) = key_file();
+    let r = resolve(&file_overrides(&path), None);
+    assert_eq!(r.api_key.as_deref(), Some(key.as_str()));
+}
+
+#[test]
+fn a_key_file_beside_another_key_is_refused_naming_both_settings() {
+    let (_dir, path, key) = key_file();
+    let flag = format!("flag-key-{}", std::process::id());
+    let beside_flag = EmbeddingOverrides {
+        api_key: Some(flag.clone()),
+        ..file_overrides(&path)
+    };
+    let toml_key = format!("toml-key-{}", std::process::id());
+    let beside_toml = section(&format!("api_key = \"{toml_key}\"\n"));
+    for (overrides, base, other) in [
+        (
+            &beside_flag,
+            None,
+            "--embed-api-key / MEMORY_MCP_EMBED_API_KEY",
+        ),
+        (
+            &file_overrides(&path),
+            Some(&beside_toml),
+            "api_key in [embedding]",
+        ),
+    ] {
+        let err = resolve_embedding(overrides, base, 8)
+            .err()
+            .expect("two key sources are refused")
+            .to_string();
+        assert!(
+            err.contains("--embed-api-key-file / MEMORY_MCP_EMBED_API_KEY_FILE"),
+            "{err}"
+        );
+        assert!(err.contains(other), "{err}");
+        for secret in [&key, &flag, &toml_key] {
+            assert!(!err.contains(secret.as_str()), "{err}");
+        }
+    }
+}
+
+#[test]
+fn a_lone_key_file_is_refused_by_the_url_and_model_rule() {
+    let (_dir, path, _) = key_file();
+    let lone = EmbeddingOverrides {
+        api_key_file: Some(path),
+        ..EmbeddingOverrides::default()
+    };
+    let err = resolve_embedding(&lone, None, 8).err().unwrap().to_string();
+    assert!(err.contains("needs both a url"), "{err}");
 }

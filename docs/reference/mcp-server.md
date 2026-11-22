@@ -45,6 +45,7 @@ MEMORY_MCP_LISTEN=127.0.0.1:<port> MEMORY_MCP_TOKEN_FILE=/path/to/tokens MEMORY_
 |---|---|---|
 | `--listen` (required) | `MEMORY_MCP_LISTEN` | Socket address to serve on |
 | `--token-file` (required) | `MEMORY_MCP_TOKEN_FILE` | The token-hash file (below) |
+| `--embed-api-key-file` | `MEMORY_MCP_EMBED_API_KEY_FILE` | A file holding the embedder API key alone, one trailing newline allowed; mount it read-only, like the token file. The one key source when set: beside `--embed-api-key` / `MEMORY_MCP_EMBED_API_KEY` or `api_key` the server refuses to start, naming both settings. A missing, unreadable or empty file refuses to start, naming its path and never its contents. The key is held like `api_key`: never logged |
 | `--user` (required) | `MEMORY_MCP_USER` | The owner: the user level is `user:<user>` (ADR-0020 §7). A lowercase DNS label |
 | `--allowed-host` (repeatable) | `MEMORY_MCP_ALLOWED_HOSTS` (comma list, no spaces) | A `Host` value served besides loopback |
 | `--backup-dir` | `MEMORY_MCP_BACKUP_DIR` | Overrides `engine.backup_dir` |
@@ -64,7 +65,7 @@ backup_dir = "/path/to/backups"  # Optional — an existing directory; a migrati
 [embedding]
 endpoint = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-api_key = "sk-..."   # Optional — for authenticated endpoints
+api_key = "sk-..."   # Optional — for authenticated endpoints; or --embed-api-key-file, never both
 provider = "ollama"  # Serving backend, e.g. llama.cpp | ollama | tei | openai (default: ollama). Free-form; feeds the fingerprint.
 dimensions = 384     # Native model dimension (validated against the raw response)
 query_instruction = ""  # nomic is symmetric: no query prefix (absent = ME's pinned instruction)

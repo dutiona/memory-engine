@@ -953,6 +953,7 @@ not valid json
                     served: crate::commands::embedding_args::ServedArgs::default(),
                 },
                 embed_api_key: None,
+                embed_api_key_file: None,
                 native_dim: None,
                 query_instruction: None,
                 mrl_dim: None,

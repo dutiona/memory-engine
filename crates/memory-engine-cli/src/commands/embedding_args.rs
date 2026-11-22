@@ -35,6 +35,11 @@ pub struct EmbeddingArgs {
     #[arg(long, env = "MEMORY_ENGINE_EMBED_API_KEY", hide_env_values = true)]
     pub embed_api_key: Option<String>,
 
+    /// A file holding the bearer API key, with one trailing newline allowed (#1101); the one
+    /// key source when set, never beside `--embed-api-key`.
+    #[arg(long, env = "MEMORY_ENGINE_EMBED_API_KEY_FILE")]
+    pub embed_api_key_file: Option<std::path::PathBuf>,
+
     /// Native model dimension before MRL truncation. Required only with `--mrl-dim`
     /// (then the provider validates raw responses against this while the engine stores
     /// the truncated `--mrl-dim`). Named distinctly from `--embed-dim` (the engine's
@@ -163,11 +168,15 @@ impl EmbeddingArgs {
     ///
     /// # Errors
     ///
-    /// Returns an error on a partial configuration or any provider construction failure.
+    /// Returns an error on a partial configuration, on a bad key setting (both key sources
+    /// at once, or a key file [`read_api_key_file`](memory_engine_embed::read_api_key_file)
+    /// refuses), even with no embedder configured, or any provider construction failure.
     pub fn build_optional(
         &self,
         engine_dim: usize,
     ) -> anyhow::Result<Option<HttpEmbeddingProvider>> {
+        // Resolved first, so a bad key setting is refused even where nothing is embedded.
+        let api_key = self.api_key()?;
         match (
             self.embed_url.as_deref(),
             self.identity.embed_model.as_deref(),
@@ -176,8 +185,13 @@ impl EmbeddingArgs {
             (None, None) if self.identity.served.any() => {
                 anyhow::bail!("the served-artifact flags need --embed-url and --embed-model")
             }
+            (None, None) if self.embed_api_key_file.is_some() => {
+                anyhow::bail!("--embed-api-key-file needs --embed-url and --embed-model")
+            }
             (None, None) => Ok(None),
-            (Some(url), Some(model)) => Ok(Some(self.build_inner(url, model, engine_dim)?)),
+            (Some(url), Some(model)) => {
+                Ok(Some(self.build_inner(url, model, api_key, engine_dim)?))
+            }
             _ => anyhow::bail!("--embed-url and --embed-model must be provided together"),
         }
     }
@@ -227,6 +241,19 @@ impl EmbeddingArgs {
             .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))?
     }
 
+    /// The embedder key: from `--embed-api-key-file`, else `--embed-api-key`, never both.
+    fn api_key(&self) -> anyhow::Result<Option<String>> {
+        match (&self.embed_api_key, &self.embed_api_key_file) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "the embedder key is set twice: --embed-api-key-file / \
+                 MEMORY_ENGINE_EMBED_API_KEY_FILE and --embed-api-key / \
+                 MEMORY_ENGINE_EMBED_API_KEY; set one"
+            ),
+            (_, Some(path)) => Ok(Some(memory_engine_embed::read_api_key_file(path)?)),
+            (key, None) => Ok(key.clone()),
+        }
+    }
+
     /// Construct the provider, wiring `provider`, `query_instruction`, and `mrl_dim`.
     ///
     /// The provider's `expected_dim` is the **native** dimension it validates raw
@@ -239,6 +266,7 @@ impl EmbeddingArgs {
         &self,
         url: &str,
         model: &str,
+        api_key: Option<String>,
         engine_dim: usize,
     ) -> anyhow::Result<HttpEmbeddingProvider> {
         // MRL truncates a NATIVE-length response down to the stored dim, so the native
@@ -258,7 +286,7 @@ impl EmbeddingArgs {
             url.to_owned(),
             model.to_owned(),
             self.identity.embed_provider.clone(),
-            self.embed_api_key.clone(),
+            api_key,
             native_dim,
             self.embed_timeout,
         )
@@ -306,6 +334,7 @@ mod tests {
                 served: ServedArgs::default(),
             },
             embed_api_key: None,
+            embed_api_key_file: None,
             native_dim: None,
             query_instruction: None,
             mrl_dim: None,
@@ -314,6 +343,48 @@ mod tests {
     }
 
     const URL: &str = "http://127.0.0.1:0/v1/embeddings";
+
+    /// A key file holding `key\n`, in its own directory.
+    fn key_file(key: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("embed-key");
+        std::fs::write(&path, format!("{key}\n")).unwrap();
+        (dir, path)
+    }
+
+    /// #1101: the key file supplies the key; beside the key itself it is refused, naming
+    /// both settings and neither secret; a lone file needs the embedder it keys.
+    #[test]
+    fn the_key_settings_follow_the_one_source_rule() {
+        let key = format!("file-key-{}", std::process::id());
+        let (_dir, path) = key_file(&key);
+        let mut a = args(Some(URL), Some("m"));
+        a.embed_api_key_file = Some(path.clone());
+        assert_eq!(a.api_key().unwrap().as_deref(), Some(key.as_str()));
+
+        let flag = format!("flag-key-{}", std::process::id());
+        a.embed_api_key = Some(flag.clone());
+        let err = a.build_optional(8).err().unwrap().to_string();
+        assert!(err.contains("MEMORY_ENGINE_EMBED_API_KEY_FILE"), "{err}");
+        assert!(err.contains("--embed-api-key /"), "{err}");
+        assert!(!err.contains(&key) && !err.contains(&flag), "{err}");
+
+        let mut lone = args(None, None);
+        lone.embed_api_key_file = Some(path);
+        let err = lone.build_optional(8).err().unwrap().to_string();
+        assert!(err.contains("needs --embed-url and --embed-model"), "{err}");
+    }
+
+    /// #1101: a missing key file is refused, naming its path, even with no embedder.
+    #[test]
+    fn a_missing_key_file_is_refused_without_an_embedder() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing-key");
+        let mut a = args(None, None);
+        a.embed_api_key_file = Some(missing.clone());
+        let err = a.build_optional(8).err().unwrap().to_string();
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+    }
 
     /// #1064: the clap default is the provider the MCP server defaults to.
     #[test]

@@ -33,9 +33,11 @@
 
 mod chunk;
 mod http;
+mod key_file;
 mod proposer;
 
 pub use http::HttpEmbeddingProvider;
+pub use key_file::read_api_key_file;
 pub use proposer::{HttpDeltaProposer, ProposerStats};
 
 /// Fuzz-only seam (`--cfg fuzzing`, set only by `cargo fuzz`).
