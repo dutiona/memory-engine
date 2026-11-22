@@ -18,7 +18,7 @@ Atomicity is preserved end-to-end. The compute phase produces a plan without tou
 
 ### Pass 1: Local Dedup
 
-Compares facts created since the last consolidation against all active facts. **Pinned facts are excluded from dedup** — they are never candidates for expiration, and pinned candidates are skipped during comparison. This ensures unforgettable facts are preserved even if near-duplicates exist.
+Compares the facts added since the last consolidation (those above its watermark, see [Incremental Operation](#incremental-operation)) against all active facts. **Pinned facts are excluded from dedup** — they are never candidates for expiration, and pinned candidates are skipped during comparison. This ensures unforgettable facts are preserved even if near-duplicates exist.
 
 Pairs with cosine similarity **at or above** `dedup_threshold` are resolved by expiring the lower-importance fact. Tie-break on equal importance: the newer fact (higher id) is expired. `dedup_threshold` lives in `[0.0, 1.0]`; a value of `1.0` merges only exact duplicates (identical embeddings).
 
@@ -125,6 +125,10 @@ if !expired_ids.is_empty() {
 
 ## Incremental Operation
 
-The engine tracks `last_consolidated_at` in the config table. On subsequent runs, only facts created after this timestamp are compared during dedup. This avoids quadratic re-comparison of the entire fact store.
+The engine tracks `last_consolidated_fact_id` in the config table. On subsequent runs, only the active facts whose id is above it drive dedup; each is compared against every active fact. This avoids quadratic re-comparison of the entire fact store.
 
-After successful completion, `last_consolidated_at` is updated to the current time.
+The watermark is a fact id, not a timestamp (#1080): ids are assigned in commit order, so a fact committed after a run sits above that run's watermark whatever its `t_created`. A backdated fact (`t_created` in the past, as bootstrap and backfill write) and a fact committed or embedded while a run was in flight are compared at the next run.
+
+After a run, the watermark advances to the highest fact id the run saw, but only when dedup ran (not over its cap), no fact was waiting for its vector, and no survivor disappeared before the merge was written. Otherwise it holds, and the next run compares those facts again.
+
+Three writes make facts below the watermark eligible again, so they lower or clear it: `unforget` lowers it below the lowest restored fact, unpinning a fact lowers it below that fact (dedup skips pinned facts), and a reconstruction clears it (every vector is new). A run whose store changed this way between its read and its write discards its plan, and the next run recomputes. A restore never imports the watermark, because it resets each id sequence to the highest surviving id, so an erased id can be reused: the first run after a restore compares every fact. So does the first run after the upgrade that replaced `last_consolidated_at`, once.

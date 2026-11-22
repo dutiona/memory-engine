@@ -15,14 +15,14 @@ mod cluster;
 mod dedup;
 mod global;
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::Connection;
 
 use me_traits::{ConsolidationConfig, ConsolidationStats};
-use me_types::error::{MigrationError, Result, StorageError};
+use me_types::error::{Result, StorageError};
 
-use crate::store::facts::FactStore;
-use crate::store::schema::{get_config, set_config};
+use crate::store::facts::{self, FactStore};
+use crate::store::schema::set_config;
 
 pub use cluster::apply_clusters;
 pub use dedup::apply_dedup;
@@ -42,7 +42,8 @@ use me_types::limits::{MAX_FACTS_FOR_CLUSTERING, MAX_FACTS_FOR_DEDUP};
 /// # Errors
 ///
 /// Returns `MemoryError::Conflict` if `config` fails validation, `MemoryError::Migration`
-/// if `last_consolidated_at` cannot be parsed, or `MemoryError::Storage` on read failure.
+/// if the dedup watermark or the consolidation generation cannot be parsed, or
+/// `MemoryError::Storage` on read failure.
 pub fn load_snapshot(
     conn: &Connection,
     embed_dim: usize,
@@ -78,16 +79,16 @@ pub fn load_snapshot_capped(
     // cap-path validates too.
     config.validate()?;
 
-    let last = get_config(conn, "last_consolidated_at")?
-        .map(|s| DateTime::parse_from_rfc3339(&s))
-        .transpose()
-        .map_err(|e| MigrationError::Incompatible(format!("invalid last_consolidated_at: {e}")))?
-        .map(|dt| dt.with_timezone(&Utc));
+    // The generation, the watermark and the highest id are read before anything else, so a
+    // fact committed during the load is either listed or above the next watermark (#1080).
+    let generation = facts::read_consolidation_generation(conn)?;
+    let watermark = facts::read_dedup_watermark(conn)?;
+    let fact_store = FactStore::new(conn, embed_dim);
+    let max_fact_id = fact_store.max_id()?;
     let now = Utc::now();
 
     // Dedup, cluster and global read only the facts with a vector (#1021); one without,
     // active or not, is recorded so the watermark holds until it has one.
-    let fact_store = FactStore::new(conn, embed_dim);
     let active_count = fact_store.count_active_with_vector()?;
     let skipped_vectorless = fact_store.any_without_vector()?;
 
@@ -99,7 +100,9 @@ pub fn load_snapshot_capped(
     if active_count > max_dedup_facts && active_count > max_cluster_facts {
         return Ok(Snapshot {
             active_facts: Vec::new(),
-            last,
+            watermark,
+            max_fact_id,
+            generation,
             now,
             over_both_caps: true,
             skipped_vectorless,
@@ -112,7 +115,9 @@ pub fn load_snapshot_capped(
     let active_facts = fact_store.list_active_with_vector()?;
     Ok(Snapshot {
         active_facts,
-        last,
+        watermark,
+        max_fact_id,
+        generation,
         now,
         over_both_caps: false,
         skipped_vectorless,
@@ -143,6 +148,17 @@ pub fn apply_plan(
         .unchecked_transaction()
         .map_err(StorageError::backend)?;
 
+    // A write since the load made a fact eligible again or protected one (#1080): the plan
+    // is stale, so nothing is written and the next run recomputes.
+    if facts::read_consolidation_generation(&tx)? != plan.generation {
+        let none = ConsolidationStats {
+            duplicates_removed: 0,
+            clusters_created: 0,
+            global_summaries: 0,
+        };
+        return Ok((none, Vec::new()));
+    }
+
     // Dedup writes: importance inheritances + expirations (concurrency-tolerant, #409).
     // Returns the ids actually expired plus whether a survivor disappeared in the gap.
     let applied = dedup::apply_dedup(&tx, embed_dim, &plan.dedup, plan.now)?;
@@ -170,20 +186,18 @@ pub fn apply_plan(
         }
     }
 
-    // Advance the watermark only if dedup actually ran (#439/#306). When skipped, facts
-    // ingested during the over-cap period must be retried on the next run. A survivor loss
-    // is a divergence, not a skip: the dedup that *did* apply is committed, so the
-    // watermark advances and the kept loser is reconsidered next run.
-    //
-    // Nor while any fact has no vector (#1021), at the load or now, whether active or
-    // not (a forgotten one can be unforgotten): it sits above the watermark and is compared
-    // as new at the first run after it gets one. The check here catches a deferred insert
-    // backdated between the load and this write.
-    if !plan.dedup.skipped
-        && !plan.skipped_vectorless
-        && !FactStore::new(&tx, embed_dim).any_without_vector()?
-    {
-        set_config(&tx, "last_consolidated_at", &plan.now.to_rfc3339())?;
+    // Advance the watermark only if dedup actually ran (#439/#306): over the cap, the facts
+    // above it are retried next run. Nor when a survivor was lost in the #409 gap: its kept
+    // loser sits below the plan's highest id and must be compared again. Nor while a fact had
+    // no vector at the load (#1021), active or not: it is compared as new at the first run
+    // after it gets one. A fact inserted after the load has a larger id than `max_fact_id`,
+    // so it needs no check here.
+    if !plan.dedup.skipped && !applied.survivor_lost && !plan.skipped_vectorless {
+        let next =
+            facts::read_dedup_watermark(&tx)?.map_or(plan.max_fact_id, |m| m.max(plan.max_fact_id));
+        set_config(&tx, facts::DEDUP_WATERMARK, &next.to_string())?;
+        tx.execute("DELETE FROM config WHERE key = 'last_consolidated_at'", [])
+            .map_err(StorageError::backend)?;
     }
 
     tx.commit().map_err(StorageError::backend)?;
@@ -231,12 +245,14 @@ mod tests {
             global_summary: None,
             embedding_fingerprint: None,
             now: snapshot.now,
+            max_fact_id: snapshot.max_fact_id,
+            generation: snapshot.generation,
             skipped_vectorless: snapshot.skipped_vectorless,
         }
     }
 
-    fn watermark(conn: &Connection) -> Option<String> {
-        get_config(conn, "last_consolidated_at").unwrap()
+    fn watermark(conn: &Connection) -> Option<i64> {
+        facts::read_dedup_watermark(conn).unwrap()
     }
 
     fn run(conn: &Connection) {
@@ -252,6 +268,93 @@ mod tests {
         .unwrap();
         conn.execute("DELETE FROM embed_queue WHERE fact_id = ?1", [id])
             .unwrap();
+    }
+
+    /// A plan that folds `loser` into `survivor`, over `snapshot`.
+    fn merge_plan(snapshot: &Snapshot, loser: i64, survivor: i64) -> ConsolidationPlan {
+        let mut plan = idle_plan(snapshot);
+        plan.dedup.expirations = vec![me_types::types::consolidation::Expiry { loser, survivor }];
+        plan
+    }
+
+    fn active(conn: &Connection, id: i64) -> bool {
+        FactStore::new(conn, DIM)
+            .get(id)
+            .unwrap()
+            .t_expired
+            .is_none()
+    }
+
+    #[test]
+    fn a_changed_generation_discards_the_plan() {
+        let conn = setup_memory_db();
+        let survivor = insert_embedded(&conn, "cats purr");
+        let loser = insert_embedded(&conn, "cats purr too");
+        let snapshot = load_snapshot(&conn, DIM, &ConsolidationConfig::default()).unwrap();
+        // An unforget, an unpin, a pin or a reconstruction between load and apply.
+        facts::bump_consolidation_generation(&conn).unwrap();
+        let (stats, expired) =
+            apply_plan(&conn, &merge_plan(&snapshot, loser, survivor), DIM).unwrap();
+        assert_eq!((stats.duplicates_removed, expired.len()), (0, 0));
+        assert!(active(&conn, loser), "the stale plan expires nothing");
+        assert_eq!(watermark(&conn), None, "nor moves the watermark");
+
+        let snapshot = load_snapshot(&conn, DIM, &ConsolidationConfig::default()).unwrap();
+        apply_plan(&conn, &merge_plan(&snapshot, loser, survivor), DIM).unwrap();
+        assert!(!active(&conn, loser), "a fresh plan applies");
+        assert_eq!(watermark(&conn), Some(loser));
+    }
+
+    /// An unforget, an unpin or a reconstruction rewinds through the same call, which also
+    /// discards a plan in flight.
+    #[test]
+    fn a_rewind_between_load_and_apply_discards_the_plan() {
+        let conn = setup_memory_db();
+        let survivor = insert_embedded(&conn, "cats purr");
+        let loser = insert_embedded(&conn, "cats purr too");
+        let snapshot = load_snapshot(&conn, DIM, &ConsolidationConfig::default()).unwrap();
+        facts::rewind_dedup_watermark(&conn, survivor).unwrap();
+        apply_plan(&conn, &merge_plan(&snapshot, loser, survivor), DIM).unwrap();
+        assert!(active(&conn, loser), "the stale plan expires nothing");
+    }
+
+    #[test]
+    fn pinning_a_planned_loser_between_load_and_apply_discards_the_plan() {
+        let conn = setup_memory_db();
+        let survivor = insert_embedded(&conn, "cats purr");
+        let loser = insert_embedded(&conn, "cats purr too");
+        let snapshot = load_snapshot(&conn, DIM, &ConsolidationConfig::default()).unwrap();
+        FactStore::new(&conn, DIM).set_pinned(loser, true).unwrap();
+        apply_plan(&conn, &merge_plan(&snapshot, loser, survivor), DIM).unwrap();
+        assert!(active(&conn, loser), "a pinned fact is never merged away");
+    }
+
+    #[test]
+    fn a_lost_survivor_holds_the_watermark() {
+        let conn = setup_memory_db();
+        let survivor = insert_embedded(&conn, "cats purr");
+        let loser = insert_embedded(&conn, "cats purr too");
+        let snapshot = load_snapshot(&conn, DIM, &ConsolidationConfig::default()).unwrap();
+        FactStore::new(&conn, DIM)
+            .expire(survivor, Utc::now())
+            .unwrap();
+        apply_plan(&conn, &merge_plan(&snapshot, loser, survivor), DIM).unwrap();
+        assert!(active(&conn, loser), "the loser of a lost survivor is kept");
+        assert_eq!(watermark(&conn), None, "and compared again next run");
+    }
+
+    #[test]
+    fn the_first_run_drops_the_timestamp_watermark() {
+        let conn = setup_memory_db();
+        set_config(&conn, "last_consolidated_at", &Utc::now().to_rfc3339()).unwrap();
+        let id = insert_embedded(&conn, "embedded");
+        run(&conn);
+        assert_eq!(watermark(&conn), Some(id));
+        assert!(
+            crate::store::schema::get_config(&conn, "last_consolidated_at")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -292,16 +395,17 @@ mod tests {
         apply_plan(&conn, &idle_plan(&snapshot), DIM).unwrap();
         assert_eq!(
             watermark(&conn),
-            mark,
-            "one inserted between load and apply holds it"
+            Some(snapshot.max_fact_id),
+            "one inserted between load and apply sits above the advanced watermark"
         );
+        assert!(late > snapshot.max_fact_id);
 
         fill(&conn, late);
         run(&conn);
-        assert_ne!(
+        assert_eq!(
             watermark(&conn),
-            mark,
-            "every fact has a vector: it advances"
+            Some(late),
+            "every fact has a vector: it advances to the highest id"
         );
     }
 

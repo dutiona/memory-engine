@@ -1,3 +1,4 @@
+#[cfg(test)]
 use chrono::{DateTime, Utc};
 // `Connection`/`Result`/`FactStore` are production-unused here since `apply_dedup`
 // lives in me-backend-sqlite — needed only by this file's own `#[cfg(test)]`
@@ -10,7 +11,7 @@ use me_backend_sqlite::store::facts::FactStore;
 #[cfg(test)]
 use me_types::error::{Result, StorageError};
 use me_types::math::cosine_similarity;
-use me_types::types::Fact;
+use me_types::types::{Fact, FactId};
 
 /// Floating-point tolerance for the dedup similarity comparison.
 ///
@@ -53,7 +54,7 @@ pub(super) use me_types::types::consolidation::{DedupComputed, Expiry};
 
 /// Compute the local-dedup plan **without touching the store** (#409).
 ///
-/// Compares facts created since `since` (or all if `None`) against all active facts.
+/// Compares the facts whose id is above `since` (or all if `None`) against all active facts.
 /// Duplicates (cosine ≥ `threshold`, within [`DEDUP_SIMILARITY_EPSILON`]) are resolved
 /// by expiring the lower-importance fact ([`choose_expiry`]); the survivor inherits the
 /// chain-wide maximum `importance_score` (#264, tracked in a running-max map so a stale
@@ -68,7 +69,7 @@ pub(super) fn compute_dedup(
     active_facts: &[Fact],
     threshold: f32,
     max_facts: usize,
-    since: Option<DateTime<Utc>>,
+    since: Option<FactId>,
 ) -> DedupComputed {
     if active_facts.len() > max_facts {
         tracing::warn!(
@@ -80,15 +81,11 @@ pub(super) fn compute_dedup(
         return DedupComputed::skipped();
     }
 
-    // Split into "new" (to compare) and "all active" (to compare against).
+    // Split into "new" (to compare) and "all active" (to compare against). New means an id
+    // above the watermark, never a `t_created` after it (#1080): ids grow in commit order.
     let new_facts: Vec<&Fact> = since.map_or_else(
         || active_facts.iter().collect(),
-        |since_dt| {
-            active_facts
-                .iter()
-                .filter(|f| f.t_created > since_dt)
-                .collect()
-        },
+        |mark| active_facts.iter().filter(|f| f.id > mark).collect(),
     );
 
     // `expired_ids` is the loop's skip set (a loser is never re-compared); `expiries` is
@@ -195,7 +192,7 @@ fn local_dedup(
     active_facts: &[Fact],
     threshold: f32,
     max_facts: usize,
-    since: Option<DateTime<Utc>>,
+    since: Option<FactId>,
     now: DateTime<Utc>,
 ) -> Result<DedupOutcome> {
     let computed = compute_dedup(active_facts, threshold, max_facts, since);
@@ -328,7 +325,7 @@ mod tests {
         dim: usize,
         threshold: f32,
         max_facts: usize,
-        since: Option<DateTime<Utc>>,
+        since: Option<FactId>,
         now: DateTime<Utc>,
     ) -> Result<DedupOutcome> {
         let active = FactStore::new(conn, dim).list_active(None)?;
@@ -429,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn only_compares_new_facts_against_active() {
+    fn only_facts_above_the_watermark_drive() {
         let (conn, dim) = setup();
         // #495: derive every timestamp from a single captured `base` so the test is
         // deterministic — no race between independent `Utc::now()` calls for the
@@ -459,10 +456,10 @@ mod tests {
             })
             .unwrap();
 
-        // Insert a SECOND old fact that is a near-duplicate of "old fact". Both
-        // predate `since`, so the filter must keep them from being compared against
+        // Insert a SECOND old fact that is a near-duplicate of "old fact". Both sit
+        // at or below the watermark, so the filter must keep them from being compared against
         // each other — this is what makes the test diverge from a no-filter run.
-        store
+        let old_dup = store
             .insert(&NewFact {
                 content: "old dup".into(),
                 content_hash: "h_old2".into(),
@@ -482,14 +479,16 @@ mod tests {
             })
             .unwrap();
 
-        // Insert a "new" near-duplicate (lower importance, so it expires when driven).
+        // Insert a "new" near-duplicate (lower importance, so it expires when driven). It is
+        // backdated before both old facts (#1080): its id, not its `t_created`, makes it new.
+        let backdated = old_time - Duration::days(1);
         store
             .insert(&NewFact {
                 content: "new duplicate".into(),
                 content_hash: "h_new".into(),
                 embedding: vec![0.99, 0.01, 0.0, 0.0],
                 fact_type: FactType::Semantic,
-                t_created: base,
+                t_created: backdated,
                 t_expired: None,
                 t_valid: None,
                 t_invalid: None,
@@ -497,20 +496,19 @@ mod tests {
                 scope_id: 1,
                 base_importance: 0.3,
                 access_count: 0,
-                last_accessed: base,
+                last_accessed: backdated,
                 metadata: serde_json::json!({}),
                 is_pinned: false,
             })
             .unwrap();
 
-        // Only facts created since `old_time + 1 day` DRIVE comparisons — i.e. just
-        // the new one. It compares against all active and is expired against "old
+        // Only facts above the watermark (the old dup's id) DRIVE comparisons — i.e. just
+        // the new one, the oldest by `t_created`. It compares against all active and is expired against "old
         // fact" (lower importance). Crucially, the two OLD near-duplicates are never
         // compared against each other (neither drives), so both survive. Without the
         // since-filter, "old fact" would drive and expire "old dup" too (removed=2,
         // one survivor) — so this fixture's result genuinely depends on the filter.
-        let since = old_time + Duration::days(1);
-        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, Some(since), base)
+        let (removed, _) = dedup(&conn, dim, 0.90, NO_CAP, Some(old_dup), base)
             .unwrap()
             .expect_ran();
         assert_eq!(

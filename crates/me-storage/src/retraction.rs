@@ -52,7 +52,9 @@ pub trait Retraction: Send + Sync {
     /// Reverse the forget that named fact `id`: every fact whose tombstone names the same
     /// record and still exists gets its prior `t_expired` and `t_invalid` back and loses its
     /// tombstone (a tombstone with no record reverses its own fact only). An `unforget`
-    /// maintenance record is appended at the root in the same transaction.
+    /// maintenance record is appended at the root in the same transaction, which also lowers
+    /// the dedup watermark below the lowest restored fact and bumps the consolidation
+    /// generation (#1080).
     ///
     /// # Contract
     ///

@@ -132,13 +132,14 @@ pub trait ConsolidationStore: Send + Sync {
     /// Phase 1 — load the consolidation read snapshot under a brief read lock.
     /// Wraps `consolidation::load_snapshot`, preserving the #659 over-both-caps
     /// short-circuit (no embedding-BLOB materialization when the corpus is over
-    /// both caps).
+    /// both caps). It reads the consolidation generation, the dedup watermark (a fact id,
+    /// #1080) and the highest fact id before the active set.
     ///
     /// # Errors
     ///
     /// Returns [`MemoryError::Conflict`](me_types::error::MemoryError::Conflict) if
     /// `config` fails validation, [`MemoryError::Migration`](me_types::error::MemoryError::Migration)
-    /// if the stored watermark cannot be parsed, or
+    /// if the stored watermark or generation cannot be parsed, or
     /// [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a read failure.
     async fn load_consolidation_snapshot(
         &self,
@@ -147,7 +148,10 @@ pub trait ConsolidationStore: Send + Sync {
 
     /// Phase 3 — apply a fully-computed `ConsolidationPlan`
     /// in a single transaction, firing the post-commit HNSW `notify_expire` for the
-    /// ids it actually expired (Stage B).
+    /// ids it actually expired (Stage B). A plan whose generation no longer matches the
+    /// store's writes nothing and returns zero counts (#1080); otherwise the dedup watermark
+    /// advances to the plan's highest fact id when dedup ran, no fact was vectorless and no
+    /// survivor was lost.
     ///
     /// # Returns
     ///

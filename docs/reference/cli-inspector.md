@@ -163,7 +163,7 @@ memory-engine-cli --db new-agent.db import backup.json
 memory-engine-cli --db new-agent.db import backup.json.gz --embed-dim 384
 ```
 
-Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots.
+Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots. The first `consolidate` afterwards compares every fact for duplicates: the snapshot's dedup watermark is not imported.
 
 A JSON snapshot carries the lifecycle route's two tables, `lifecycle_receipts` and `lifecycle_segments` (#1025), so a
 restored store keeps its idempotency keys (a client's resend of an event the old store had stored is still a
@@ -254,8 +254,8 @@ It restores every fact that forget retracted (the named one and the identical co
 `t_expired`/`t_invalid` it had before, drops their tombstones and appends an `unforget` maintenance record. A copy
 erased since then keeps its block. Output, one line per restored fact: `unforgot fact 412: back in recall`, or
 `…: still out of recall (it was expired or invalid before the forget)`; `{"restored":[{"fact_id":412,"active":true}]}`;
-`fact_id=412 active=true`. A fact that is not forgotten, or does not exist, exits 1. It writes the store, so it takes
-the store lock: stop the server first.
+`fact_id=412 active=true`. A fact that is not forgotten, or does not exist, exits 1. The restored facts are compared
+for duplicates again at the next `consolidate`. It writes the store, so it takes the store lock: stop the server first.
 
 To find what to unforget: `dump events` lists the forget call records (`"tool":"forget"`), `explain <id>` shows a
 fact's forget and its reason, then `unforget <id>`.

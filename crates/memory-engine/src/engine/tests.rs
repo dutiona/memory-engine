@@ -1009,15 +1009,20 @@ async fn a_waiting_fact_that_failed_is_compared_as_new_once_embedded() {
         scope: None,
         opts: None,
     };
-    engine.add_fact(&request, old.clone(), None).await.unwrap();
+    let first = engine.add_fact(&request, old.clone(), None).await.unwrap();
     assert_eq!(duplicates_removed(&engine).await, 0);
-    let mark = engine.get_config("last_consolidated_at").await.unwrap();
-    assert!(mark.is_some(), "the first run sets the watermark");
+    let watermark = crate::store::facts::DEDUP_WATERMARK;
+    let mark = engine.get_config(watermark).await.unwrap();
+    assert_eq!(
+        mark,
+        Some(first.to_string()),
+        "the first run sets the watermark to the highest id"
+    );
 
     let waiting = crate::test_utils::seed_waiting_fact(&engine, "cats purr", true).await;
     assert_eq!(duplicates_removed(&engine).await, 0);
     assert_eq!(
-        engine.get_config("last_consolidated_at").await.unwrap(),
+        engine.get_config(watermark).await.unwrap(),
         mark,
         "the watermark holds while a fact has no vector"
     );
@@ -1113,6 +1118,138 @@ async fn a_retracted_waiting_fact_is_compared_as_new_once_embedded() {
         .unwrap();
     assert_eq!(settled, crate::Settled::Embedded);
     assert_eq!(duplicates_removed(&engine).await, 1);
+}
+
+/// Add `content` in `user:alice` through [`DeterministicEmbedder`]: two texts naming the
+/// same animal are duplicates, two naming different animals are not.
+async fn add_animal(engine: &MemoryEngine, content: &str, opts: Option<AddFactOptions>) -> i64 {
+    let embedder: std::sync::Arc<dyn EmbeddingProvider> =
+        std::sync::Arc::new(DeterministicEmbedder { dim: DIM });
+    let request = AddFactRequest {
+        content: content.into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: Some("user:alice".into()),
+        opts,
+    };
+    engine.add_fact(&request, embedder, None).await.unwrap()
+}
+
+/// #1080: dedup selects new facts by id, so a fact backdated before the last run is new.
+#[tokio::test]
+async fn dedup_compares_a_backdated_fact() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    add_animal(&engine, "cats purr", None).await;
+    assert_eq!(duplicates_removed(&engine).await, 0);
+
+    let opts = AddFactOptions {
+        t_created: Some(chrono::TimeZone::with_ymd_and_hms(&Utc, 2000, 1, 1, 0, 0, 0).unwrap()),
+        ..Default::default()
+    };
+    add_animal(&engine, "cats meow", Some(opts)).await;
+    assert_eq!(duplicates_removed(&engine).await, 1);
+}
+
+/// #1080: an unforgotten fact sits below the watermark; the unforget rewinds it.
+#[tokio::test]
+async fn dedup_compares_an_unforgotten_fact() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let forgotten = add_animal(&engine, "cats purr", None).await;
+    assert_eq!(duplicates_removed(&engine).await, 0);
+
+    let record = NewEvent {
+        timestamp: Utc::now(),
+        event_type: EventType::MemoryOp,
+        payload: serde_json::json!({ "tool": "forget" }),
+        source: "test".into(),
+        session_id: None,
+        scope_id: 1,
+        origin_node_id: "test".into(),
+        sequence_id: 0,
+        created_at: None,
+    };
+    let (outcome, _) = engine
+        .forget_fact(
+            forgotten,
+            &["user:alice".into()],
+            "wrong",
+            "unscoped:laptop",
+            &record,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::types::ForgetOutcome::Forgotten);
+    add_animal(&engine, "cats purr", None).await;
+    assert_eq!(
+        duplicates_removed(&engine).await,
+        0,
+        "the duplicate's twin is forgotten"
+    );
+
+    assert!(matches!(
+        engine.unforget_fact(forgotten).await.unwrap(),
+        crate::types::UnforgetOutcome::Restored { .. }
+    ));
+    assert_eq!(duplicates_removed(&engine).await, 1);
+}
+
+/// #1080: dedup skips a pinned fact, so the unpin rewinds the watermark below it.
+#[tokio::test]
+async fn dedup_compares_an_unpinned_fact() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let pinned = add_animal(&engine, "cats purr", None).await;
+    engine.pin_fact(pinned).await.unwrap();
+    add_animal(&engine, "cats purr", None).await;
+    assert_eq!(
+        duplicates_removed(&engine).await,
+        0,
+        "a pinned fact is never merged"
+    );
+
+    engine.unpin_fact(pinned).await.unwrap();
+    assert_eq!(duplicates_removed(&engine).await, 1);
+}
+
+/// #1080: a reconstruction gives every fact a new vector, so dedup compares them all.
+#[tokio::test]
+async fn dedup_compares_every_fact_after_a_reconstruction() {
+    use std::sync::Arc;
+
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    add_animal(&engine, "cats purr", None).await;
+    add_animal(&engine, "dogs bark", None).await;
+    assert_eq!(duplicates_removed(&engine).await, 0);
+
+    // Every text embeds to the same vector in the new space.
+    let new: Arc<dyn EmbeddingProvider> = Arc::new(crate::test_utils::MockEmbedder::new(DIM));
+    engine.reconstruct(&new.fingerprint(), &new).await.unwrap();
+    assert_eq!(duplicates_removed(&engine).await, 1);
+}
+
+/// #1080: a restore resets the id sequence to the highest surviving id, so a new fact can
+/// take an erased id at or below a watermark the restore would otherwise have imported.
+#[tokio::test]
+async fn dedup_compares_a_reused_id_after_a_restore() {
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    add_animal(&engine, "cats purr", None).await;
+    let highest = add_animal(&engine, "dogs bark", None).await;
+    assert_eq!(duplicates_removed(&engine).await, 0);
+    let report = engine
+        .erase(&crate::types::EraseTarget::Fact(highest))
+        .await
+        .unwrap();
+    assert_eq!(report.erased_facts, [highest]);
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("dump.json");
+    engine
+        .dump_state(&crate::inspect::DumpFormat::Json(dump.clone()))
+        .await
+        .unwrap();
+
+    let restored = MemoryEngine::restore_json_memory(&dump).unwrap();
+    let reused = add_animal(&restored, "cats meow", None).await;
+    assert_eq!(reused, highest, "the new fact takes the erased id");
+    assert_eq!(duplicates_removed(&restored).await, 1);
 }
 
 /// A `SummaryGenerator` that performs an engine WRITE from inside `summarize`.
