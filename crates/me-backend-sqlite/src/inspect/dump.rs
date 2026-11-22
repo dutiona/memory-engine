@@ -123,11 +123,6 @@ fn mint_sqlite_vacuum_tmp(dir: &Path) -> std::io::Result<tempfile::NamedTempFile
         })
 }
 
-/// Stream engine state as JSON to `writer`, one entity at a time.
-///
-/// Produces the same JSON format as [`me_types::types::inspect::EngineSnapshot`] but
-/// never holds more than one entity in memory per collection. Peak memory drops from
-/// O(total entities) to O(1), making this suitable for databases with 100K+ facts.
 /// The `sqlite_sequence` rows, `table → seq` (#1131).
 fn list_sequences(conn: &Connection) -> Result<std::collections::BTreeMap<String, i64>> {
     let mut stmt = conn
@@ -138,6 +133,11 @@ fn list_sequences(conn: &Connection) -> Result<std::collections::BTreeMap<String
         .map_err(|e| MemoryError::from(me_types::error::StorageError::backend(e)))
 }
 
+/// Stream engine state as JSON to `writer`, one entity at a time.
+///
+/// Produces the same JSON format as [`me_types::types::inspect::EngineSnapshot`] but
+/// never holds more than one entity in memory per collection. Peak memory drops from
+/// O(total entities) to O(1), making this suitable for databases with 100K+ facts.
 fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W) -> Result<()> {
     // One deferred read transaction, which in WAL mode is one snapshot of the store: a delivery
     // that commits while the export runs is in none of the collections, so a receipt never names
