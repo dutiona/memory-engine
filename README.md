@@ -12,7 +12,7 @@ Provides 5 core primitives for agent long-term memory:
 | **Ingest**      | Append events to an immutable log (source of truth)      |
 | **Query**       | Hybrid retrieval (FTS5 + vector + graph) with filters    |
 | **Consolidate** | Merge, cluster, and integrate memories (dream cycle)     |
-| **Prune**       | Decay, prune, and archive stale facts                    |
+| **Prune**       | Decay, expire, and archive stale facts                   |
 | **Resolve**     | Bi-temporal conflict arbitration for contradicting facts |
 
 Built on SQLite (WAL mode) with zero network or LLM dependencies in the core crate.

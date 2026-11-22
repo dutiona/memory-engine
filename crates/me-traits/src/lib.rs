@@ -274,7 +274,7 @@ pub enum CrudDecision {
 /// Requires `Send + Sync`: classifiers are shared across the engine's worker
 /// threads alongside the other consumer providers.
 pub trait PersistenceClassifier: Send + Sync {
-    /// Decide if a fact should be pinned (never forgotten).
+    /// Decide if a fact should be pinned (never pruned).
     fn should_pin(&self, input: &ClassifierInput) -> bool {
         let _ = input;
         false

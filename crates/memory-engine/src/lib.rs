@@ -6,7 +6,7 @@
 //! - **Ingest**: Append events to an immutable log (source of truth)
 //! - **Query**: Hybrid retrieval (FTS5 + vector + graph) with temporal filtering
 //! - **Consolidate**: Merge, cluster, and integrate memories (dream cycle)
-//! - **Prune**: Decay, prune, and archive stale facts
+//! - **Prune**: Decay, expire, and archive stale facts
 //! - **Resolve**: Bi-temporal conflict arbitration for contradicting facts
 //!
 //! ## Storage
@@ -409,7 +409,7 @@ mod tests {
 
         // The prune pair is ALSO reachable through the blanket
         // `pub use me_types::types;` re-export. `PruneStats` always was;
-        // `PrunePolicy` (then `PrunePolicy`) became so in S5 when it was hoisted L3 -> L0 to join it
+        // `PrunePolicy` (then `ForgetPolicy`) became so in S5 when it was hoisted L3 -> L0 to join it
         // (#985). That is an *additive* surface, and it is pinned here on purpose:
         // `cargo public-api` canonicalizes a type to one definition site, so it
         // CANNOT see a path becoming newly writable. Only a compile-time probe like
