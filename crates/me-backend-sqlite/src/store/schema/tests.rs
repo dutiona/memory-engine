@@ -2974,3 +2974,169 @@ fn writable_connections_sync_fully() {
         "a read-only open leaves it alone"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #1049 / #1065: what a store records of its embedding, read at any schema version
+// ---------------------------------------------------------------------------
+
+fn active_row(conn: &Connection, fp: &me_types::types::EmbeddingFingerprint) {
+    conn.execute(
+        "INSERT INTO embedding_spaces
+             (name, model, provider, dim, matryoshka_base_dim, element_type, status)
+         VALUES ('default', ?1, ?2, ?3, ?4, ?5, 'active')",
+        rusqlite::params![
+            fp.model,
+            fp.provider,
+            i64::try_from(fp.dim).unwrap(),
+            fp.matryoshka_base_dim.map(|d| i64::try_from(d).unwrap()),
+            fp.element_type,
+        ],
+    )
+    .unwrap();
+}
+
+/// The read before `migrate` predicts the identity `embedding_meta::load` reads after it, at
+/// every layout the identity has had (v12 config JSON, v13–v14 registry, v15+ served columns).
+#[test]
+fn load_recorded_equals_the_migrated_identity() {
+    use crate::store::embedding_meta::{load, load_recorded};
+    use me_types::types::{EmbeddingFingerprint, RecordedEmbedding, ServedArtifact};
+
+    type Fixture = (
+        &'static str,
+        Box<dyn Fn(&Connection)>,
+        Option<EmbeddingFingerprint>,
+    );
+    let mrl = EmbeddingFingerprint::with_matryoshka("Qwen/Qwen3-Embedding-0.6B", "tei", 8, 16);
+    let plain = EmbeddingFingerprint::new("m", "p", 8);
+    let served = plain.clone().with_served(
+        ServedArtifact::from_parts(
+            Some("a".repeat(64)),
+            Some("last".into()),
+            Some("l2".into()),
+            Some(2048),
+        )
+        .unwrap()
+        .unwrap(),
+    );
+    let v12 = mrl.clone();
+    let fixtures: Vec<Fixture> = vec![
+        (
+            "v12",
+            Box::new(move |c| {
+                simulate_v12(c);
+                set_config(c, "embedding_meta", &serde_json::to_string(&v12).unwrap()).unwrap();
+            }),
+            Some(mrl.clone()),
+        ),
+        ("v12 blank", Box::new(simulate_v12), None),
+        (
+            "v13",
+            {
+                let fp = plain.clone();
+                Box::new(move |c| {
+                    simulate_v13(c);
+                    active_row(c, &fp);
+                })
+            },
+            Some(plain),
+        ),
+        ("v13 blank", Box::new(simulate_v13), None),
+        (
+            "v14",
+            {
+                let fp = mrl.clone();
+                Box::new(move |c| {
+                    simulate_v14(c);
+                    active_row(c, &fp);
+                })
+            },
+            Some(mrl),
+        ),
+        ("v14 blank", Box::new(simulate_v14), None),
+        (
+            "current",
+            {
+                let fp = served.clone();
+                Box::new(move |c| {
+                    init_schema(c).unwrap();
+                    let tx = c.unchecked_transaction().unwrap();
+                    crate::store::embedding_meta::store(&tx, &fp).unwrap();
+                    tx.commit().unwrap();
+                })
+            },
+            Some(served),
+        ),
+        ("current blank", Box::new(|c| init_schema(c).unwrap()), None),
+    ];
+    for (name, build, expected) in fixtures {
+        let conn = open_memory().unwrap();
+        build(&conn);
+        let before = load_recorded(&conn).unwrap();
+        let want = expected
+            .clone()
+            .map_or(RecordedEmbedding::Nothing, RecordedEmbedding::Identity);
+        assert_eq!(before, want, "{name}: read before migrating");
+        migrate(&conn, None).unwrap();
+        assert_eq!(
+            load(&conn).unwrap(),
+            expected,
+            "{name}: identity after migrating"
+        );
+    }
+}
+
+#[test]
+fn load_recorded_reads_a_dimension_or_nothing() {
+    use crate::store::embedding_meta::{STORE_DIM, load_recorded};
+    use me_types::types::RecordedEmbedding;
+
+    // A store whose facts all wait records only its dimension (#1021).
+    let conn = open_memory().unwrap();
+    init_schema(&conn).unwrap();
+    set_config(&conn, STORE_DIM, "4").unwrap();
+    assert_eq!(
+        load_recorded(&conn).unwrap(),
+        RecordedEmbedding::Dimension(4)
+    );
+
+    // No config table: a foreign or empty SQLite file.
+    let conn = open_memory().unwrap();
+    assert_eq!(load_recorded(&conn).unwrap(), RecordedEmbedding::Nothing);
+
+    // A pre-v12 store carried a bare `embed_dim`.
+    let conn = open_memory().unwrap();
+    simulate_v12(&conn);
+    set_config(&conn, "schema_version", "11").unwrap();
+    set_config(&conn, STORE_DIM, "8").unwrap();
+    assert_eq!(
+        load_recorded(&conn).unwrap(),
+        RecordedEmbedding::Dimension(8)
+    );
+
+    // A newer store than this build knows is refused, never guessed at.
+    let conn = open_memory().unwrap();
+    init_schema(&conn).unwrap();
+    set_config(
+        &conn,
+        "schema_version",
+        &(CURRENT_SCHEMA_VERSION + 1).to_string(),
+    )
+    .unwrap();
+    assert!(matches!(
+        load_recorded(&conn),
+        Err(MemoryError::Migration(
+            MigrationError::SchemaVersionUnsupported { .. }
+        ))
+    ));
+
+    // A corrupt v12 value fails as the migration would.
+    let conn = open_memory().unwrap();
+    simulate_v12(&conn);
+    set_config(&conn, "embedding_meta", "{not json").unwrap();
+    let err = load_recorded(&conn).expect_err("corrupt v12 value");
+    assert!(
+        matches!(&err, MemoryError::Migration(MigrationError::Incompatible(m)) if m.contains("corrupt embedding_meta")),
+        "{err:?}"
+    );
+}

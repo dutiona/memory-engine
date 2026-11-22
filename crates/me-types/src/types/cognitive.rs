@@ -291,6 +291,58 @@ impl EmbeddingFingerprint {
     }
 }
 
+/// What a store records of its embedding, read at any schema version (#1049, #1065).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedEmbedding {
+    /// The recorded identity (schema v12 and later); its `dim` is the store's dimension.
+    Identity(EmbeddingFingerprint),
+    /// A dimension and no identity: a store whose facts all wait for their first vector
+    /// (#1021), or a store from before schema v12.
+    Dimension(usize),
+    /// Nothing recorded: a store that never stored a fact, or a file with no `config` table.
+    Nothing,
+}
+
+impl RecordedEmbedding {
+    /// The recorded dimension: the identity's, or the bare one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_types::types::{EmbeddingFingerprint, RecordedEmbedding};
+    ///
+    /// let fp = EmbeddingFingerprint::new("m", "p", 8);
+    /// assert_eq!(RecordedEmbedding::Identity(fp).dim(), Some(8));
+    /// assert_eq!(RecordedEmbedding::Dimension(4).dim(), Some(4));
+    /// assert_eq!(RecordedEmbedding::Nothing.dim(), None);
+    /// ```
+    #[must_use]
+    pub const fn dim(&self) -> Option<usize> {
+        match self {
+            Self::Identity(fp) => Some(fp.dim),
+            Self::Dimension(dim) => Some(*dim),
+            Self::Nothing => None,
+        }
+    }
+
+    /// The recorded identity, if any.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_types::types::RecordedEmbedding;
+    ///
+    /// assert!(RecordedEmbedding::Dimension(4).identity().is_none());
+    /// ```
+    #[must_use]
+    pub const fn identity(&self) -> Option<&EmbeddingFingerprint> {
+        match self {
+            Self::Identity(fp) => Some(fp),
+            Self::Dimension(_) | Self::Nothing => None,
+        }
+    }
+}
+
 /// The **served artifact** of an embedding identity (ADR 0015 §1).
 ///
 /// It is what the serving backend does to a model beyond its slug. The same slug served

@@ -50,6 +50,7 @@ mod outcome;
 mod pruning;
 mod query;
 mod reconstruct;
+mod recorded;
 pub(crate) mod redaction_counts;
 mod restore;
 mod resume;
@@ -59,6 +60,7 @@ mod scheduling;
 // `snapshot::*` reference below (and `crate::engine::snapshot::*` elsewhere) keeps
 // resolving unchanged.
 pub(crate) use me_backend_sqlite::snapshot;
+pub use recorded::read_recorded_embedding;
 
 #[cfg(feature = "archive")]
 mod archive;

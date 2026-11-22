@@ -6384,3 +6384,80 @@ mod scope_writes {
         ));
     }
 }
+
+// ---------------------------------------------------------------------------
+// #1049 / #1065: older stores are read where they lie, before anything migrates
+// ---------------------------------------------------------------------------
+
+/// A file store at `dim` whose one fact recorded `fp`, closed and rolled back by raw SQL to
+/// schema v14 (no served-artifact columns), as a pre-#1017 binary left it.
+pub(super) async fn older_store(dir: &std::path::Path, fp: &EmbeddingFingerprint) -> PathBuf {
+    let db = dir.join("older.db");
+    let mut engine = MemoryEngine::builder(fp.dim).path(&db).build().unwrap();
+    engine
+        .add_fact_precomputed(
+            &AddFactRequest {
+                content: "an older fact".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            vec![0.5; fp.dim],
+            fp,
+            None,
+        )
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE embedding_spaces DROP COLUMN artifact_sha256;
+         ALTER TABLE embedding_spaces DROP COLUMN pooling;
+         ALTER TABLE embedding_spaces DROP COLUMN normalization;
+         ALTER TABLE embedding_spaces DROP COLUMN max_input_tokens;
+         UPDATE config SET value = '14' WHERE key = 'schema_version';
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    )
+    .unwrap();
+    drop(conn);
+    db
+}
+
+/// The store's bytes (the database and its `-wal`, absent read as empty) and its
+/// `schema_version`: what a refused open must leave unchanged (#1065).
+pub(super) fn store_state(db: &std::path::Path) -> (Vec<u8>, Vec<u8>, String) {
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    let version =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM config WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+    (
+        std::fs::read(db).unwrap(),
+        std::fs::read(PathBuf::from(wal)).unwrap_or_default(),
+        version,
+    )
+}
+
+#[tokio::test]
+async fn read_recorded_embedding_never_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let fp = EmbeddingFingerprint::new("m", "p", DIM);
+    let db = older_store(dir.path(), &fp).await;
+    let before = store_state(&db);
+    assert_eq!(
+        crate::read_recorded_embedding(&db).unwrap(),
+        crate::types::RecordedEmbedding::Identity(fp)
+    );
+    assert_eq!(store_state(&db), before, "the read changed the store");
+    assert!(matches!(
+        crate::read_recorded_embedding(&dir.path().join("missing.db")),
+        Err(MemoryError::NotFound(_))
+    ));
+}

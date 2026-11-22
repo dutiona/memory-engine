@@ -104,6 +104,11 @@ fn row_to_space(row: &rusqlite::Row) -> rusqlite::Result<Result<EmbeddingSpace>>
 const SELECT_COLS: &str = "name, model, provider, dim, matryoshka_base_dim, element_type, status, \
      artifact_sha256, pooling, normalization, max_input_tokens FROM embedding_spaces";
 
+/// [`SELECT_COLS`] for a v13 or v14 registry, which has no served-artifact columns yet: they
+/// read as `NULL`, the value `migrate_v14_to_v15` gives them.
+const SELECT_COLS_BEFORE_V15: &str = "name, model, provider, dim, matryoshka_base_dim, element_type, \
+     status, NULL, NULL, NULL, NULL FROM embedding_spaces";
+
 /// The single active space, or `None` on a store that has never embedded.
 ///
 /// # Errors
@@ -112,7 +117,21 @@ const SELECT_COLS: &str = "name, model, provider, dim, matryoshka_base_dim, elem
 /// one active row exists (impossible under the partial unique index — fail loud, never
 /// pick arbitrarily) or if a stored dimension/status is corrupt.
 pub fn find_active(conn: &Connection) -> Result<Option<EmbeddingSpace>> {
-    let sql = format!("SELECT {SELECT_COLS} WHERE status = 'active'");
+    find_active_with(conn, SELECT_COLS)
+}
+
+/// [`find_active`] on a v13 or v14 registry (no served-artifact columns), read-only and
+/// without migrating, for `embedding_meta::load_recorded`.
+///
+/// # Errors
+///
+/// As [`find_active`].
+pub fn find_active_before_v15(conn: &Connection) -> Result<Option<EmbeddingSpace>> {
+    find_active_with(conn, SELECT_COLS_BEFORE_V15)
+}
+
+fn find_active_with(conn: &Connection, cols: &str) -> Result<Option<EmbeddingSpace>> {
+    let sql = format!("SELECT {cols} WHERE status = 'active'");
     let mut stmt = conn.prepare(&sql).map_err(StorageError::backend)?;
     let mut rows = stmt.query([]).map_err(StorageError::backend)?;
     let Some(first) = rows.next().map_err(StorageError::backend)? else {
