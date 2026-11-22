@@ -259,6 +259,7 @@ impl me_traits::DreamCtx for TestEngine {
                 req.scope.as_deref(),
                 &req.source_fact_ids,
                 &req.provenance,
+                &req.embedding_fingerprint,
             )
             .await?;
         Ok(result)

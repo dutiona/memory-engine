@@ -181,10 +181,11 @@ pub trait ConsolidationStore: Send + Sync {
     /// transaction — the standalone `promote()` write path. Resolves `scope_path`
     /// inside the transaction (returning any newly-created scope ids for the engine
     /// to cache), guards that the store has a recorded embedding identity
-    /// (#613/#615), inserts the pinned fact and its lineage record, and fires the
-    /// post-commit HNSW `notify_insert` (Stage B). The provenance is already injected
-    /// into `fact.metadata` engine-side; `fact.scope_id` is a placeholder patched
-    /// from the resolved `scope_path`.
+    /// (#613/#615) equal to `declared`, the identity of `fact.embedding`
+    /// (`MemoryError::EmbeddingModelMismatch` otherwise), inserts the pinned fact and
+    /// its lineage record, and fires the post-commit HNSW `notify_insert` (Stage B).
+    /// The provenance is already injected into `fact.metadata` engine-side;
+    /// `fact.scope_id` is a placeholder patched from the resolved `scope_path`.
     ///
     /// Content a forget's tombstone blocks (#1023) is refused with `Conflict(Forgotten)`
     /// and nothing is written; [`apply_cycle_deltas_atomic`](Self::apply_cycle_deltas_atomic)
@@ -211,5 +212,6 @@ pub trait ConsolidationStore: Send + Sync {
         scope_path: Option<&str>,
         source_fact_ids: &[i64],
         provenance: &me_types::types::PromotionProvenance,
+        declared: &me_types::types::EmbeddingFingerprint,
     ) -> Result<(me_types::types::PromotionResult, Vec<i64>)>;
 }

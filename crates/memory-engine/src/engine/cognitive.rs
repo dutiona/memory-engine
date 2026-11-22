@@ -540,6 +540,7 @@ impl MemoryEngine {
                 req.scope.as_deref(),
                 &req.source_fact_ids,
                 &req.provenance,
+                &req.embedding_fingerprint,
             )
             .await?;
 
@@ -962,6 +963,7 @@ mod tests {
             content: "promoted wisdom".into(),
             fact_type: FactType::Semantic,
             embedding: vec![0.1; 8], // wrong dim (engine expects 4)
+            embedding_fingerprint: crate::types::EmbeddingFingerprint::new("mock", "test", 4),
             importance: 0.9,
             metadata: serde_json::json!({}),
             scope: None,
@@ -994,6 +996,7 @@ mod tests {
             content: "promoted wisdom".into(),
             fact_type: FactType::Semantic,
             embedding: vec![0.1, 0.2, 0.3, 0.4], // correct dim — dim check passes
+            embedding_fingerprint: crate::types::EmbeddingFingerprint::new("mock", "test", 4),
             importance: 0.9,
             metadata: serde_json::json!({}),
             scope: None,
@@ -1028,6 +1031,7 @@ mod tests {
             content: "User prefers terse responses".into(),
             fact_type: FactType::Semantic,
             embedding: vec![0.1, 0.2, 0.3, 0.4],
+            embedding_fingerprint: crate::types::EmbeddingFingerprint::new("mock", "test", 4),
             importance: 0.9,
             metadata: serde_json::json!({}),
             scope: None,
@@ -1063,6 +1067,7 @@ mod tests {
             content,
             fact_type: FactType::Semantic,
             embedding: vec![0.1, 0.2, 0.3, 0.4],
+            embedding_fingerprint: crate::types::EmbeddingFingerprint::new("mock", "test", 4),
             importance: 0.9,
             metadata: serde_json::json!({ "note": format!("key {aws}") }),
             scope: None,
@@ -1123,6 +1128,7 @@ mod tests {
             content: "wisdom fact".into(),
             fact_type: FactType::Semantic,
             embedding: vec![1.0, 0.0, 0.0, 0.0],
+            embedding_fingerprint: crate::types::EmbeddingFingerprint::new("mock", "test", 4),
             importance: 0.95,
             metadata: serde_json::json!({"existing": "data"}),
             scope: None,

@@ -100,7 +100,9 @@ deltas carry, in `CycleReport::embedding_fingerprint` (ADR-0015 §3, #1062). The
 refuses the whole report, before any write, when such a delta comes with no declaration
 (`CycleError::UndeclaredEmbedding`), when the store has no identity yet, or when the
 declaration differs from the store's (`EmbeddingModelMismatch`). A report without vectors
-declares nothing: a `Promote` delta copies a vector already stored.
+declares nothing: a `Promote` delta copies a vector already stored. `DreamCtx::promote` is
+held to the same rule: its `PromoteRequest::embedding_fingerprint` must equal the store's
+identity.
 
 ## Retrieve-before-reflect: `CycleContext`
 
