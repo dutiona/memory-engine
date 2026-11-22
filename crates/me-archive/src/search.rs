@@ -13,6 +13,7 @@ use crate::pak::read_pak;
 use crate::types::ArchiveManifestEntry;
 use me_types::error::Result;
 use me_types::math::cosine_similarity;
+use me_types::types::EmbeddingFingerprint;
 use me_types::types::search::{MatchType, MemoryQuery, SearchResult};
 
 /// Summary result from scanning archives.
@@ -23,6 +24,9 @@ use me_types::types::search::{MatchType, MemoryQuery, SearchResult};
 pub struct ArchiveSearchResult {
     pub results: Vec<SearchResult>,
     pub paks_scanned: usize,
+    /// Scanned paks whose vectors were not compared with the query's embedding: their
+    /// recorded identity is not the active one (#1061). `0` for a query with no embedding.
+    pub paks_unscored: usize,
     pub search_ms: u64,
 }
 
@@ -116,6 +120,13 @@ const fn entry_is_prunable(_entry: &ArchiveManifestEntry, _query: &MemoryQuery) 
 /// Applies text substring matching and cosine similarity as available from the
 /// query. Fact-type filtering is applied when `query.fact_type` is set.
 ///
+/// Cosine similarity is computed only for a pak whose recorded
+/// [`embedding_identity`](crate::types::ArchivePak::embedding_identity) equals `active`,
+/// the store's active identity (#1061): a vector made under another model, or under an
+/// unknown one, is not comparable with the query's. Such a pak is still matched by text
+/// and is counted in [`ArchiveSearchResult::paks_unscored`]; with no `active` identity no
+/// pak is vector-scored.
+///
 /// Paks are decompressed one at a time and only the top-`limit` matches (by
 /// score) are retained in a bounded min-heap, so peak memory is `O(limit)`
 /// matching facts rather than `O(total matches)` (#342). Manifest entries are
@@ -136,6 +147,7 @@ pub(crate) fn search_archives(
     manifest_entries: &[ArchiveManifestEntry],
     query: &MemoryQuery,
     limit: usize,
+    active: Option<&EmbeddingFingerprint>,
 ) -> Result<ArchiveSearchResult> {
     let start = Instant::now();
     // Bounded min-heap: never holds more than `limit` matches at once. The
@@ -143,6 +155,7 @@ pub(crate) fn search_archives(
     // higher-scored candidate arrives.
     let mut heap: BinaryHeap<MinScored> = BinaryHeap::new();
     let mut paks_scanned = 0usize;
+    let mut paks_unscored = 0usize;
 
     // Pre-compute the lowercased query once; it is invariant across all facts.
     let query_text_lower = query.text.as_ref().map(|text| text.to_lowercase());
@@ -167,6 +180,10 @@ pub(crate) fn search_archives(
 
         let pak = read_pak(&pak_path)?;
         paks_scanned += 1;
+        let comparable = active.is_some() && pak.embedding_identity.as_ref() == active;
+        if query.embedding.is_some() && !comparable {
+            paks_unscored += 1;
+        }
 
         for fact in &pak.facts {
             // Fact-type filter
@@ -192,7 +209,8 @@ pub(crate) fn search_archives(
             }
 
             // Vector similarity — reuse existing cosine_similarity
-            if let Some(ref query_emb) = query.embedding
+            if comparable
+                && let Some(ref query_emb) = query.embedding
                 && query_emb.len() == fact.embedding.len()
                 && !fact.embedding.is_empty()
             {
@@ -226,6 +244,7 @@ pub(crate) fn search_archives(
     Ok(ArchiveSearchResult {
         results,
         paks_scanned,
+        paks_unscored,
         search_ms,
     })
 }
@@ -308,12 +327,18 @@ mod tests {
         }
     }
 
-    /// Wrap facts into an `ArchivePak` with current versions.
+    /// The identity `model` names; every fixture pak records `identity("a")`.
+    fn identity(model: &str) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new(model, "test", 3)
+    }
+
+    /// Wrap facts into an `ArchivePak` with current versions, recorded under `identity("a")`.
     fn pak_with(facts: Vec<Fact>) -> ArchivePak {
         ArchivePak {
             pak_version: CURRENT_PAK_VERSION,
             engine_schema_version: ARCHIVE_SCHEMA_VERSION,
             embed_dim: facts.first().map_or(0, |f| f.embedding.len()),
+            embedding_identity: Some(identity("a")),
             created_at: Utc::now(),
             facts,
             edges: vec![],
@@ -367,7 +392,8 @@ mod tests {
         let entry = write_entry(dir.path(), "a.pak", &pak);
 
         let query = MemoryQuery::new().text("brown");
-        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10, Some(&identity("a")))
+            .expect("search");
 
         assert_eq!(out.paks_scanned, 1);
         assert_eq!(out.results.len(), 1);
@@ -388,7 +414,8 @@ mod tests {
         let entry = write_entry(dir.path(), "vec.pak", &pak);
 
         let query = MemoryQuery::new().embedding(vec![1.0, 0.0]);
-        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10, Some(&identity("a")))
+            .expect("search");
 
         // Orthogonal fact has cos == 0.0 which is not > 0.0, so it does not match.
         assert_eq!(out.results.len(), 1);
@@ -405,7 +432,8 @@ mod tests {
         // Query embedding has a different length than the fact embedding, so the
         // vector branch is skipped; with no text either, nothing matches.
         let query = MemoryQuery::new().embedding(vec![1.0, 0.0, 0.0]);
-        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10, Some(&identity("a")))
+            .expect("search");
 
         assert!(out.results.is_empty());
     }
@@ -424,7 +452,8 @@ mod tests {
         let query = MemoryQuery::new()
             .text("matching")
             .embedding(vec![1.0, 0.0]);
-        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10, Some(&identity("a")))
+            .expect("search");
 
         assert_eq!(out.results.len(), 1);
         // 1.0 (text) + 1.0 (cosine) == 2.0.
@@ -443,7 +472,8 @@ mod tests {
         let entry = write_entry(dir.path(), "all.pak", &pak);
 
         let query = MemoryQuery::new();
-        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10, Some(&identity("a")))
+            .expect("search");
 
         assert_eq!(out.results.len(), 2);
         assert!(out.results.iter().all(|r| (r.score - 1.0).abs() < 1e-6));
@@ -462,7 +492,8 @@ mod tests {
         let entry = write_entry(dir.path(), "types.pak", &pak);
 
         let query = MemoryQuery::new().fact_type(FactType::Semantic);
-        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10, Some(&identity("a")))
+            .expect("search");
 
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].fact.id, 2);
@@ -505,7 +536,8 @@ mod tests {
         };
 
         let query = MemoryQuery::new();
-        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10, Some(&identity("a")))
+            .expect("search");
 
         assert_eq!(out.paks_scanned, 0, "traversal entry must not be read");
         assert!(out.results.is_empty());
@@ -538,7 +570,14 @@ mod tests {
         };
 
         let query = MemoryQuery::new();
-        let out = search_archives(dir.path(), &[present, absent], &query, 10).expect("search");
+        let out = search_archives(
+            dir.path(),
+            &[present, absent],
+            &query,
+            10,
+            Some(&identity("a")),
+        )
+        .expect("search");
 
         assert_eq!(out.paks_scanned, 1, "only the present pak is read");
         assert_eq!(out.results.len(), 1);
@@ -562,7 +601,8 @@ mod tests {
         );
 
         let query = MemoryQuery::new().text("apple");
-        let out = search_archives(dir.path(), &[e1, e2], &query, 10).expect("search");
+        let out = search_archives(dir.path(), &[e1, e2], &query, 10, Some(&identity("a")))
+            .expect("search");
 
         assert_eq!(out.paks_scanned, 2);
         assert_eq!(out.results.len(), 2);
@@ -590,14 +630,21 @@ mod tests {
         let query = MemoryQuery::new().embedding(vec![1.0, 0.0]);
 
         // Full set: descending by score.
-        let full =
-            search_archives(dir.path(), std::slice::from_ref(&entry), &query, 10).expect("search");
+        let full = search_archives(
+            dir.path(),
+            std::slice::from_ref(&entry),
+            &query,
+            10,
+            Some(&identity("a")),
+        )
+        .expect("search");
         assert_eq!(full.results.len(), 3);
         let order: Vec<i64> = full.results.iter().map(|r| r.fact.id).collect();
         assert_eq!(order, vec![1, 3, 2], "descending by cosine score");
 
         // limit < candidates: keep the top-2 highest-scored only.
-        let capped = search_archives(dir.path(), &[entry], &query, 2).expect("search");
+        let capped =
+            search_archives(dir.path(), &[entry], &query, 2, Some(&identity("a"))).expect("search");
         assert_eq!(capped.results.len(), 2);
         let capped_ids: Vec<i64> = capped.results.iter().map(|r| r.fact.id).collect();
         assert_eq!(capped_ids, vec![1, 3], "top-2 by score retained");
@@ -613,7 +660,8 @@ mod tests {
         );
 
         let query = MemoryQuery::new();
-        let out = search_archives(dir.path(), &[entry], &query, 0).expect("search");
+        let out =
+            search_archives(dir.path(), &[entry], &query, 0, Some(&identity("a"))).expect("search");
 
         assert!(out.results.is_empty());
         // The pak is still scanned even when limit == 0.
@@ -646,7 +694,8 @@ mod tests {
         );
 
         let query = MemoryQuery::new().text("apple");
-        let out = search_archives(dir.path(), &[e1, e2], &query, 2).expect("search");
+        let out = search_archives(dir.path(), &[e1, e2], &query, 2, Some(&identity("a")))
+            .expect("search");
 
         assert_eq!(out.paks_scanned, 2);
         // Six candidates, but only `limit` retained.
@@ -695,7 +744,8 @@ mod tests {
         );
         assert!(!entry_is_prunable(&entry, &query));
 
-        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10, Some(&identity("a")))
+            .expect("search");
         assert_eq!(out.paks_scanned, 1);
         assert_eq!(out.results.len(), 1);
         assert_eq!(out.results[0].fact.id, 42);
@@ -734,7 +784,8 @@ mod tests {
         // axis against a valid-time window is unsound — the fact must survive.
         assert!(!entry_is_prunable(&entry, &query));
 
-        let out = search_archives(dir.path(), &[entry], &query, 10).expect("search");
+        let out = search_archives(dir.path(), &[entry], &query, 10, Some(&identity("a")))
+            .expect("search");
         assert_eq!(
             out.paks_scanned, 1,
             "the pak must still be read, not pruned"
@@ -752,5 +803,59 @@ mod tests {
         // Reversed ordering: the lower score is the "greater" element, so a
         // max-heap's peek would surface it for eviction.
         assert!(low > high);
+    }
+
+    // --- #1061: vectors are scored only within one embedding identity ---
+
+    #[test]
+    fn search_scores_vectors_only_within_one_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut entries = Vec::new();
+        for (name, recorded) in [
+            ("a", Some(identity("a"))),
+            ("b", Some(identity("b"))),
+            ("v2", None),
+        ] {
+            let mut pak = pak_with(vec![fact(
+                1,
+                &format!("{name} fact"),
+                FactType::Episodic,
+                vec![1.0, 0.0, 0.0],
+            )]);
+            pak.embedding_identity = recorded;
+            entries.push(write_entry(dir.path(), &format!("{name}.pak"), &pak));
+        }
+        let by_vector = MemoryQuery::new().embedding(vec![1.0, 0.0, 0.0]);
+
+        let out = search_archives(dir.path(), &entries, &by_vector, 10, Some(&identity("a")))
+            .expect("search");
+        let found: Vec<&str> = out
+            .results
+            .iter()
+            .map(|r| r.fact.content.as_str())
+            .collect();
+        assert_eq!(
+            found,
+            ["a fact"],
+            "only the pak of the active identity is vector-scored"
+        );
+        assert_eq!((out.paks_scanned, out.paks_unscored), (3, 2));
+
+        let out = search_archives(dir.path(), &entries, &by_vector, 10, None).expect("search");
+        assert_eq!(
+            out.results.len(),
+            0,
+            "a store with no identity scores no pak"
+        );
+        assert_eq!(out.paks_unscored, 3);
+
+        let by_text = MemoryQuery::new().text("fact");
+        let out = search_archives(dir.path(), &entries, &by_text, 10, Some(&identity("a")))
+            .expect("search");
+        assert_eq!(out.results.len(), 3, "text matching ignores the identity");
+        assert_eq!(
+            out.paks_unscored, 0,
+            "a query without an embedding leaves nothing unscored"
+        );
     }
 }

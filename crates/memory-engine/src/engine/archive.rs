@@ -125,8 +125,15 @@ impl MemoryEngine {
         let Ok(archive_dir) = self.archive_dir() else {
             return Ok(None);
         };
-        crate::archive::search_archives_fallback(self.cold.as_ref(), &archive_dir, query, limit)
-            .await
+        let active = self.storage.load_embedding_fingerprint().await?;
+        crate::archive::search_archives_fallback(
+            self.cold.as_ref(),
+            &archive_dir,
+            query,
+            limit,
+            active.as_ref(),
+        )
+        .await
     }
 
     /// Resolve the archive directory (sibling of DB file + `/archives/`).

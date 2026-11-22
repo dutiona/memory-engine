@@ -15,10 +15,24 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use me_types::error::Result;
+use me_types::types::EmbeddingFingerprint;
 use me_types::types::{
     Edge, EmbeddingFailure, EventFilter, Fact, FactScoringRow, FactType, NewEdge, NewEvent,
     NewFact, NextEmbedding, ScopeNode, SessionFact,
 };
+
+/// What [`FactGraph::select_archive_candidates`] reads, in one read transaction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArchiveCandidates {
+    /// Expired, non-pinned facts.
+    pub facts: Vec<Fact>,
+    /// The edges whose both endpoints are in `facts`.
+    pub edges: Vec<Edge>,
+    /// The store's active embedding identity, `None` if it records none: the identity
+    /// the candidates' vectors were made under, read with them so a reconstruction cannot
+    /// fall between the two reads (#1061).
+    pub embedding_identity: Option<EmbeddingFingerprint>,
+}
 
 /// Outcome of [`FactGraph::ingest_bootstrap_batch_atomic`].
 ///
@@ -433,8 +447,8 @@ pub trait FactGraph: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<(Option<i64>, Option<i64>)>;
 
-    /// Select archive candidates (expired, non-pinned facts) and their internal
-    /// edges.
+    /// Select archive candidates (expired, non-pinned facts), their internal edges, and
+    /// the store's active embedding identity, all in one read transaction.
     ///
     /// It is a **read method** (uses a read connection) — the write commit is
     /// `ColdStorage::commit_archive_atomic`.
@@ -448,7 +462,7 @@ pub trait FactGraph: Send + Sync {
     async fn select_archive_candidates(
         &self,
         expired_before: DateTime<Utc>,
-    ) -> Result<(Vec<me_types::types::Fact>, Vec<me_types::types::Edge>)>;
+    ) -> Result<ArchiveCandidates>;
 
     /// Atomically materialize importance scores for the active set and expire the
     /// sub-threshold facts (cascading edge expiry) in a single transaction.

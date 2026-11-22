@@ -135,6 +135,17 @@ The result is a `PromoteOutcome` (see [below](#promoteoutcome-and-index-rebuild)
 count, the ids of the facts left without a vector (`without_vector`), the deprecated old space's name, the new active fingerprint (carrying the new dim for #742),
 the straggler count, and `rebuild_index`.
 
+## Archived facts keep their old vectors
+
+A reconstruction re-embeds the live store only: facts already archived into `.pak` files keep the
+vectors they were archived with. Each pak (format v3, #1061) records the embedding identity the store
+recorded when it was written, read in the same transaction as its facts. Archive search
+(`MemoryQuery::include_archives`) compares a pak's vectors with the query's embedding only when that
+identity equals the store's active one; every other pak, an older v2 pak (which records none)
+included, is still matched by text and is counted in `QueryDiagnostics::archive_paks_unscored`. So
+after a reconstruction to a new model, archived facts stay findable by text and are never ranked by a
+vector from another space. A binary older than format v3 refuses a v3 pak.
+
 ## Single-active invariant
 
 At most one `embedding_spaces` row is `active` at any time, enforced **structurally** by a partial

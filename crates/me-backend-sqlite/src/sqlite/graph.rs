@@ -973,14 +973,24 @@ impl FactGraph for SqliteBackend {
     async fn select_archive_candidates(
         &self,
         expired_before: DateTime<Utc>,
-    ) -> Result<(Vec<Fact>, Vec<Edge>)> {
+    ) -> Result<me_storage::ArchiveCandidates> {
         let dim = self.embed_dim;
         self.block_read(move |conn| {
-            let candidate_facts =
-                FactStore::new(conn, dim).list_archive_candidates(expired_before)?;
-            let candidate_ids: Vec<i64> = candidate_facts.iter().map(|f| f.id).collect();
-            let candidate_edges = EdgeStore::new(conn).list_internal_by_facts(&candidate_ids)?;
-            Ok((candidate_facts, candidate_edges))
+            // One read transaction: a promote between the reads would otherwise let the
+            // pak record the new identity beside vectors made under the old one (#1061).
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(StorageError::backend)?;
+            let facts = FactStore::new(&tx, dim).list_archive_candidates(expired_before)?;
+            let candidate_ids: Vec<i64> = facts.iter().map(|f| f.id).collect();
+            let edges = EdgeStore::new(&tx).list_internal_by_facts(&candidate_ids)?;
+            let embedding_identity = crate::store::embedding_meta::load(&tx)?;
+            tx.commit().map_err(StorageError::backend)?;
+            Ok(me_storage::ArchiveCandidates {
+                facts,
+                edges,
+                embedding_identity,
+            })
         })
         .await
     }
@@ -2225,10 +2235,11 @@ mod tests {
                 .unwrap()
         };
         let be = backend(Arc::clone(&pool));
-        let (port_facts, _edges) = be
+        let port_facts = be
             .select_archive_candidates(cutoff + Duration::hours(1))
             .await
-            .unwrap();
+            .unwrap()
+            .facts;
         let oracle_ids: Vec<i64> = oracle_facts.iter().map(|f| f.id).collect();
         let port_ids: Vec<i64> = port_facts.iter().map(|f| f.id).collect();
         assert_eq!(
@@ -2236,6 +2247,37 @@ mod tests {
             "port must return same candidates as direct store"
         );
         assert_eq!(port_facts.len(), 1, "only the expired fact qualifies");
+    }
+
+    /// #1061: the candidates come with the identity their vectors were made under, read
+    /// in the same transaction; an unstamped store records none.
+    #[tokio::test]
+    async fn select_archive_candidates_reads_the_identity_with_its_candidates() {
+        use chrono::Duration;
+        use me_types::types::EmbeddingFingerprint;
+        let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
+        let be = backend(Arc::clone(&pool));
+        let later = Utc::now() + Duration::hours(1);
+        assert_eq!(
+            be.select_archive_candidates(later)
+                .await
+                .unwrap()
+                .embedding_identity,
+            None
+        );
+        let identity = EmbeddingFingerprint::new("model", "provider", DIM);
+        let conn = pool.write();
+        let tx = conn.unchecked_transaction().unwrap();
+        crate::store::embedding_meta::store(&tx, &identity).unwrap();
+        tx.commit().unwrap();
+        drop(conn);
+        assert_eq!(
+            be.select_archive_candidates(later)
+                .await
+                .unwrap()
+                .embedding_identity,
+            Some(identity)
+        );
     }
 
     #[tokio::test]

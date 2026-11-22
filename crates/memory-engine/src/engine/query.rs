@@ -77,6 +77,7 @@ impl MemoryEngine {
             match self.search_archives_fallback(query, limit).await {
                 Ok(Some(archive_results)) => {
                     response.diagnostics.archive_paks_scanned = archive_results.paks_scanned;
+                    response.diagnostics.archive_paks_unscored = archive_results.paks_unscored;
                     response.diagnostics.archive_search_ms = archive_results.search_ms;
                     response.results.extend(archive_results.results);
                     response.results.sort_by(|a, b| {
