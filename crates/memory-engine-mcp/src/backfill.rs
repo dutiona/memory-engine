@@ -170,7 +170,10 @@ impl UploadEnvelope {
 fn known(harness: &str, kind: &str) -> bool {
     matches!(
         (harness, kind),
-        ("claude-code", "transcript" | "memory-file")
+        (
+            "claude-code",
+            "transcript" | "memory-file" | "claude-mem" | "claude-memory"
+        )
     )
 }
 
@@ -369,7 +372,7 @@ impl MemoryMcpServer {
                 "pending": census.pending,
                 "incomplete_turns": census.incomplete_turns,
             }),
-            copy: false,
+            copy: is_copy(&envelope.kind),
         };
         let imported = match self
             .engine
@@ -413,6 +416,12 @@ impl MemoryMcpServer {
     }
 }
 
+/// Whether an upload of `kind` is a plugin store's copy (#1117): its events are labelled with
+/// the kind and yield to live capture and to every other import of their session.
+fn is_copy(kind: &str) -> bool {
+    matches!(kind, "claude-mem" | "claude-memory")
+}
+
 /// The reader the harness and kind select (ADR-0020 §1), run on the upload's body: a memory file
 /// is named by its source's last segment, filed under `home` and dated by `mtime`.
 fn read_upload(
@@ -427,6 +436,8 @@ fn read_upload(
             let name = envelope.source.rsplit('/').next().unwrap_or_default();
             claude_code::memory::read(name, home, body, mtime)
         }
+        ("claude-code", "claude-mem") => claude_code::claude_mem::read(body),
+        ("claude-code", "claude-memory") => claude_code::claude_memory::read(body),
         _ => Err("an unknown harness or kind"),
     }
 }
@@ -455,6 +466,7 @@ struct Session {
     first: Option<DateTime<Utc>>,
     last: Option<DateTime<Utc>>,
     events: usize,
+    superseded: usize,
 }
 
 /// The report's counts and lists, over the import's items. A refused item is counted by its
@@ -493,6 +505,7 @@ impl<'a> Tally<'a> {
                 session.first = Some(session.first.map_or(item.time, |t| t.min(item.time)));
                 session.last = Some(session.last.map_or(item.time, |t| t.max(item.time)));
                 session.events += usize::from(*outcome == ImportOutcome::Stored);
+                session.superseded += usize::from(*outcome == ImportOutcome::Superseded);
             }
             if *outcome == ImportOutcome::Collision {
                 let collision = json!({ "event_id": item.event_id, "line": item.line });
@@ -549,6 +562,8 @@ impl Report<'_> {
                     "last": s.last.map(time),
                     "events": s.events,
                     "live_since": imported.live_since.get(id).map(|k| time(k.time)),
+                    "superseded": s.superseded,
+                    "held_by": imported.held_by.get(id).into_iter().flatten().collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -590,6 +605,7 @@ impl Report<'_> {
                 "duplicate": count("duplicate"),
                 "collision": count("collision"),
                 "live_overlap": count("live_overlap"),
+                "superseded": count("superseded"),
                 "pending": census.pending,
                 "refused": refused,
                 "by_kind": by_kind,
@@ -614,6 +630,7 @@ impl Report<'_> {
                     "t_created": time(f.t_created),
                     "outcome": f.outcome,
                     "hint": f.hint,
+                    "importance": f.importance,
                     "preview": f.preview,
                 })).collect::<Vec<_>>(),
             },
@@ -746,9 +763,10 @@ mod tests {
 
     #[test]
     fn only_a_known_harness_and_kind_has_a_reader() {
-        assert!(known("claude-code", "transcript"));
-        assert!(known("claude-code", "memory-file"));
-        assert!(!known("claude-code", "claude-mem"));
+        for kind in ["transcript", "memory-file", "claude-mem", "claude-memory"] {
+            assert!(known("claude-code", kind), "{kind}");
+        }
+        assert!(!known("claude-code", "no-such-kind"));
         assert!(!known("codex", "transcript"));
     }
 }
