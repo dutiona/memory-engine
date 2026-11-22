@@ -131,7 +131,7 @@ async fn forget_acts_at_the_user_level_from_any_machine() {
 /// C7 and C17 (ADR-0021): a missing id, a negative id, a root fact, another machine's bucket
 /// and a project the session reached only through `recall(project:)` answer the same.
 #[tokio::test]
-async fn not_found_is_the_same_for_every_out_of_reach_fact() {
+async fn forget_and_set_level_answer_not_found_alike() {
     let server = TestServer::start().await;
     let at_root = server.seed(None, "kestrel at the root", json!({})).await;
     let desktops = server
@@ -151,13 +151,33 @@ async fn not_found_is_the_same_for_every_out_of_reach_fact() {
         swapped.body.contains(&in_project.to_string()),
         "{swapped:?}"
     );
+    let ids = [999_999, -1, at_root, desktops, in_project];
     let mut bodies = Vec::new();
-    for id in [999_999, -1, at_root, desktops, in_project] {
+    for id in ids {
         let reply = forget(&server, "laptop", id).await;
-        assert!(!reply.is_error, "{id}: {reply:?}");
+        assert!(!reply.is_error, "forget {id}: {reply:?}");
+        bodies.push(reply.body);
+        let reply = server
+            .tool("laptop", "set_level", json!({ "id": id, "level": "user" }))
+            .await;
+        assert!(!reply.is_error, "set_level {id}: {reply:?}");
         bodies.push(reply.body);
     }
     assert!(bodies.iter().all(|b| b == "not found"), "{bodies:?}");
+    let moves: Vec<Value> = server
+        .records()
+        .into_iter()
+        .map(|(_, payload, _)| payload)
+        .filter(|p| p["tool"] == "set_level")
+        .collect();
+    assert_eq!(moves.len(), ids.len(), "{moves:?}");
+    for (payload, id) in moves.iter().zip(ids) {
+        assert_eq!(payload["fact_ids"], json!([id]), "{payload}");
+        assert!(
+            payload.get("error").is_none() && payload.get("from").is_none(),
+            "not found is not a failure and not a move: {payload}"
+        );
+    }
     for id in [at_root, desktops, in_project] {
         let fact = server.engine.get_fact(id).await.unwrap();
         assert!(fact.t_expired.is_none(), "{id} untouched");

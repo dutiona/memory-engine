@@ -1256,8 +1256,8 @@ async fn set_level_never_reaches_another_home() {
         in_q, at_root, in_bucket, on_desktop, 999_999, expired, ended,
     ] {
         let reply = set_level(&server, "laptop", &p, id, "user").await;
-        assert!(reply.is_error, "{id}: {reply:?}");
-        assert_eq!(reply.body, "error: not found", "{id}");
+        assert!(!reply.is_error, "{id}: {reply:?}");
+        assert_eq!(reply.body, "not found", "{id}");
     }
     let after = server.engine.statistics().await.unwrap();
     assert_eq!(after.facts.total, before.facts.total);
@@ -1328,9 +1328,7 @@ async fn concurrent_moves_leave_a_replayable_log() {
         );
         for reply in [up_one, up_two, down_p, down_q] {
             assert!(
-                !reply.is_error
-                    || reply.body == "error: not found"
-                    || reply.body.contains("changed while it was being moved"),
+                !reply.is_error || reply.body.contains("changed while it was being moved"),
                 "{reply:?}"
             );
         }

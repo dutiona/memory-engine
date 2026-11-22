@@ -357,7 +357,8 @@ log. Only an operator reverses a forget (`memory-engine-cli unforget`, with the 
 **`set_level`.** Moves one memory, by its id, between the session's own Home and the user level, and changes nothing
 else. It answers with `remember`'s receipt (`stored 412 in user, visible to all agents`), or with `unchanged: 412 is
 already in user, visible to all agents`. A memory of another project, even one `recall` returned through `project`, of
-another bucket or of the root, a forgotten one and a missing id all answer `error: not found`, which reveals nothing.
+another bucket or of the root, a forgotten or ended one and a missing id all answer `not found`, as `forget` does: a
+normal answer, not an error, which reveals nothing.
 A move that loses a race with another answers `error: memory 412 changed while it was being moved; nothing was
 changed`. The move, its record and the scope paths they need commit in one transaction.
 
@@ -369,7 +370,7 @@ machine and `project`, the request's facts as decoded with the dropped ones, the
 ```
 
 `recall` adds `fact_ids`; `remember` adds `level`; `forget` adds `fact_ids` (the requested id; the memories it
-changed are those whose tombstone names the record); `set_level` adds `fact_ids`, `level`, `from` and `to`; a failure adds
+changed are those whose tombstone names the record); `set_level` adds `fact_ids` and `level`, and `from` and `to` when it moved the memory; a failure adds
 `error` instead: the message as answered, redacted, then cut to 512 bytes ([redaction](redaction.md)), with the
 userinfo of every URL it quotes removed first: in the scheme form (the
 authority runs to the next `/`, across spaces, and a URL that rule 11 would drop loses everything through its last

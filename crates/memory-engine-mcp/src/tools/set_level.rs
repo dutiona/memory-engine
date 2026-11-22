@@ -21,7 +21,8 @@ pub fn definition() -> Tool {
     super::tool(
         "set_level",
         "Move one of this session's memories, by its id, between this session's project (outside a \
-         project, this machine's) and the user level. Changes nothing else. Answers where it is now.",
+         project, this machine's) and the user level. Changes nothing else. Answers where it is now, \
+         or not found.",
         json!({
             "type": "object",
             "properties": {
@@ -45,10 +46,17 @@ pub async fn run(ctx: &CallContext<'_>, call: &str, args: Value) -> Result<Strin
         Ok(args) => args,
         Err(e) => return refuse(e.to_string()).await,
     };
-    // A memory of another Home, a forgotten one and a missing id all answer the same.
+    // A memory of another Home, a forgotten one and a missing id all answer the same, as a
+    // normal answer like forget's (#1095): not found is not a failure.
     let (fact, held) = match super::owned_fact(ctx, id).await {
         Ok(Some((fact, held))) if live(&fact, Utc::now()) => (fact, held),
-        Ok(_) => return refuse(NOT_FOUND.to_owned()).await,
+        Ok(_) => {
+            let mut detail = serde_json::Map::new();
+            detail.insert("fact_ids".to_owned(), json!([id]));
+            detail.insert("level".to_owned(), level.as_str().into());
+            super::record(ctx, call, "set_level", detail, &ctx.bucket()).await?;
+            return Ok(NOT_FOUND.to_owned());
+        }
         Err(message) => return refuse(message).await,
     };
     let target = ctx.home_at(level);
