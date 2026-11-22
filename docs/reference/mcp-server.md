@@ -502,7 +502,8 @@ machine's receipts, quarantine records, segments and captured activities with it
 ### Backfill uploads
 
 `POST /backfill/uploads` imports one source file per request from a machine that holds copies of its own history (#1026):
-a Claude Code session transcript, one of its `subagents/agent-<id>.jsonl` files, or one native auto-memory file. It sits
+a Claude Code session transcript, one of its `subagents/agent-<id>.jsonl` files, one native auto-memory file, or one
+project's export of a claude-mem or claude-memory plugin store (#1117). It sits
 behind the same Bearer layer, and the machine is the one the token names, so each source host uploads with its own
 token. The supervised procedure that drives it is [Backfill](../backfill.md). An upload is a **dry run**, which runs the
 whole import in one store transaction and rolls it back, or the **write** of a reviewed dry run, which runs the same code
@@ -514,7 +515,7 @@ most 4,096 bytes:
 | Header | Required | Value |
 |---|---|---|
 | `ME-Harness` | yes | `[a-z0-9-]{1,32}`; `claude-code` |
-| `ME-Backfill-Kind` | yes | `[a-z0-9-]{1,32}`; for `claude-code`, `transcript` or `memory-file` |
+| `ME-Backfill-Kind` | yes | `[a-z0-9-]{1,32}`; for `claude-code`, `transcript`, `memory-file`, `claude-mem` or `claude-memory` |
 | `ME-Backfill-Mode` | yes | `dry-run` or `write`; there is no default, so nothing writes by omission |
 | `ME-Backfill-Source` | yes | The file's path under the bundle root, percent-encoded like a project fact; decoded, it is relative, holds no `.` or `..` segment and no control character |
 | `ME-Backfill-Mtime` | `memory-file` | The copy's modification time, `YYYY-MM-DDTHH:MM:SSZ`; checked whenever sent |
@@ -535,7 +536,7 @@ answer but a 200 to a write:
 | 6 | 503 | Another upload is in flight: there is one slot, taken before the body is read |
 | 7 | 413, 408, 400 | The body grows past 256 MiB; no byte arrives for 60 s; the body is broken |
 | 8 | 503 | The server is stopping |
-| 9 | 422 | The reader cannot read the body at all: no line with a session, a transcript over 1,000,000 entries (refused whole, never imported as its first entries), or a memory file that is not UTF-8 |
+| 9 | 422 | The reader cannot read the body at all: no line with a session, a transcript or a store export over 1,000,000 lines (refused whole, never imported as its first lines), a memory file that is not UTF-8, or a store export with no row of its store |
 | 10 | 409 | A write only: an item's key is held with another digest; the answer is the report |
 | 11 | 412 | A write only: its preview is not the one its effects now give (the file, the denylist or the store changed since the dry run) |
 | 12 | 503, 422 | The store cannot take the write now; any other failure |
@@ -557,9 +558,9 @@ type drops the field, never the line, and maps each entry by the table of
 result and outcome, a main or subagent final message (a message with `stop_reason` `end_turn` or `stop_sequence`), an
 API error, and a compaction summary with its trigger each become one neutral record, applied by the engine through the
 same capture path as [lifecycle events](#lifecycle-events): the same payload, redaction (with the denylist), 512-byte
-tool excerpts, sensitive-path stubs and memories. An imported event has `source` and `origin_node_id` `backfill`, its
-entry's time as `timestamp`, the upload's receipt as `created_at`, and its `harness_version` from the entry; its memory
-is dated by its event. Thinking, meta entries, interrupt markers, Claude Code's own `<synthetic>` messages and every
+tool excerpts, sensitive-path stubs and memories. An imported event has `source` `backfill` (a plugin store's, the
+store's kind) and `origin_node_id` `backfill`, its entry's time as `timestamp`, the upload's receipt as `created_at`,
+and its `harness_version` from the entry; its memory is dated by its event. Thinking, meta entries, interrupt markers, Claude Code's own `<synthetic>` messages and every
 other entry type are skipped and counted. A tool call whose result is not in the file yet is `pending`, and a turn with
 no completed message is an `incomplete_turn`: a later upload of the grown file brings them. A transcript records no
 session start or end, so its events open segments by the rules of ADR-0020 §5 and the idle sweep ends them.
@@ -572,6 +573,27 @@ project or the machine's bucket, whatever its type; a `user` memory carries the 
 `SystemEvent` records it and is its `source_event_id`. A forget's tombstone of its text blocks it, even beside an
 active twin; otherwise it reinforces an active twin in its Home, or it is queued without a vector.
 
+**What a plugin store stores.** A store is not uploaded as a file: `memory-engine-plugin-export` turns a scratch copy of
+it into one JSON Lines file per project, one object per row read, tagged `table`, its members named as the store's
+columns ([Backfill](../backfill.md#plugin-stores)); `pending_messages` and every column no rule below reads are never
+exported. The readers map the rows by the table of `crates/memory-engine-mcp/tests/fixtures/plugin-stores/README.md`:
+
+- **claude-mem**: a non-empty prompt is a main `prompt`, in full; an observation with a title, subtitle, text,
+  narrative or fact, and a session summary with a non-empty field, are each one Episodic memory, dated by the row, with
+  `source`, `memory_type`, `session_id` (and an observation's `observation_type` and `concepts`) as metadata. An
+  observation whose `concepts` hold `problem-solution`, `pattern` or `gotcha` starts at importance 0.6, every other one
+  and every summary at 0.5: decayable, and a starting weight for the promotion cycle, never Procedural on the plugin's
+  word. claude-mem keeps no assistant message, so it gives no stop.
+- **claude-memory**: a session's messages are read by time, then by `id`, and every `user` message ends a turn. A user
+  message is a `prompt`, unless it is a task notification, an interrupt marker or empty; a turn's last `assistant`
+  message is its `stop`, `completed`, unless an interrupt marker ends the turn, as live capture records one `Stop` per
+  turn. The other assistant messages, the narration between tool calls, are skipped. A subagent session's records are
+  in its main session, with the subagent as actor, so its stops stay in the event log.
+
+A store row's event ID is `bf.claude-mem.<session>.p<n>`, `bf.claude-mem.o<id>`, `bf.claude-mem.s<id>`, or
+`bf.claude-memory.<message uuid>.p` or `.s`; its digest covers the row's content members only, so a renumbered row is a
+duplicate and a row edited at the source a collision.
+
 **Keys, order and idempotency.** Every row hangs off a receipt keyed `(machine, event ID)`. A transcript record's ID is
 `bf.<entry uuid>.<tag>` (`p` prompt, `s` stop, `c` compaction, `t<k>` the `k`-th `tool_use` block of its entry, from 0),
 its digest the SHA-256 of its canonical JSON without its session ID and working directory; a memory file's ID is `bf.m.`
@@ -581,8 +603,12 @@ repeated entries meet them as duplicates, and the same body under two names or t
 record's order key is its entry's time to the second, with `seq` its millisecond × 1,000 plus its rank among the file's
 records of that millisecond; the 1,001st record of one millisecond is refused and counted. A session the plugin
 captured live is authoritative from its first live event of that machine: imported events at or after it are
-`live_overlap` and write nothing, earlier ones import as late events. That event is read inside the import's
-transaction, so a live capture that commits while an upload is being prepared still wins.
+`live_overlap` and write nothing, earlier ones import as late events. A plugin store's rows are a copy: their events
+are labelled with the store's kind, and yield to live capture from 60 s before a session's first live event, whatever
+their kind; otherwise, where another import (a transcript, the other store) already holds an event of the same session,
+actor and kind on that machine, they are `superseded` and write nothing. A copy never yields to its own store, a
+transcript never yields to a copy, and a store's observations and summaries never yield. Both are read inside the
+import's transaction, so a live capture or an import that commits while an upload is being prepared still wins.
 
 **One transaction.** The engine redacts and maps the whole upload outside any lock, then applies it in one
 `BEGIN IMMEDIATE`, in order-key order. The **preview** is a SHA-256 over every effect the upload would write (the
@@ -608,12 +634,12 @@ Live captures wait on the server's one write connection while an upload's insert
 | `denylist_literals` | How many literals the server holds |
 | `project` | `{home, key, rules, dropped}`: the Home every item is filed at and how the facts gave it |
 | `census` | `{lines, malformed, skipped, incomplete_turn}`, `skipped` by reason |
-| `sessions` | `[{id, first, last, events, live_since}]` |
-| `events` | `{stored, duplicate, collision, live_overlap, pending, refused, by_kind, by_actor}`, `refused` by reason |
+| `sessions` | `[{id, first, last, events, live_since, superseded, held_by}]`, `held_by` the sorted `source`s of the other origins holding the session on this machine (`lifecycle`, `backfill`, a store's kind) |
+| `events` | `{stored, duplicate, collision, live_overlap, superseded, pending, refused, by_kind, by_actor}`, `refused` by reason |
 | `tool_events` | Stored tool calls, per tool and per outcome |
 | `stubs` | `[{tool, path, time}]` of the sensitive-path stubs |
 | `redaction` | `{found, stubbed, placeholders}`, the placeholders counted by rule in the stored texts |
-| `facts` | `{created, reinforced, blocked, items}`, each item `{event_id, capture, fact_type, home, t_created, outcome, hint, preview}`, `preview` the stored text cut to 512 bytes |
+| `facts` | `{created, reinforced, blocked, items}`, each item `{event_id, capture, fact_type, home, t_created, outcome, hint, importance, preview}`, `preview` the stored text cut to 512 bytes |
 | `collisions` | `[{event_id, line}]` |
 
 Every string is a count, a digest, a fixed phrase, an identifier that passed the machine-token rule, or text exactly as
@@ -673,13 +699,15 @@ timer runs them, and the crate's `clippy.toml` refuses any server code path that
 ```
 Agent (Claude, etc.) → HTTP POST /mcp → auth layer → rmcp (stateless) → MemoryEngine (SQLite)
 Claude Code plugin → HTTP POST /lifecycle/events → auth layer → adapters/claude_code → MemoryEngine
-Backfill driver → HTTP POST /backfill/uploads → auth layer → adapters/claude_code/{transcript,memory} → MemoryEngine
+Backfill driver → HTTP POST /backfill/uploads → auth layer → adapters/claude_code/{transcript,memory,claude_mem,claude_memory} → MemoryEngine
                                          ├── auth.rs (token-hash file, Bearer check)
                                          ├── http.rs (router, auth layer, drain + sweep + flush)
                                          ├── lifecycle.rs (POST /lifecycle/events: envelope, body reader, statuses, the seam, the idle sweep)
                                          ├── backfill.rs (POST /backfill/uploads: headers, the upload slot, statuses, the seam, the report)
                                          ├── adapters/ (one per harness; claude_code.rs: a hook input in, a neutral record out;
-                                         │             claude_code/transcript.rs and memory.rs: the backfill readers)
+                                         │             claude_code/transcript.rs and memory.rs: the backfill readers;
+                                         │             claude_mem.rs and claude_memory.rs: the plugin stores' export and readers)
+                                         ├── bin/plugin_export.rs (memory-engine-plugin-export: a store copy to per-project uploads)
                                          ├── config.rs (TOML + env + CLI)
                                          ├── server.rs (ServerHandler, calling machine, instructions)
                                          ├── project.rs (project facts, key rules version 1)
