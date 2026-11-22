@@ -2,23 +2,14 @@
 //! moved below the seam (Wave 2 #816 / S2, sub-PR 2b).
 //!
 //! [`load_snapshot`] (phase 1, a brief read) and [`apply_plan`] (phase 3, the
-//! all-or-nothing write) both take a `&rusqlite::Connection`, so they move here with
+//! all-or-nothing write) both take a `&rusqlite::Connection`, so they live here with
 //! the SQL that produces/consumes them. Phase 2 (`compute_plan`, pure business logic
-//! over `&dyn SummaryGenerator`/`&dyn EmbeddingProvider`, no `Connection`) stays in the
-//! facade's `consolidation` module, which re-exports everything below
-//! (`pub(crate) use me_backend_sqlite::consolidation::{load_snapshot,
-//! load_snapshot_capped, apply_plan};`) so `crate::consolidation::{load_snapshot,
-//! apply_plan}` keep resolving for every existing facade caller (`engine/mod.rs`,
-//! `engine/consolidation.rs`, `storage/conformance/fixtures.rs`, and the facade's own
-//! `consolidate`/`consolidate_with_caps` test helpers, which also need
-//! `load_snapshot_capped`).
+//! over `&dyn SummaryGenerator`/`&dyn EmbeddingProvider`, no `Connection`) lives in
+//! `me-consolidate`, which reaches these halves through the `ConsolidationStore` port.
 //!
 //! The same split recurses one level into `apply_plan`'s three callees: each of
-//! `dedup`/`cluster`/`global` splits into a pure `compute_*` (stays in the facade) and
-//! an SQL-touching `apply_*` (moves here). The facade's own `dedup.rs`/`cluster.rs`/
-//! `global.rs` re-export the `apply_*` half so their `#[cfg(test)]`-only
-//! `local_dedup`/`cluster_fusion`/`global_integration` wrappers — which compose
-//! `compute_*` + `apply_*` for that file's own unit tests — keep resolving unchanged.
+//! `dedup`/`cluster`/`global` splits into a pure `compute_*` (in `me-consolidate`) and
+//! an SQL-touching `apply_*` (here).
 
 mod cluster;
 mod dedup;

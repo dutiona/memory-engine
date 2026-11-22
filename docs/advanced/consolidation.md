@@ -116,9 +116,10 @@ println!(
 After dedup, if any duplicates were removed, the engine rebuilds the in-memory graph from the database. This keeps degree-based scoring (used by the forgetting system) consistent with the current state of active edges.
 
 ```rust
-// engine.rs — post-consolidation
-if stats.duplicates_removed > 0 {
-    *self.graph.write() = MemoryGraph::load_from_db(&conn)?;
+// me_consolidate::consolidate, after apply_plan returns the ids it actually expired
+if !expired_ids.is_empty() {
+    let edges = ctx.storage.list_active_edges().await?;
+    *graph.write() = MemoryGraph::from_active_edges(&edges);
 }
 ```
 
