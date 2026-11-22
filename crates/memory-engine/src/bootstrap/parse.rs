@@ -236,7 +236,7 @@ fn parse_session_file_capped(
     cap: usize,
     max_entries: usize,
 ) -> (Vec<SessionEntry>, usize) {
-    let (entries, malformed) = read_lines(reader, cap, max_entries, |line_no, line| {
+    let (entries, malformed, _) = read_lines(reader, cap, max_entries, |line_no, line| {
         serde_json::from_str::<SessionEntry>(line)
             .map_err(
                 |e| tracing::warn!(line = line_no, error = %e, "skipping malformed JSONL line"),
@@ -255,38 +255,54 @@ fn parse_session_file_capped(
 /// meaning no limit for either. Each object comes with its 1-based line
 /// number, counted over every line, empty ones included.
 ///
-/// Returns the objects and how many non-empty lines were skipped: oversized, not UTF-8, not
-/// JSON, or JSON that is not an object. A skipped line is never logged with its bytes.
+/// Returns the objects, how many non-empty lines were skipped (oversized, not UTF-8, not JSON,
+/// or JSON that is not an object), and whether it stopped at `max_lines` with a non-empty line
+/// left unread, so a caller can refuse a stream rather than take its first `max_lines` objects.
+/// A skipped line is never logged with its bytes.
 ///
 /// # Examples
 ///
 /// ```
 /// use memory_engine::bootstrap::read_json_lines;
 ///
-/// let (objects, malformed) = read_json_lines(&b"{\"a\":1}\n\n[2]\n{\"b\":3}\n"[..], 0, 0);
+/// let (objects, malformed, truncated) = read_json_lines(&b"{\"a\":1}\n\n[2]\n{\"b\":3}\n"[..], 0, 0);
 /// assert_eq!(objects.iter().map(|(line, _)| *line).collect::<Vec<_>>(), [1, 4]);
-/// assert_eq!(malformed, 1);
+/// assert_eq!((malformed, truncated), (1, false));
+/// assert!(read_json_lines(&b"{}\n{}\n"[..], 0, 1).2, "a line is left unread");
 /// ```
 #[must_use]
 pub fn read_json_lines(
     reader: impl std::io::BufRead,
     max_bytes: u64,
     max_lines: usize,
-) -> (Vec<(usize, serde_json::Value)>, usize) {
+) -> (Vec<(usize, serde_json::Value)>, usize, bool) {
     read_json_lines_capped(stream(reader, max_bytes), MAX_JSONL_LINE_BYTES, max_lines)
 }
 
 /// [`read_json_lines`] with an explicit per-line cap (test seam).
 fn read_json_lines_capped(
-    reader: impl std::io::BufRead,
+    mut reader: impl std::io::BufRead,
     cap: usize,
     max_lines: usize,
-) -> (Vec<(usize, serde_json::Value)>, usize) {
-    read_lines(reader, cap, max_lines, |_, line| {
+) -> (Vec<(usize, serde_json::Value)>, usize, bool) {
+    let (objects, malformed, at_cap) = read_lines(&mut reader, cap, max_lines, |_, line| {
         serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(line)
             .ok()
             .map(serde_json::Value::Object)
-    })
+    });
+    (objects, malformed, at_cap && holds_a_line(&mut reader, cap))
+}
+
+/// Whether `reader` still holds a non-empty line; a read that fails cannot tell, so it counts as
+/// one.
+fn holds_a_line(reader: &mut impl std::io::BufRead, cap: usize) -> bool {
+    loop {
+        match read_bounded_line(reader, cap) {
+            Ok(BoundedLine::Eof) => return false,
+            Ok(BoundedLine::Line(bytes)) if bytes.trim_ascii().is_empty() => {}
+            Ok(BoundedLine::Line(_) | BoundedLine::Oversized) | Err(_) => return true,
+        }
+    }
 }
 
 /// `reader` under the per-stream byte ceiling: `Read::take`, re-buffered because the `Take`
@@ -300,13 +316,14 @@ fn stream(reader: impl std::io::BufRead, max_bytes: u64) -> impl std::io::BufRea
 
 /// The bounded line loop both importers share: each non-empty line within `cap` bytes, as
 /// UTF-8 and trimmed, goes to `parse` with its line number; `None` counts it malformed, as
-/// does an oversized or non-UTF-8 line. It stops after `max` kept values (`0` = no limit).
+/// does an oversized or non-UTF-8 line. It stops after `max` kept values (`0` = no limit), and
+/// says whether it stopped there.
 fn read_lines<T>(
     mut reader: impl std::io::BufRead,
     cap: usize,
     max: usize,
     mut parse: impl FnMut(usize, &str) -> Option<T>,
-) -> (Vec<(usize, T)>, usize) {
+) -> (Vec<(usize, T)>, usize, bool) {
     let mut kept = Vec::new();
     let mut malformed = 0;
     let mut line_no = 0usize;
@@ -316,7 +333,7 @@ fn read_lines<T>(
                 max_entries = max,
                 "truncating session: reached entry-count cap (remaining lines discarded)"
             );
-            break;
+            return (kept, malformed, true);
         }
         match read_bounded_line(&mut reader, cap) {
             Ok(BoundedLine::Eof) => break,
@@ -357,7 +374,7 @@ fn read_lines<T>(
             }
         }
     }
-    (kept, malformed)
+    (kept, malformed, false)
 }
 
 /// Parse the content blocks from a [`MessagePayload`]'s `content` field.
@@ -593,7 +610,7 @@ mod tests {
         let mut bytes = input.into_bytes();
         bytes.extend_from_slice(b"\xff\xfe\n{\"c\":3}\n");
 
-        let (objects, malformed) = read_json_lines_capped(bytes.as_slice(), 64, 0);
+        let (objects, malformed, truncated) = read_json_lines_capped(bytes.as_slice(), 64, 0);
         let lines: Vec<usize> = objects.iter().map(|(n, _)| *n).collect();
         assert_eq!(lines, [1, 4, 9], "line numbers over all lines");
         assert_eq!(objects[1].1, serde_json::json!({ "b": 2 }));
@@ -601,16 +618,28 @@ mod tests {
             malformed, 5,
             "oversized, an array, not JSON, a string, not UTF-8"
         );
+        assert!(!truncated);
 
-        let (objects, _) = read_json_lines_capped(bytes.as_slice(), 64, 2);
+        let (objects, _, truncated) = read_json_lines_capped(bytes.as_slice(), 64, 2);
         assert_eq!(objects.len(), 2, "the object cap");
+        assert!(truncated, "lines are left unread: the caller is told");
 
         let line = "{\"type\":\"user\"}";
         let stream = format!("{line}\n{line}\n{line}\n");
-        let (objects, _) = read_json_lines(stream.as_bytes(), 31, 0);
+        let (objects, _, _) = read_json_lines(stream.as_bytes(), 31, 0);
         assert_eq!(objects.len(), 2, "the stream cap");
-        let (objects, malformed) = read_json_lines(stream.as_bytes(), 0, 0);
-        assert_eq!((objects.len(), malformed), (3, 0), "0 is no limit");
+        let (objects, malformed, truncated) = read_json_lines(stream.as_bytes(), 0, 0);
+        assert_eq!(
+            (objects.len(), malformed, truncated),
+            (3, 0, false),
+            "0 is no limit"
+        );
+        let (objects, _, truncated) = read_json_lines(format!("{stream}\n\n").as_bytes(), 0, 3);
+        assert_eq!(
+            (objects.len(), truncated),
+            (3, false),
+            "the cap reached with only empty lines left"
+        );
     }
 
     #[test]

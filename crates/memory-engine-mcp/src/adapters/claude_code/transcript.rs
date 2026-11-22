@@ -26,6 +26,9 @@ const INTERRUPTED: &str = "[Request interrupted by user";
 /// The model of the messages Claude Code writes itself.
 const SYNTHETIC: &str = "<synthetic>";
 
+/// Why a transcript of more entries than ADR-0009's importer keeps is refused whole.
+const OVER_THE_LIMIT: &str = "the transcript is over the 1,000,000-entry limit";
+
 /// The records one millisecond may hold: `seq` is the millisecond times this plus the rank,
 /// so it stays within ADR-0020's six digits.
 const PER_MILLISECOND: u32 = 1000;
@@ -227,7 +230,9 @@ fn messages(objects: &[(usize, Value)]) -> HashMap<String, Message> {
 ///
 /// # Errors
 ///
-/// `"no session"` when no line is an object with a `sessionId`.
+/// `"no session"` when no line is an object with a `sessionId`; a fixed phrase naming the entry
+/// limit when the body holds more than ADR-0009's 1,000,000 entries, so no prefix of it is
+/// imported.
 ///
 /// # Examples
 ///
@@ -247,11 +252,19 @@ fn messages(objects: &[(usize, Value)]) -> HashMap<String, Message> {
 /// # Ok::<(), &'static str>(())
 /// ```
 pub fn read(body: &[u8]) -> Result<Mapped, &'static str> {
-    let (objects, malformed) = read_json_lines(
+    read_capped(
         body,
-        memory_engine::BACKFILL_BODY_BYTES as u64,
         memory_engine::bootstrap::BootstrapConfig::default().max_entries,
-    );
+    )
+}
+
+/// [`read`] with an explicit entry limit (test seam).
+fn read_capped(body: &[u8], max_entries: usize) -> Result<Mapped, &'static str> {
+    let (objects, malformed, truncated) =
+        read_json_lines(body, memory_engine::BACKFILL_BODY_BYTES as u64, max_entries);
+    if truncated {
+        return Err(OVER_THE_LIMIT);
+    }
     if !objects
         .iter()
         .any(|(_, v)| v.get("sessionId").is_some_and(Value::is_string))
@@ -1074,6 +1087,21 @@ mod tests {
             Some("Read src/lib.rs and report what parse does.")
         );
         assert_eq!((mapped.incomplete_turns, mapped.pending), (0, 0));
+    }
+
+    /// A body over the entry limit is refused whole, never imported as its first entries.
+    #[test]
+    fn a_transcript_over_the_entry_limit_is_refused() {
+        let lines: Vec<String> = (0..4)
+            .map(|i| user_text(&format!("u{i}"), "2026-03-19T10:00:00Z", "a prompt"))
+            .collect();
+        assert_eq!(read_capped(&body(&lines), 3).unwrap_err(), OVER_THE_LIMIT);
+        assert_eq!(read_capped(&body(&lines[..3]), 3).unwrap().items.len(), 3);
+        assert_eq!(
+            memory_engine::bootstrap::BootstrapConfig::default().max_entries,
+            1_000_000,
+            "the phrase names the limit"
+        );
     }
 
     #[test]

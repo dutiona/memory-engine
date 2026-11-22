@@ -533,7 +533,7 @@ answer but a 200 to a write:
 | 6 | 503 | Another upload is in flight: there is one slot, taken before the body is read |
 | 7 | 413, 408, 400 | The body grows past 256 MiB; no byte arrives for 60 s; the body is broken |
 | 8 | 503 | The server is stopping |
-| 9 | 422 | The reader cannot read the body at all: no line with a session, or a memory file that is not UTF-8 |
+| 9 | 422 | The reader cannot read the body at all: no line with a session, a transcript over 1,000,000 entries (refused whole, never imported as its first entries), or a memory file that is not UTF-8 |
 | 10 | 409 | A write only: an item's key is held with another digest; the answer is the report |
 | 11 | 412 | A write only: its preview is not the one its effects now give (the file, the denylist or the store changed since the dry run) |
 | 12 | 503, 422 | The store cannot take the write now; any other failure |
