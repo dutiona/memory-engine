@@ -178,3 +178,91 @@ async fn explain_names_a_forgotten_fact_and_why() {
         .stdout(predicate::str::contains("Forgotten"))
         .stdout(predicate::str::contains("it moved"));
 }
+
+/// What a store records of its embedding: (`embedding_spaces` rows, `config.embed_dim`).
+fn recorded(db: &Path) -> (i64, Option<String>) {
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let spaces = conn
+        .query_row("SELECT COUNT(*) FROM embedding_spaces", [], |r| r.get(0))
+        .unwrap();
+    let dim = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = 'embed_dim'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    (spaces, dim)
+}
+
+// #1097: a fresh store whose facts all wait for their first vector has no identity. Every
+// maintenance command opens it, and the writing ones record no identity.
+#[tokio::test]
+async fn a_store_whose_facts_all_wait_serves_every_maintenance_command() {
+    let dir = TempDir::new().unwrap();
+    let db = dir.path().join("waiting.db");
+    let mut engine = memory_engine::MemoryEngine::builder(4)
+        .path(db.clone())
+        .build()
+        .unwrap();
+    for content in ["the kestrel nests", "the falcon hunts", "the owl waits"] {
+        engine
+            .add_fact_deferred(&AddFactRequest {
+                content: content.into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: Some("unscoped:laptop".into()),
+                opts: None,
+            })
+            .await
+            .unwrap();
+    }
+    engine
+        .forget_fact(
+            1,
+            &["unscoped:laptop".into()],
+            "it moved",
+            "unscoped:laptop",
+            &record(),
+        )
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(recorded(&db), (0, Some("4".into())));
+
+    cli(&db)
+        .args(["--format", "plain", "stats"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("facts.active=2"));
+    let snapshot = dir.path().join("snapshot.json");
+    cli(&db)
+        .args(["export", "-o"])
+        .arg(&snapshot)
+        .assert()
+        .success();
+    assert!(
+        std::fs::read_to_string(&snapshot)
+            .unwrap()
+            .contains("the owl waits")
+    );
+    cli(&db).args(["unforget", "1"]).assert().success();
+    assert_eq!(
+        recorded(&db),
+        (0, Some("4".into())),
+        "unforget stamps nothing"
+    );
+    cli(&db)
+        .args(["--format", "plain", "stats"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("facts.active=3"));
+    cli(&db)
+        .args(["erase", "--fact", "2"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("facts=1"));
+    assert_eq!(recorded(&db), (0, Some("4".into())), "erase stamps nothing");
+}
