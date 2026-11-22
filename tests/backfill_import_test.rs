@@ -702,6 +702,53 @@ async fn a_tool_input_key_is_redacted_in_the_event_and_the_activity() {
     assert!(stored.contains("[REDACTED:aws-access-key]"), "{stored}");
 }
 
+/// A key the core writes is the record's schema: the stub's `sensitive_path` and a memory's
+/// metadata names are never rewritten, whatever the denylist holds, while their values lose it.
+#[tokio::test]
+async fn keys_the_core_writes_are_never_rewritten() {
+    let s = Store::new();
+    let denylist = ["path", "fixture", "memory_type"].map(str::to_owned);
+    let path = format!("/work/fixture/{}", ".env");
+    let items = vec![
+        main_item(
+            "bf.1.t0",
+            0,
+            tool(json!({ "file_path": path }), "X=1", &[path.as_str()]),
+        ),
+        ImportItem::Memory(ImportMemory {
+            event_id: "bf.m.1".into(),
+            body_sha256: digest("a rule"),
+            body_size: 6,
+            item: MemoryItem {
+                text: "a rule".into(),
+                fact_type: FactType::Procedural,
+                importance: 0.6,
+                time: at(1),
+                metadata: json!({ "memory_type": "feedback", "description": "on fixture" }),
+            },
+        }),
+    ];
+
+    let write = s.write(&upload(HOME), &items, &denylist).await;
+
+    let stub = format!("/work/[REDACTED:denylist]/{}", ".env");
+    let events = s.events().await;
+    let call = events
+        .iter()
+        .find(|e| e.payload["kind"] == "tool_use")
+        .expect("the call");
+    assert_eq!(call.payload["input"], json!({ "sensitive_path": stub }));
+    let stubs: Vec<Option<&str>> = write
+        .items
+        .iter()
+        .map(|(_, summary)| summary.stub.as_deref())
+        .collect();
+    assert_eq!(stubs, [None, Some(stub.as_str())], "the report's stub");
+    let fact = &s.engine.list_active_facts(None).await.unwrap()[0];
+    assert_eq!(fact.metadata["memory_type"], "feedback");
+    assert_eq!(fact.metadata["description"], "on [REDACTED:denylist]");
+}
+
 /// A machine name is a validated identifier, stored as sent: one that reads as high-entropy (a
 /// valid DNS label of 24 random characters) stays whole in the payload and in the memories'
 /// metadata, so erasing the machine still takes every row its upload wrote.

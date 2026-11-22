@@ -392,8 +392,9 @@ fn prepare_memory(
         ));
     }
     let mut metadata = item.metadata;
-    let scrubbed = redact::scrub_with(&item.text, denylist)
-        .and_then(|(text, found)| Ok((text, found + redact::scrub_json(&mut metadata, denylist)?)));
+    let scrubbed = redact::scrub_with(&item.text, denylist).and_then(|(text, found)| {
+        Ok((text, found + redact::scrub_values(&mut metadata, denylist)?))
+    });
     let (text, found) = match scrubbed {
         Ok(scrubbed) => scrubbed,
         Err(MemoryError::Conflict(ConflictError::Redaction(_))) => {

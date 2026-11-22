@@ -976,6 +976,25 @@ async fn a_sensitive_path_call_is_a_stub() {
     }
 }
 
+/// A denylist literal inside the stub's own key name rewrites neither the stored stub nor the
+/// report's list of stubs: the key is the core's, only its value loses the literal.
+#[tokio::test]
+async fn a_stub_is_reported_whatever_the_denylist_holds() {
+    let server = TestServer::start_with_denylist(&["path", "fixture"]).await;
+
+    let (dry, write) = dry_run_then_write(&server, &Upload::transcript()).await;
+
+    let path = format!("/work/[REDACTED:denylist]/p/{}", ".env");
+    let want = json!([{ "tool": "Read", "path": path, "time": "2026-03-19T10:00:05Z" }]);
+    assert_eq!(dry["stubs"], want, "{dry}");
+    assert_eq!(write["stubs"], want);
+    let stub = imported_events(&server)
+        .into_iter()
+        .find(|p| p["tool"] == "Read" && p["result"].is_null())
+        .expect("the stub");
+    assert_eq!(stub["input"], json!({ "sensitive_path": path }));
+}
+
 /// With the embedder down an upload stores and queues its memories: full-text recall finds them
 /// at once, and the drain gives them their vectors once the embedder is up.
 #[tokio::test]

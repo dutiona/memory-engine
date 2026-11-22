@@ -435,8 +435,8 @@ fn prepare_one_memory(
     // free-text and can carry a secret (e.g. a memory quoting a leaked token).
     // Scrub the whole metadata object so the stored row holds no unredacted
     // secret anywhere, not just in the body content.
-    redactions +=
-        usize::try_from(redact::scrub_json(&mut metadata, &config.denylist)?).unwrap_or(usize::MAX);
+    redactions += usize::try_from(redact::scrub_values(&mut metadata, &config.denylist)?)
+        .unwrap_or(usize::MAX);
 
     // Classifiers read only content/fact_type/base_importance/metadata — build the
     // owned `ClassifierInput` view, not a 20-field synthetic `Fact` cloning the

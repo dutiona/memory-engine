@@ -68,8 +68,10 @@ other out.
 
 **JSON.** In metadata, tool inputs and event payloads, every string and every object key takes the same rules (the
 denylist included where the path applies it): a key is content too. Keys that redact to one text keep every member,
-the later ones in key order renamed `~1`, `~2`, …. An event payload's own member names are its schema, so they take
-every rule but the denylist.
+the later ones in key order renamed `~1`, `~2`, …. A key the core writes itself is the record's schema and is never
+rewritten, only its value: an event payload's own member names (they take every rule but the denylist), a stub's
+`sensitive_path`, and a memory file's metadata names (`source`, `file`, `name`, `description`, `memory_type`,
+`route`). A tool input's own keys are scrubbed when the call is captured.
 
 ## Write paths
 

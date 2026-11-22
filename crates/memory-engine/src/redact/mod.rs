@@ -804,7 +804,7 @@ fn key_has_context(key: &str) -> bool {
     key[key.len() - word_len..].split('_').any(is_key)
 }
 
-fn scrub_member(key: &str, value: &mut Value, denylist: &[String]) -> Result<u64> {
+fn scrub_member(key: &str, value: &mut Value, denylist: &[String], keys: Keys) -> Result<u64> {
     if let Value::String(s) = value
         && s.len() >= HEX_SECRET_MIN_LEN
         && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -813,7 +813,14 @@ fn scrub_member(key: &str, value: &mut Value, denylist: &[String]) -> Result<u64
         "[REDACTED:hex-secret]".clone_into(s);
         return Ok(1);
     }
-    scrub_json(value, denylist)
+    scrub_tree(value, denylist, keys)
+}
+
+/// Whether a JSON tree's object keys are content to scrub, or a schema the core wrote.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keys {
+    Scrub,
+    Keep,
 }
 
 /// Scrub every string leaf and every object key of `value` in place, by the same rules and
@@ -821,6 +828,17 @@ fn scrub_member(key: &str, value: &mut Value, denylist: &[String]) -> Result<u64
 /// Keys that scrub to one text keep every member (see [`scrub_members`]). Returns the number of
 /// secrets removed.
 pub(crate) fn scrub_json(value: &mut Value, denylist: &[String]) -> Result<u64> {
+    scrub_tree(value, denylist, Keys::Scrub)
+}
+
+/// As [`scrub_json`], but every object key is kept: for a tree whose member names the core
+/// writes itself (a memory file's metadata), its schema, which a denylist literal must never
+/// rename. Only the values are content.
+pub(crate) fn scrub_values(value: &mut Value, denylist: &[String]) -> Result<u64> {
+    scrub_tree(value, denylist, Keys::Keep)
+}
+
+fn scrub_tree(value: &mut Value, denylist: &[String], keys: Keys) -> Result<u64> {
     match value {
         Value::String(s) => {
             let (clean, n) = scrub_with(s, denylist)?;
@@ -829,8 +847,17 @@ pub(crate) fn scrub_json(value: &mut Value, denylist: &[String]) -> Result<u64> 
             }
             Ok(n)
         }
-        Value::Array(items) => items.iter_mut().map(|v| scrub_json(v, denylist)).sum(),
-        Value::Object(map) => scrub_members(map, denylist, |k, v| scrub_member(k, v, denylist)),
+        Value::Array(items) => items
+            .iter_mut()
+            .map(|v| scrub_tree(v, denylist, keys))
+            .sum(),
+        Value::Object(map) if keys == Keys::Scrub => {
+            scrub_members(map, denylist, |k, v| scrub_member(k, v, denylist, keys))
+        }
+        Value::Object(map) => map
+            .iter_mut()
+            .map(|(k, v)| scrub_member(k, v, denylist, keys))
+            .sum(),
         _ => Ok(0),
     }
 }
@@ -919,34 +946,37 @@ const IDENTIFIER_MEMBERS: &[&str] = &[
 ];
 
 /// Scrub an event payload: its genuine capture context (`PROVENANCE_KEY`, in MC-9's exact
-/// shape) gets the machine-token rule only, everything else every rule. Its member names are
-/// the payload's schema and get every rule too.
+/// shape) gets the machine-token rule only, everything else every rule, the keys of nested
+/// objects included. Its member names are the payload's schema and get every rule too.
 pub(crate) fn scrub_payload(payload: &mut Value) -> Result<u64> {
-    scrub_event_payload(payload, &[], &[])
+    scrub_event_payload(payload, &[], &[], Keys::Scrub)
 }
 
 /// Scrub a captured event's payload, live or imported (#1025, #1026): as [`scrub_payload`], but
 /// its identifier members, validated before they get here, get the machine-token rule only, and
 /// every other member also loses the author's `denylist`. Its member names are the payload's
-/// schema: they get every rule but the `denylist`, which a schema name could equal.
+/// schema: they get every rule but the `denylist`, which a schema name could equal. The keys of
+/// its nested objects are kept: a tool input's own keys were scrubbed by [`capture_tool_use`],
+/// and a stub's `sensitive_path` is the core's.
 pub(crate) fn scrub_capture_payload(payload: &mut Value, denylist: &[String]) -> Result<u64> {
-    scrub_event_payload(payload, IDENTIFIER_MEMBERS, denylist)
+    scrub_event_payload(payload, IDENTIFIER_MEMBERS, denylist, Keys::Keep)
 }
 
 fn scrub_event_payload(
     payload: &mut Value,
     identifiers: &[&str],
     denylist: &[String],
+    nested: Keys,
 ) -> Result<u64> {
     let Value::Object(map) = payload else {
-        return scrub_json(payload, denylist);
+        return scrub_tree(payload, denylist, nested);
     };
     scrub_members(map, &[], |k, v| {
         Ok(
             if (k == PROVENANCE_KEY && is_provenance(v)) || identifiers.contains(&k) {
                 scrub_provenance_value(v)
             } else {
-                scrub_member(k, v, denylist)?
+                scrub_member(k, v, denylist, nested)?
             },
         )
     })
