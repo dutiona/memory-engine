@@ -142,7 +142,7 @@ pub fn open_engine_writable(path: &Path) -> anyhow::Result<Writable> {
 /// `add-fact` derives it from the `--embedding` length), so they work against a
 /// freshly-created, never-embedded database that has no recorded dimension yet.
 /// If the database *was* previously embedded at a different dimension, the
-/// engine's open path rejects the mismatch against the stored `embedding_meta`.
+/// engine's open path rejects the mismatch against the recorded one.
 ///
 /// A `declared` identity (`add-fact`'s pre-computed vector, #1060) must equal the one the
 /// store records, checked read-only before anything migrates (#1065); a blank store accepts
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn peek_embed_dim_from_db_fresh_engine_no_embedding_returns_error() {
-        // A freshly created engine with no facts yet has no embedding_meta.
+        // A freshly created engine with no facts yet records no dimension.
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("fresh.db");
         let engine = memory_engine::MemoryEngine::builder(4)
@@ -367,27 +367,29 @@ mod tests {
         assert!(err.to_string().contains("already exists"), "{err}");
     }
 
-    // --- #622: identity in the embedding_spaces registry ---
+    // --- #622: the dimension of a recorded identity ---
 
     #[test]
-    fn peek_reads_dim_from_embedding_spaces_registry() {
-        // A v13 store records the identity (incl. dim) in the embedding_spaces table,
-        // not the config row. The peek must read it from there.
+    fn peek_reads_dim_from_a_recorded_identity() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("peek.db");
-        // Build creates the v13 schema (empty registry); the temporary engine drops here.
-        memory_engine::MemoryEngine::builder(8)
+        let engine = memory_engine::MemoryEngine::builder(8)
             .path(path.clone())
             .build()
             .unwrap();
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute(
-            "INSERT INTO embedding_spaces (name, model, provider, dim, status)
-             VALUES ('default', 'm', 'tei', 8, 'active')",
-            [],
-        )
-        .unwrap();
-        drop(conn);
+        let request = memory_engine::AddFactRequest {
+            content: "recorded".into(),
+            fact_type: memory_engine::FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        };
+        let identity = memory_engine::EmbeddingFingerprint::new("m", "tei", 8);
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(engine.add_fact_precomputed(&request, vec![0.5; 8], &identity, None))
+            .unwrap();
+        drop(engine);
         assert_eq!(peek_embed_dim_from_db(&path).unwrap(), 8);
     }
 }
