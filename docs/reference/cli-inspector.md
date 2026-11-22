@@ -351,8 +351,9 @@ The `--backend llm` path requires all four `--llm-*` / `--embed-*` flags (the LL
 embeds its own summaries). The embedder flags (`--embed-model`, `--embed-provider`, the MRL
 and served-artifact flags) must name the identity the store records: it is checked before
 the LLM is called, and a mismatch exits 1 with `embedding identity check failed` and no JSON
-(#1062). Because of the #209 guard, the first invocation after a write
-**defers** (`"outcome": "skipped"`); a subsequent quiet invocation runs. This is the
+(#1062). The #209 guard defers a cycle that follows a caller write; the command retries a
+deferred cycle up to 8 times in one invocation, so one call runs, and it reports
+`"outcome": "skipped"` only when a concurrent writer keeps it deferred. This is the
 subprocess seam the efficiency×quality benchmark drives — see
 [Dream Cycle: pluggable backends](../advanced/dream-cycle.md#pluggable-backends-llmdreamcycle-554).
 
