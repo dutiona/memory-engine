@@ -334,21 +334,10 @@ impl MemoryMcpServer {
         let key = facts.key(machine);
         let home = Home::own(key.clone(), machine).path(&self.user);
         let provenance = facts.provenance(key.as_ref());
-        let (harness, kind) = (envelope.harness.clone(), envelope.kind.clone());
-        let name = envelope
-            .source
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_owned();
         let mtime = envelope.mtime.unwrap_or(received_at);
-        let (owned, reader_home) = (body.to_vec(), home.clone());
-        let read = tokio::task::spawn_blocking(move || match (harness.as_str(), kind.as_str()) {
-            ("claude-code", "transcript") => claude_code::transcript::read(&owned),
-            ("claude-code", "memory-file") => {
-                claude_code::memory::read(&name, &reader_home, &owned, mtime)
-            }
-            _ => Err("an unknown harness or kind"),
+        let (reader_envelope, reader_home, owned) = (envelope.clone(), home.clone(), body.to_vec());
+        let read = tokio::task::spawn_blocking(move || {
+            read_upload(&reader_envelope, &reader_home, &owned, mtime)
         })
         .await;
         let mut census = match read {
@@ -380,6 +369,7 @@ impl MemoryMcpServer {
                 "pending": census.pending,
                 "incomplete_turns": census.incomplete_turns,
             }),
+            copy: false,
         };
         let imported = match self
             .engine
@@ -420,6 +410,24 @@ impl MemoryMcpServer {
         } else {
             (StatusCode::OK, report, "")
         }
+    }
+}
+
+/// The reader the harness and kind select (ADR-0020 §1), run on the upload's body: a memory file
+/// is named by its source's last segment, filed under `home` and dated by `mtime`.
+fn read_upload(
+    envelope: &UploadEnvelope,
+    home: &str,
+    body: &[u8],
+    mtime: DateTime<Utc>,
+) -> Result<Mapped, &'static str> {
+    match (envelope.harness.as_str(), envelope.kind.as_str()) {
+        ("claude-code", "transcript") => claude_code::transcript::read(body),
+        ("claude-code", "memory-file") => {
+            let name = envelope.source.rsplit('/').next().unwrap_or_default();
+            claude_code::memory::read(name, home, body, mtime)
+        }
+        _ => Err("an unknown harness or kind"),
     }
 }
 
@@ -473,6 +481,7 @@ impl<'a> Tally<'a> {
                 ImportOutcome::Duplicate => "duplicate",
                 ImportOutcome::Collision => "collision",
                 ImportOutcome::LiveOverlap => "live_overlap",
+                ImportOutcome::Superseded => "superseded",
                 ImportOutcome::Refused(reason) => {
                     *tally.refused.entry(reason).or_default() += 1;
                     continue;

@@ -1683,6 +1683,7 @@ async fn an_import_redacts_with_the_denylist() {
         provenance: json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
         body_sha256: [7; 32],
         census: json!({}),
+        copy: false,
     };
     let event = |n: u8, content: Content| {
         ImportItem::Event(ImportEvent {

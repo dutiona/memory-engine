@@ -33,7 +33,7 @@ const BOUNDARY_SOURCES: [&str; 4] = ["startup", "resume", "clear", "fork"];
 /// live capture does not take, and where the event came from.
 pub(super) struct Capture<'a> {
     pub(super) denylist: &'a [String],
-    pub(super) origin: Origin,
+    pub(super) origin: Origin<'a>,
 }
 
 impl Capture<'static> {
@@ -46,20 +46,30 @@ impl Capture<'static> {
 
 /// Where a captured event came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Origin {
+pub(super) enum Origin<'a> {
     /// `POST /lifecycle/events`.
     Live,
     /// An uploaded copy of the harness's own record (#1026): labelled `backfill`, so it never
     /// counts as live, and its memory dated by the event (ADR-0009 D2).
     Backfill,
+    /// A plugin store's copy (#1117), labelled with the store's kind.
+    Copy(&'a str),
 }
 
-impl Origin {
-    /// The event's `source` and `origin_node_id`.
-    const fn label(self) -> &'static str {
+impl<'a> Origin<'a> {
+    /// The event's `source`.
+    pub(super) const fn source(self) -> &'a str {
         match self {
             Self::Live => "lifecycle",
             Self::Backfill => "backfill",
+            Self::Copy(kind) => kind,
+        }
+    }
+    /// The event's `origin_node_id`.
+    pub(super) const fn node(self) -> &'static str {
+        match self {
+            Self::Live => "lifecycle",
+            Self::Backfill | Self::Copy(_) => "backfill",
         }
     }
 }
@@ -519,7 +529,7 @@ pub(super) fn prepare(
 
     let created = match capture.origin {
         Origin::Live => delivery.received_at,
-        Origin::Backfill => delivery.time,
+        Origin::Backfill | Origin::Copy(_) => delivery.time,
     };
     let fact = extras.memory.and_then(|(member, capture)| {
         let text = payload.get(member)?.as_str()?;
@@ -539,10 +549,10 @@ pub(super) fn prepare(
         timestamp: delivery.time,
         event_type: event_type(kind),
         payload,
-        source: capture.origin.label().to_owned(),
+        source: capture.origin.source().to_owned(),
         session_id: Some(record.session_id.clone()),
         scope_id: 1,
-        origin_node_id: capture.origin.label().to_owned(),
+        origin_node_id: capture.origin.node().to_owned(),
         sequence_id: 0,
         created_at: Some(delivery.received_at),
     };
@@ -562,7 +572,7 @@ pub(super) fn prepare(
         activity: extras.activity,
         fact,
         call: extras.call,
-        copy: false,
+        copy: matches!(capture.origin, Origin::Copy(_)),
     };
     Ok(Plan::Write {
         write: DeliveryWrite::Capture(Box::new(write)),
@@ -652,6 +662,32 @@ mod tests {
         );
         assert!(live.event.payload["harness_version"].is_null());
         assert_eq!(live.fact.unwrap().t_created, delivery.received_at);
+    }
+
+    /// A plugin store's copy (#1117) is labelled with the store's kind, so it never counts as
+    /// live nor as a harness import, marked a copy for the store, and dated by its event.
+    #[test]
+    fn a_copy_capture_is_labelled_with_its_kind() {
+        let delivery = delivery();
+        let copy = Capture {
+            denylist: &[],
+            origin: Origin::Copy("claude-memory"),
+        };
+        let copied = captured(&delivery, final_message(None), &copy);
+        assert_eq!(
+            (
+                copied.event.source.as_str(),
+                copied.event.origin_node_id.as_str()
+            ),
+            ("claude-memory", "backfill")
+        );
+        assert!(copied.copy);
+        assert_eq!(copied.fact.unwrap().t_created, delivery.time);
+        let backfill = Capture {
+            denylist: &[],
+            origin: Origin::Backfill,
+        };
+        assert!(!captured(&delivery, final_message(None), &backfill).copy);
     }
 
     /// The denylist reaches the prompt, never the identifiers.

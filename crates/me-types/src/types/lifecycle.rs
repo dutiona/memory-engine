@@ -555,6 +555,8 @@ pub struct Upload {
     /// What the reader counted and did not import, as the report shows it; bound into the
     /// preview too.
     pub census: Value,
+    /// Whether its events are a copy of a plugin store, labelled with `kind` (#1117).
+    pub copy: bool,
 }
 
 /// One item a harness reader made of an upload.
@@ -613,6 +615,9 @@ pub enum ImportOutcome {
     Collision,
     /// The session was captured live from before this item: nothing written.
     LiveOverlap,
+    /// A copy's event whose actor and kind another import holds in its session: nothing
+    /// written (#1117).
+    Superseded,
     /// The engine cannot apply it (a fixed phrase): skipped, no key held.
     Refused(&'static str),
 }
@@ -643,7 +648,7 @@ pub struct ItemSummary {
 }
 
 /// A memory an import made, or a commit would make.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FactPreview {
     /// The event ID of the item it comes from.
     pub event_id: String,
@@ -662,10 +667,12 @@ pub struct FactPreview {
     pub hint: Option<&'static str>,
     /// Its text as stored, cut to 512 bytes.
     pub preview: String,
+    /// Its starting importance.
+    pub importance: f64,
 }
 
 /// What an import did, or what its write would do (#1026).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Imported {
     /// Whether the import committed; a dry run never does.
     pub committed: bool,
@@ -679,6 +686,8 @@ pub struct Imported {
     pub facts: Vec<FactPreview>,
     /// The order key of the first live event of each session the upload holds that has one.
     pub live_since: BTreeMap<String, OrderKey>,
+    /// The other origins holding each session of the upload on its machine (#1117).
+    pub held_by: BTreeMap<String, BTreeSet<String>>,
     /// The secrets redaction removed from the stored items.
     pub found: u64,
     /// The stored items that are sensitive-path stubs.
