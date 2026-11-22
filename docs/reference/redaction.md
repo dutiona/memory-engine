@@ -243,7 +243,8 @@ apply then skips.
 `tests/fixtures/redaction-cases.jsonl` pins the rule set shared with knowledge-base: one pass of `redact::redact`
 reproduces every case, and both repositories carry the file byte for byte, each pinning its `sha256sum` in a test. A
 rule change is a pair of PRs, memory-engine first, both quoting the same digest; an edit of one copy alone fails that
-repository's pin.
+repository's pin. A case named `json-…` holds a JSON document: the JSON walk (`scrub_json`) must also turn it into its
+output, which pins the key-as-context rule for hex values (knowledge-base#626).
 
 ## Residuals
 
