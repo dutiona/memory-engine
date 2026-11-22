@@ -588,6 +588,7 @@ mod tests {
         config.insert("last_consolidated_at".to_string(), ts(2_000).to_rfc3339());
 
         let snapshot = EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: 11,
             storage_epoch: 1,
             embed_dim: 4,

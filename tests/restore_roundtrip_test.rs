@@ -651,3 +651,107 @@ async fn restore_sqlite_refuses_an_older_backup_of_another_dimension() {
         }
     }
 }
+
+/// One memory written as the MCP `remember` writes it: its call record first, then the fact
+/// pointing at that record. Returns `(record, fact)`.
+async fn remember(engine: &MemoryEngine, content: &str) -> (i64, i64) {
+    let record = engine.ingest(&forget_record()).await.unwrap();
+    let fact = engine
+        .add_fact(
+            &AddFactRequest {
+                content: content.into(),
+                fact_type: FactType::Semantic,
+                source_event_id: Some(record),
+                scope: None,
+                opts: None,
+            },
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+            None,
+        )
+        .await
+        .unwrap();
+    (record, fact)
+}
+
+/// #1131: an erase leaves a gap at the top of the ids; an export carries the high-water marks,
+/// so the store it is imported into gives none of the erased ids again and every call record
+/// still names its own fact. ("export, erase, restore, import": the erase comes first, or the
+/// export would carry the erased fact and test nothing; the import is the write after restore.)
+#[tokio::test]
+async fn an_import_after_erase_reuses_no_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .path(dir.path().join("memory.db"))
+        .build()
+        .unwrap();
+    let (_, first) = remember(&engine, "alpha fact").await;
+    let (second_record, second) = remember(&engine, "beta fact").await;
+    let (_, third) = remember(&engine, "gamma fact").await;
+    assert_eq!([first, second, third], [1, 2, 3]);
+    engine
+        .erase(&memory_engine::types::EraseTarget::Fact(third))
+        .await
+        .unwrap();
+    let json_path = dir.path().join("dump.json");
+    engine
+        .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
+        .unwrap();
+
+    let config = EngineConfig::new(dir.path().join("restored.db"), DIM);
+    let restored = MemoryEngine::restore_json(&json_path, &config).unwrap();
+    let (_, fourth) = remember(&restored, "delta fact").await;
+
+    assert_eq!(fourth, 4, "the erased fact's id is never given again");
+    assert!(
+        restored.get_fact(third).await.is_err(),
+        "fact 3 stays erased"
+    );
+    assert_eq!(
+        restored.get_fact(second).await.unwrap().source_event_id,
+        Some(second_record),
+        "fact 2 still points at its own call record"
+    );
+}
+
+/// #1131: a snapshot taken before the marks were exported restores from its rows, as before.
+#[tokio::test]
+async fn a_snapshot_without_sequences_restores_from_its_rows() {
+    let engine = make_engine().await;
+    let dir = tempfile::tempdir().unwrap();
+    let json_path = dir.path().join("dump.json");
+    engine
+        .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    assert!(value.as_object_mut().unwrap().remove("sequences").is_some());
+    std::fs::write(&json_path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let restored = MemoryEngine::restore_json_memory(&json_path).unwrap();
+    let (_, next) = remember(&restored, "gamma fact").await;
+    assert_eq!(next, 3, "the id after the highest restored row");
+}
+
+/// #1131: an older binary reads a snapshot carrying `sequences` because the snapshot type
+/// ignores a key it does not know.
+#[tokio::test]
+async fn an_export_with_sequences_reads_as_a_snapshot_with_an_unknown_field() {
+    let engine = make_engine().await;
+    let dir = tempfile::tempdir().unwrap();
+    let json_path = dir.path().join("dump.json");
+    engine
+        .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    value.as_object_mut().unwrap().insert(
+        "a_field_from_the_future".into(),
+        serde_json::json!({"x": 1}),
+    );
+    let snapshot: memory_engine::inspect_types::EngineSnapshot =
+        serde_json::from_value(value).unwrap();
+    assert_eq!(snapshot.facts.len(), 2);
+}

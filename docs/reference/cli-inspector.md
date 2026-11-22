@@ -172,6 +172,12 @@ or a call record the snapshot lacks, holds both an event and a quarantine record
 fact it lacks, and a target holding only receipts or segments counts as not empty. A snapshot from before schema v18 has
 no such sections and loads as it did. The `activities` table is outside the snapshot, as before.
 
+A JSON export also keeps the store's id high-water marks (`sequences`, #1131), and `import` starts each restored table's
+ids above them, so a memory erased or archived before the export never has its id given to a new one, and a call
+record never ends up naming another memory than its own. That holds for an export taken by this version or later,
+imported by this version or later. An older export has no marks, and an older binary ignores them: either restores the
+marks from the surviving rows, as before, and can give again an id erased before the export.
+
 #### `add-fact` — Store One Fact with a Pre-computed Vector
 
 ```bash

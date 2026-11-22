@@ -46,3 +46,6 @@ tombstones: []
 lifecycle_receipts: []
 lifecycle_segments: []
 config: "{}"
+sequences:
+  facts: 1
+  scopes: 1
