@@ -95,6 +95,11 @@ fn slices(kind: Kind, store: &Path, out: &Path) -> Result<Vec<Slice>, Refusal> {
     connection
         .pragma_update(None, "query_only", true)
         .map_err(ExportError::from)?;
+    // The export's `ORDER BY` sorts whole rows: keep any sorter spill of their unredacted text
+    // off the disk, where a temporary file would sit outside the private output directory.
+    connection
+        .pragma_update(None, "temp_store", "MEMORY")
+        .map_err(ExportError::from)?;
     Ok(match kind {
         Kind::ClaudeMem => claude_mem::export(&connection)?,
         Kind::ClaudeMemory => claude_memory::export(&connection)?,
@@ -128,16 +133,24 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
 }
 
 /// Export `args.store` into `args.out`: the slices' files and `index.tsv`. Returns the files
-/// and the rows written.
+/// and the rows written. A write that fails removes the directory this run created, so no
+/// partial export of unredacted text is left behind.
 fn run(args: &Args) -> Result<(usize, usize), Refusal> {
     let slices = slices(args.kind, &args.store, &args.out)?;
     DirBuilder::new()
         .mode(0o700)
         .create(&args.out)
         .map_err(|e| Refusal::Write(args.out.clone(), e))?;
+    write_all(args, &slices).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&args.out);
+    })
+}
+
+/// The slices' files and `index.tsv`, into the directory `run` created.
+fn write_all(args: &Args, slices: &[Slice]) -> Result<(usize, usize), Refusal> {
     let mut index = String::from("file\tproject\tsessions\trows\tbytes\n");
     let mut rows = 0;
-    for slice in &slices {
+    for slice in slices {
         let name = file_name(args.kind, slice.project.as_deref());
         write_private(&args.out.join(&name), &slice.body)?;
         let _ = writeln!(
