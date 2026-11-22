@@ -1226,8 +1226,9 @@ async fn dedup_compares_every_fact_after_a_reconstruction() {
     assert_eq!(duplicates_removed(&engine).await, 1);
 }
 
-/// #1080: a restore resets the id sequence to the highest surviving id, so a new fact can
-/// take an erased id at or below a watermark the restore would otherwise have imported.
+/// #1080: a snapshot taken before #1131 carries no id marks, so its restore resets each id
+/// sequence to the highest surviving id and a new fact can take an erased id at or below a
+/// watermark the restore would otherwise have imported.
 #[tokio::test]
 async fn dedup_compares_a_reused_id_after_a_restore() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
@@ -1245,6 +1246,14 @@ async fn dedup_compares_a_reused_id_after_a_restore() {
         .dump_state(&crate::inspect::DumpFormat::Json(dump.clone()))
         .await
         .unwrap();
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&dump).unwrap()).unwrap();
+    snapshot
+        .as_object_mut()
+        .unwrap()
+        .remove("sequences")
+        .unwrap();
+    std::fs::write(&dump, serde_json::to_vec(&snapshot).unwrap()).unwrap();
 
     let restored = MemoryEngine::restore_json_memory(&dump).unwrap();
     let reused = add_animal(&restored, "cats meow", None).await;

@@ -25,9 +25,9 @@ use super::types::EngineSnapshot;
 /// the registry (see the embedding-space restore step). The store's dimension
 /// ([`STORE_DIM`](crate::store::embedding_meta::STORE_DIM)) is recorded from the validated
 /// header instead, when restored facts wait for their vectors. A restore never imports
-/// dedup's watermark or generation (#1080), because it resets each id sequence to the
-/// highest surviving id, so an erased id can be reused; the next consolidation compares
-/// every fact.
+/// dedup's watermark or generation (#1080): a snapshot taken before #1131 has no id marks,
+/// so its restore resets each id sequence to the highest surviving id and an erased id can
+/// be reused; the next consolidation compares every fact.
 const MANAGED_CONFIG_KEYS: &[&str] = &[
     "schema_version",
     "storage_epoch",
