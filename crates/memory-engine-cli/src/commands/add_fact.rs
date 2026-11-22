@@ -42,7 +42,7 @@ pub struct AddFactArgs {
     #[arg(long)]
     metadata: Option<String>,
 
-    /// Pin this fact (unforgettable — exempt from decay)
+    /// Pin this fact (never pruned — exempt from decay)
     #[arg(long)]
     pinned: bool,
 

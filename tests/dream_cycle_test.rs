@@ -125,7 +125,7 @@ async fn full_cycle_produces_and_applies_then_reruns_as_noop() {
     assert_eq!(applied.quarantined, 1);
     assert_eq!(applied.scores_adjusted, 1);
 
-    // End state: the quarantined fact is distinguishable from forgetting.
+    // End state: the quarantined fact is distinguishable from a decay-pruned one.
     assert_eq!(
         engine.explain_fact(neg_id).await.unwrap().state,
         FactState::Expired {

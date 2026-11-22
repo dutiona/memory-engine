@@ -1,12 +1,12 @@
-//! C3: Forgetting quality benchmarks.
+//! C3: Pruning quality benchmarks.
 //!
 //! Tests Ebbinghaus decay ordering, half-life overrides, importance scoring
-//! monotonicity, and pin immunity interaction with the forget pipeline.
+//! monotonicity, and pin immunity interaction with the prune pipeline.
 
 use std::collections::HashMap;
 
 use chrono::Utc;
-use memory_engine::ForgetPolicy;
+use memory_engine::PrunePolicy;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactOptions, AddFactRequest, EventType, FactType, NewEvent};
 
@@ -48,12 +48,12 @@ async fn ebbinghaus_decay_ordering_old_before_young() {
     // Old (120d): 0.3*2^(-120/69) + 0 + 0 + 0.2*0.3 = 0.089 + 0.06 = ~0.149
     // Young (0d): 0.3*1.0 + 0 + 0 + 0.2*0.3 = 0.3 + 0.06 = ~0.36
     // Threshold between them: 0.30
-    let policy = ForgetPolicy {
+    let policy = PrunePolicy {
         min_importance: 0.30,
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
 
-    let _stats = engine.forget(&policy).await.expect("forget failed");
+    let _stats = engine.prune(&policy).await.expect("prune failed");
 
     // At least the old fact should be expired
     let old_fact = engine.get_fact(old_id).await.expect("get old fact failed");
@@ -116,13 +116,13 @@ async fn half_life_override_episodic_decays_faster() {
     // Episodic (45d, 30d HL): 0.3*2^(-45/30) + 0 + 0 + 0.2*0.3 = 0.106 + 0.06 = ~0.166
     // Semantic (decay-exempt): 0.3*1.0 + 0 + 0 + 0.2*0.3 = 0.3 + 0.06 = ~0.36
     // Threshold between them: 0.20
-    let policy = ForgetPolicy {
+    let policy = PrunePolicy {
         half_life_overrides: overrides,
         min_importance: 0.20,
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
 
-    let _stats = engine.forget(&policy).await.expect("forget failed");
+    let _stats = engine.prune(&policy).await.expect("prune failed");
 
     let episodic = engine
         .get_fact(episodic_id)
@@ -184,12 +184,12 @@ async fn importance_scoring_monotonicity() {
     // High (imp=0.9): 0.3*2^(-60/69) + 0 + 0 + 0.2*0.9 = 0.164 + 0.18 = ~0.344
     // Low (imp=0.1):  0.3*2^(-60/69) + 0 + 0 + 0.2*0.1 = 0.164 + 0.02 = ~0.184
     // Threshold between them: 0.25
-    let policy = ForgetPolicy {
+    let policy = PrunePolicy {
         min_importance: 0.25,
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
 
-    let _stats = engine.forget(&policy).await.expect("forget failed");
+    let _stats = engine.prune(&policy).await.expect("prune failed");
 
     let high = engine.get_fact(high_id).await.expect("get high failed");
     let low = engine.get_fact(low_id).await.expect("get low failed");
@@ -207,7 +207,7 @@ async fn importance_scoring_monotonicity() {
 }
 
 #[tokio::test]
-async fn pin_immunity_survives_aggressive_forget() {
+async fn pin_immunity_survives_aggressive_prune() {
     let engine = eval_engine();
 
     // Pinned fact, very old, low importance — should still survive
@@ -243,12 +243,12 @@ async fn pin_immunity_survives_aggressive_forget() {
     .await;
 
     // Aggressive policy: high min_importance threshold
-    let policy = ForgetPolicy {
+    let policy = PrunePolicy {
         min_importance: 0.99,
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
 
-    let _stats = engine.forget(&policy).await.expect("forget failed");
+    let _stats = engine.prune(&policy).await.expect("prune failed");
 
     let pinned = engine.get_fact(pinned_id).await.expect("get pinned failed");
     let unpinned = engine
@@ -258,7 +258,7 @@ async fn pin_immunity_survives_aggressive_forget() {
 
     assert!(
         pinned.t_expired.is_none(),
-        "pinned fact should be immune to forgetting regardless of age/importance"
+        "pinned fact should be immune to pruning regardless of age/importance"
     );
     assert!(
         unpinned.t_expired.is_some(),
@@ -274,7 +274,7 @@ async fn pin_immunity_survives_aggressive_forget() {
 /// their scores, the graph-degree term is the sole differentiator — the connected
 /// fact must survive while the isolated one is pruned.
 ///
-/// Every prior forgetting test runs with an empty graph (every fact's degree is 0,
+/// Every prior prune test runs with an empty graph (every fact's degree is 0,
 /// so the 3rd of 4 scoring signals never moves the needle); this is the gap #312
 /// flagged. The clique is built through the real engine API (`ingest` +
 /// `link_session_facts`), so the in-memory graph the prune walk reads is populated
@@ -384,11 +384,11 @@ async fn well_connected_fact_survives_prune() {
     //   hub      (deg 4): 0.3·2^(-100/69) + 0 + 0.3·0.409  + 0.2·0.3 ≈ 0.293
     // A threshold strictly between them isolates the graph-degree term as the
     // decisive survival signal.
-    let policy = ForgetPolicy {
+    let policy = PrunePolicy {
         min_importance: 0.23,
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
-    let _stats = engine.forget(&policy).await.expect("forget failed");
+    let _stats = engine.prune(&policy).await.expect("prune failed");
 
     let hub = engine.get_fact(hub_id).await.expect("get hub");
     let isolated = engine.get_fact(isolated_id).await.expect("get isolated");

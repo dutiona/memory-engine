@@ -5,8 +5,8 @@
 #![allow(clippy::cast_precision_loss)]
 
 use memory_engine::EmbeddingFingerprint;
-use memory_engine::ForgetPolicy;
 use memory_engine::MemoryEngine;
+use memory_engine::PrunePolicy;
 use memory_engine::error::MemoryError;
 use memory_engine::traits::{
     ConflictArbiter, ConsolidationConfig, CrudDecision, EmbeddingProvider, SummarizableContent,
@@ -157,15 +157,15 @@ async fn main() -> Result<(), MemoryError> {
         engine.list_active_facts(None).await?.len()
     );
 
-    // --- Forgetting: uses ForgetPolicy (configurable struct, not a trait) ---
-    let policy = ForgetPolicy {
+    // --- Pruning: uses PrunePolicy (configurable struct, not a trait) ---
+    let policy = PrunePolicy {
         half_life_days: 1.0, // aggressive for demo
         min_importance: 0.3,
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
-    let prune_stats = engine.forget(&policy).await?;
+    let prune_stats = engine.prune(&policy).await?;
     println!(
-        "\nForgetting: {}/{} facts expired",
+        "\nPruning: {}/{} facts expired",
         prune_stats.facts_expired, prune_stats.facts_evaluated
     );
 

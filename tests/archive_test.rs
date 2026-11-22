@@ -4,8 +4,8 @@
 use chrono::{Duration, Utc};
 use memory_engine::ArchivePolicy;
 use memory_engine::EmbeddingFingerprint;
-use memory_engine::ForgetPolicy;
 use memory_engine::MemoryQuery;
+use memory_engine::PrunePolicy;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::traits::EmbeddingProvider;
@@ -76,13 +76,13 @@ async fn archive_lifecycle_roundtrip() {
     // Add 150 facts
     let _ids = add_facts(&engine, 150).await;
 
-    // Forget them all — set a very aggressive policy
-    let forget_policy = ForgetPolicy {
+    // Prune them all — set a very aggressive policy
+    let prune_policy = PrunePolicy {
         half_life_days: 0.0001,
         min_importance: 1.0, // expire everything
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
-    let prune_stats = engine.forget(&forget_policy).await.unwrap();
+    let prune_stats = engine.prune(&prune_policy).await.unwrap();
     assert!(
         prune_stats.facts_expired >= 150,
         "expected >=150 expired, got {}",
@@ -154,13 +154,13 @@ async fn archive_skips_pinned_facts() {
     // Add 50 non-pinned facts
     let _non_pinned = add_facts(&engine, 50).await;
 
-    // Forget aggressively
-    let forget_policy = ForgetPolicy {
+    // Prune aggressively
+    let prune_policy = PrunePolicy {
         half_life_days: 0.0001,
         min_importance: 1.0,
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
-    engine.forget(&forget_policy).await.unwrap();
+    engine.prune(&prune_policy).await.unwrap();
 
     // Archive
     let archive_policy = ArchivePolicy {
@@ -173,7 +173,7 @@ async fn archive_skips_pinned_facts() {
         .unwrap()
         .expect("should archive non-pinned facts");
 
-    // Only 50 non-pinned facts archived (pinned fact is never expired by forget)
+    // Only 50 non-pinned facts archived (pinned fact is never expired by prune)
     assert_eq!(stats.facts_archived, 50);
 
     // Pinned fact still exists
@@ -197,18 +197,18 @@ async fn archive_returns_none_below_min_facts() {
 
 /// Archive ≥`min` facts into a single `.pak` and return `(engine, pak_path)`.
 ///
-/// Adds `n` facts, forgets them all with an aggressive policy, then archives
+/// Adds `n` facts, prunes them all with an aggressive policy, then archives
 /// with a future cutoff so every expired fact qualifies. The returned engine
 /// holds exactly one manifest entry; `pak_path` is the absolute on-disk `.pak`.
 async fn archive_one_pak(engine: &MemoryEngine, n: usize) -> std::path::PathBuf {
     let _ids = add_facts(engine, n).await;
 
-    let forget_policy = ForgetPolicy {
+    let prune_policy = PrunePolicy {
         half_life_days: 0.0001,
         min_importance: 1.0, // expire everything
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
-    let prune_stats = engine.forget(&forget_policy).await.unwrap();
+    let prune_stats = engine.prune(&prune_policy).await.unwrap();
     assert!(
         prune_stats.facts_expired >= n,
         "expected >={n} expired, got {}",
@@ -402,12 +402,12 @@ async fn archive_search_finds_archived_facts() {
     }
 
     // Expire all facts aggressively
-    let forget_policy = ForgetPolicy {
+    let prune_policy = PrunePolicy {
         half_life_days: 0.0001,
         min_importance: 1.0, // expire everything
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
-    let prune_stats = engine.forget(&forget_policy).await.unwrap();
+    let prune_stats = engine.prune(&prune_policy).await.unwrap();
     assert!(
         prune_stats.facts_expired >= 20,
         "expected >=20 expired facts, got {}",

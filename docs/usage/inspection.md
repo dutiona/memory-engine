@@ -59,7 +59,7 @@ let explanation = engine.explain_fact(fact_id)?;
 match &explanation.state {
     FactState::Active => println!("Alive and well"),
     FactState::Expired { reason } => println!("Expired: {reason:?}"),
-    FactState::Pinned => println!("Pinned (unforgettable)"),
+    FactState::Pinned => println!("Pinned (never pruned)"),
     FactState::Due { t_valid, surfaced_at } => {
         println!("Due since {t_valid}, surfaced_at={surfaced_at:?}")
     }
@@ -107,7 +107,7 @@ sequence_id). This is intentional for inspection/debugging use cases.
 ### Limitations
 
 - **`ExpiredReason`** is best-effort. Most expired facts return `Unknown` because
-  forgetting, conflict resolution, and dedup do not yet log `MemoryOp` events.
+  pruning, conflict resolution, and dedup do not yet log `MemoryOp` events.
   A future version will add event-based audit trails.
 - **`GraphContext`** reflects the current (active-only) graph. Expired edges are
   not retained in `MemoryGraph`. Historical connectivity requires replaying events.
@@ -142,7 +142,7 @@ Entries are sorted chronologically. A fact with no temporal bounds has a single
 ## Replay Events
 
 Replay a segment of the append-only event log for debugging consolidation,
-forgetting, or conflict resolution.
+pruning, or conflict resolution.
 
 ```rust
 use memory_engine::inspect::types::{ReplayFilter, ReplayOrder};

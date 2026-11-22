@@ -235,7 +235,7 @@ memory-engine-cli --format json prune --min-importance 0.2 --half-life-override 
 ```
 
 Expires (never deletes) every fact whose decayed importance falls below `--min-importance`, scored with the Ebbinghaus
-policy of the forgetting engine. Flags, each defaulting to `ForgetPolicy::default()`: `--half-life-days`,
+policy of the decay prune. Flags, each defaulting to `PrunePolicy::default()`: `--half-life-days`,
 `--min-importance` (in [0, 1]), `--recency-weight`, `--frequency-weight`, `--graph-degree-weight`,
 `--base-importance-weight`, and the repeatable `--half-life-override TYPE=DAYS`. An invalid policy is refused before
 the store is opened. Pinned facts and the decay-exempt types (Semantic and Procedural by default, so every memory the

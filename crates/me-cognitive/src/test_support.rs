@@ -14,10 +14,10 @@
 //! Only the methods the moved test suites actually exercise
 //! (`get_fact`/`list_active_facts`/`list_undreamt_in_period`/`outcome_counts*`/
 //! `promote`) are implemented against the storage port directly — genuinely cheap,
-//! one-line delegations. `query`/`consolidate`/`forget` are unreachable by any test
+//! one-line delegations. `query`/`consolidate`/`prune` are unreachable by any test
 //! in this crate (verified: neither `DefaultDreamCycle::run` nor `LlmDreamCycle::run`
 //! nor `apply_cycle_report` calls them) and would otherwise require a same-layer
-//! dependency on `me-query`/`me-consolidate`/`me-forget` this crate does not carry, so
+//! dependency on `me-query`/`me-consolidate`/`me-prune` this crate does not carry, so
 //! they panic loudly if a future test does reach them instead of silently
 //! misbehaving.
 
@@ -31,7 +31,7 @@ use me_index::MemoryGraph;
 use me_storage::{MemoryCtx, StorageBackend, UpcasterRegistry};
 use me_traits::{ConsolidationConfig, ConsolidationStats, EmbeddingProvider, SummaryGenerator};
 use me_types::error::Result;
-use me_types::types::forgetting::{ForgetPolicy, PruneStats};
+use me_types::types::pruning::{PrunePolicy, PruneStats};
 use me_types::types::search::{SearchQuery, SearchResult};
 use me_types::types::{Fact, NewFact, OutcomeCounts, PromoteRequest, PromotionResult};
 
@@ -215,8 +215,8 @@ impl me_traits::DreamCtx for TestEngine {
         unimplemented!("not exercised by this crate's tests — no me-consolidate dependency")
     }
 
-    async fn forget(&self, _policy: &ForgetPolicy) -> Result<PruneStats> {
-        unimplemented!("not exercised by this crate's tests — no me-forget dependency")
+    async fn prune(&self, _policy: &PrunePolicy) -> Result<PruneStats> {
+        unimplemented!("not exercised by this crate's tests — no me-prune dependency")
     }
 
     async fn promote(&self, req: &PromoteRequest) -> Result<PromotionResult> {

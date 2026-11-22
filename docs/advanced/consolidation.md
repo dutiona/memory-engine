@@ -18,7 +18,7 @@ Atomicity is preserved end-to-end. The compute phase produces a plan without tou
 
 ### Pass 1: Local Dedup
 
-Compares the facts added since the last consolidation (those above its watermark, see [Incremental Operation](#incremental-operation)) against all active facts. **Pinned facts are excluded from dedup** — they are never candidates for expiration, and pinned candidates are skipped during comparison. This ensures unforgettable facts are preserved even if near-duplicates exist.
+Compares the facts added since the last consolidation (those above its watermark, see [Incremental Operation](#incremental-operation)) against all active facts. **Pinned facts are excluded from dedup** — they are never candidates for expiration, and pinned candidates are skipped during comparison. This ensures pinned facts, which are never pruned, are preserved even if near-duplicates exist.
 
 Pairs with cosine similarity **at or above** `dedup_threshold` are resolved by expiring the lower-importance fact. Tie-break on equal importance: the newer fact (higher id) is expired. `dedup_threshold` lives in `[0.0, 1.0]`; a value of `1.0` merges only exact duplicates (identical embeddings).
 
@@ -113,7 +113,7 @@ println!(
 
 ## Graph Rebuild
 
-After dedup, if any duplicates were removed, the engine rebuilds the in-memory graph from the database. This keeps degree-based scoring (used by the forgetting system) consistent with the current state of active edges.
+After dedup, if any duplicates were removed, the engine rebuilds the in-memory graph from the database. This keeps degree-based scoring (used by the decay prune) consistent with the current state of active edges.
 
 ```rust
 // me_consolidate::consolidate, after apply_plan returns the ids it actually expired

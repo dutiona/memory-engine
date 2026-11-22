@@ -986,14 +986,14 @@ impl FactGraph for SqliteBackend {
     }
 
     // WRITE — importance-sweep write phase (verbatim tx body of
-    // `forgetting::policy::prune`, minus the engine-side scoring + in-memory graph
+    // `pruning::policy::prune`, minus the engine-side scoring + in-memory graph
     // reconciliation which the caller owns).
     async fn prune_atomic(
         &self,
         scored: &[(i64, f64)],
         to_expire: &[i64],
         now: DateTime<Utc>,
-    ) -> Result<(me_types::types::forgetting::PruneStats, Vec<i64>)> {
+    ) -> Result<(me_types::types::pruning::PruneStats, Vec<i64>)> {
         let dim = self.embed_dim;
         let scored = scored.to_vec();
         let to_expire = to_expire.to_vec();
@@ -1015,7 +1015,7 @@ impl FactGraph for SqliteBackend {
                 }
                 tx.commit().map_err(StorageError::backend)?;
 
-                let stats = me_types::types::forgetting::PruneStats {
+                let stats = me_types::types::pruning::PruneStats {
                     facts_expired: to_expire.len(),
                     facts_evaluated: scored.len(),
                 };

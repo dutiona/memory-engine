@@ -40,7 +40,7 @@ const SCORING_COLUMNS: &str = "id, fact_type, last_accessed, access_count, impor
 // `FactScoringRow` and `SessionFact` relocated to `me_types::types` (#629 — the
 // dialect-free storage port must not reference types living inside the SQLite
 // store). Shims preserve the original `crate::store::facts::{FactScoringRow,
-// SessionFact}` paths (e.g. `forgetting::policy` keeps its import + trait impl).
+// SessionFact}` paths (e.g. `pruning::policy` keeps its import + trait impl).
 pub use me_types::types::{FactScoringRow, SessionFact};
 
 /// Config key of dedup's watermark (#1080): the highest fact id consolidation has compared.
@@ -632,7 +632,7 @@ impl<'a> FactStore<'a> {
     /// (`t_expired IS NULL`).
     ///
     /// Like [`list_active`](Self::list_active) but selects only the columns the
-    /// forgetting pass needs (see [`FactScoringRow`]), so the working set never
+    /// prune needs (see [`FactScoringRow`]), so the working set never
     /// materializes `content`, `embedding`, or `metadata`. Used by `prune`,
     /// which must scan the entire active set to compute global importance.
     ///
@@ -911,7 +911,7 @@ impl<'a> FactStore<'a> {
             .map_err(|e| StorageError::backend(e).into())
     }
 
-    /// List active pinned (unforgettable) facts, optionally filtered by scope,
+    /// List active pinned (never pruned) facts, optionally filtered by scope,
     /// ordered by `importance_score` DESC and capped at `limit`.
     ///
     /// Pass empty `scope_ids` to get pinned facts across all scopes. Pass
@@ -3306,7 +3306,7 @@ mod tests {
 
     // -------------------------------------------------------------------------
     // #405 — unified scope_id IN-list strategy (json_each) across the three
-    // scheduling/forgetting queries that used to build positional placeholder
+    // scheduling/prune queries that used to build positional placeholder
     // strings (list_dormant, list_due, next_due_time). These tests pin the
     // refactor against regressions for 0, 1, and N scope ids — N > 1 being the
     // case the per-element placeholder builder was hand-rolling.

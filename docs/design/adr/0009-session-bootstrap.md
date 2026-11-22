@@ -1,6 +1,6 @@
 # ADR-0009: Session Log Bootstrap Design
 
-**Status:** Accepted
+**Status:** Accepted; amended 2026-11-22 (dutiona/memory-engine#1089: the decay prune is renamed prune)
 **Date:** 2026-03-19
 **Phase:** 4a
 **Amended for the backfill route by:** dutiona/memory-engine#1026 (an uploaded transcript imports under ADR-0020 §6, every event in the log and no keyword extraction or marker; memory files keep this ADR's rules)
@@ -78,3 +78,11 @@ Session outcome and session ID are stored in fact `metadata` JSON fields (`sessi
 
 - The `Io` error variant added to `MemoryError` has broader utility beyond bootstrap
 - `EventFilter.source` field is generally useful for event store queries
+
+## Amendment (2026-11-22, #1089)
+
+The decay prune is now named `prune` (dutiona/memory-engine#1089); `forget` names only the retraction. This record keeps the names of its time:
+
+| Then | Now |
+|---|---|
+| `forget()` (the decay prune) | `prune()` |

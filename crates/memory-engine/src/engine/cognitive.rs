@@ -18,7 +18,7 @@
 //! - **Four thin delegates** (`record_insight`, `run_dream_cycle`,
 //!   `run_dream_cycle_guarded`, `apply_cycle_report`) forwarding to
 //!   [`me_cognitive`] via the `crate::cognitive` alias (the `pool`/`store`/`graph`/
-//!   `scope`/`archive`/`forgetting` convention).
+//!   `scope`/`archive`/`pruning` convention).
 
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ use chrono::Utc;
 
 use crate::engine::MemoryEngine;
 use crate::error::{MemoryError, Result};
-use crate::forgetting::{ForgetPolicy, PruneStats};
+use crate::pruning::{PrunePolicy, PruneStats};
 use crate::traits::{
     ConsolidationConfig, ConsolidationStats, DreamCtx, EmbeddingProvider, SummaryGenerator,
 };
@@ -45,7 +45,7 @@ pub use crate::types::Insight;
 /// # Why this is a newtype and **not** `impl DreamCtx for MemoryEngine`
 ///
 /// Five of `DreamCtx`'s nine methods share a name with an inherent `MemoryEngine`
-/// method (`query`, `list_active_facts`, `get_fact`, `consolidate`, `forget`). Had
+/// method (`query`, `list_active_facts`, `get_fact`, `consolidate`, `prune`). Had
 /// `MemoryEngine` implemented `DreamCtx` directly, each impl body would have to call
 /// the same-named inherent method on `self` — and Rust resolves inherent-before-trait,
 /// so it works *only for as long as the inherent method keeps its name*. Rename or
@@ -104,8 +104,8 @@ impl DreamCtx for EngineDreamCtx<'_> {
         self.0.consolidate(generator, embedder, config).await
     }
 
-    async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        self.0.forget(policy).await
+    async fn prune(&self, policy: &PrunePolicy) -> Result<PruneStats> {
+        self.0.prune(policy).await
     }
 
     async fn promote(&self, req: &PromoteRequest) -> Result<PromotionResult> {
@@ -528,7 +528,7 @@ impl MemoryEngine {
             last_accessed: now,
             metadata,
             scope_id: 1,     // placeholder — promote_atomic patches it from scope_path
-            is_pinned: true, // promoted wisdom is pinned (unforgettable)
+            is_pinned: true, // promoted wisdom is pinned (never pruned)
         };
 
         // Atomic fact + lineage insert below the seam (identity guard + scope resolution
@@ -1157,7 +1157,7 @@ mod tests {
     /// `explain_fact` — a facade-only module (`engine::inspect`), so this
     /// cross-module assertion cannot live in `me-cognitive` itself.
     #[tokio::test]
-    async fn quarantine_is_distinguishable_from_forgetting_in_explain_fact() {
+    async fn quarantine_is_reported_as_quarantined_in_explain_fact() {
         use crate::inspect::{ExpiredReason, FactState};
         let engine = MemoryEngine::builder(4).build().unwrap();
         engine

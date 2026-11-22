@@ -1,13 +1,13 @@
 //! B3: Fact lifecycle conformance tests.
 //!
 //! Verifies content hashing, dedup consolidation, state transitions
-//! (create → pin → forget, create → forget), and `get_fact` round-trip.
+//! (create → pin → prune, create → prune), and `get_fact` round-trip.
 
 use memory_engine::traits::{ConsolidationConfig, EmbeddingProvider, SummaryGenerator};
 use memory_engine::types::FactType;
 
 use crate::helpers::{
-    MockSummaryGenerator, TestEmbedder, add_fact, aggressive_forget_policy, eval_engine,
+    MockSummaryGenerator, TestEmbedder, add_fact, aggressive_prune_policy, eval_engine,
 };
 
 #[tokio::test]
@@ -93,36 +93,36 @@ async fn dedup_consolidation_expires_one_duplicate() {
 }
 
 #[tokio::test]
-async fn pinned_fact_survives_aggressive_forget() {
+async fn pinned_fact_survives_aggressive_prune() {
     let engine = eval_engine();
 
     let id = add_fact(&engine, "critical system fact", FactType::Semantic).await;
     engine.pin_fact(id).await.expect("pin_fact failed");
 
-    let policy = aggressive_forget_policy();
-    engine.forget(&policy).await.expect("forget failed");
+    let policy = aggressive_prune_policy();
+    engine.prune(&policy).await.expect("prune failed");
 
-    let fact = engine.get_fact(id).await.expect("get_fact after forget");
+    let fact = engine.get_fact(id).await.expect("get_fact after prune");
     assert!(
         fact.t_expired.is_none(),
-        "pinned fact should survive aggressive forget"
+        "pinned fact should survive aggressive prune"
     );
     assert!(fact.is_pinned, "fact should still be marked as pinned");
 }
 
 #[tokio::test]
-async fn unpinned_fact_expired_by_aggressive_forget() {
+async fn unpinned_fact_expired_by_aggressive_prune() {
     let engine = eval_engine();
 
     let id = add_fact(&engine, "ephemeral observation", FactType::Episodic).await;
 
-    let policy = aggressive_forget_policy();
-    engine.forget(&policy).await.expect("forget failed");
+    let policy = aggressive_prune_policy();
+    engine.prune(&policy).await.expect("prune failed");
 
-    let fact = engine.get_fact(id).await.expect("get_fact after forget");
+    let fact = engine.get_fact(id).await.expect("get_fact after prune");
     assert!(
         fact.t_expired.is_some(),
-        "unpinned fact should be expired by aggressive forget"
+        "unpinned fact should be expired by aggressive prune"
     );
 }
 

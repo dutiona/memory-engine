@@ -6,7 +6,7 @@
 //! - **Ingest**: Append events to an immutable log (source of truth)
 //! - **Query**: Hybrid retrieval (FTS5 + vector + graph) with temporal filtering
 //! - **Consolidate**: Merge, cluster, and integrate memories (dream cycle)
-//! - **Forget**: Decay, prune, and archive stale facts
+//! - **Prune**: Decay, prune, and archive stale facts
 //! - **Resolve**: Bi-temporal conflict arbitration for contradicting facts
 //!
 //! ## Storage
@@ -128,7 +128,7 @@ pub use me_types::types; // relocated to me-types (Wave 2 #816); see `error` abo
 // `.pak` primitive (`pak`/`search`/`types`) plus the `MemoryEngine::{archive,
 // list_archives, verify_archives, search_archives_fallback}` orchestration free
 // functions the engine delegates to. The re-export preserves `crate::archive::*` for
-// every internal call site, matching the `pool`/`store`/`graph`/`scope`/`forgetting`
+// every internal call site, matching the `pool`/`store`/`graph`/`scope`/`pruning`
 // carve convention.
 #[cfg(feature = "archive")]
 pub(crate) use me_archive as archive;
@@ -140,10 +140,10 @@ pub(crate) use me_archive as archive;
 // `engine::cognitive` (a *different*, facade-internal module of the same name — see
 // that file's own doc).
 pub(crate) use me_cognitive as cognitive;
-// `forgetting` is relocated to the L3 `me-forget` crate (Wave 2 #816 / S3, sub-PR
+// `pruning` is relocated to the L3 `me-prune` crate (Wave 2 #816 / S3, sub-PR
 // 2). The re-export preserves `pub(crate)` visibility and every internal
-// `crate::forgetting::*` path (`ForgetPolicy`, `PruneStats`, `prune`).
-pub(crate) use me_forget as forgetting;
+// `crate::pruning::*` path (`PrunePolicy`, `PruneStats`, `prune`).
+pub(crate) use me_prune as pruning;
 // `graph` + `scope` are relocated to the L2 `me-index` crate (Wave 2 #816 / S2): the
 // backend-free in-memory projections (`MemoryGraph`, `ScopeTree`). The re-export
 // preserves `crate::graph::*` / `crate::scope::*` for every internal call site.
@@ -187,7 +187,6 @@ pub use store_lock::{StoreLock, StoreLockError};
 // than glob-imported so the crate-root API is auditable and a new public error
 // type must be added here deliberately. The `reexports_are_accessible` smoke
 // test guards the list.
-pub use forgetting::{ForgetPolicy, PruneStats};
 pub use inspect::types as inspect_types;
 pub use me_traits::{
     ConflictArbiter, ConflictResolution, ConsolidationConfig, ConsolidationStats, CrudDecision,
@@ -198,6 +197,7 @@ pub use me_types::error::{
     ArchiveError, ConflictError, CycleError, EmbedderError, MemoryError, MigrationError,
     RerankerError, Result, StorageError,
 };
+pub use pruning::{PrunePolicy, PruneStats};
 pub use resume::{ResumeConfig, ResumeContext};
 /// End-to-end example: build an engine, add a fact, and retrieve it with
 /// [`MemoryQuery`]'s fluent builder.
@@ -403,20 +403,20 @@ mod tests {
         let _ = std::mem::size_of::<crate::ConsolidationStats>();
         let _ = std::mem::size_of::<crate::PruneStats>();
         let _ = std::mem::size_of::<crate::ConflictResolution>();
-        let _ = std::mem::size_of::<crate::ForgetPolicy>();
+        let _ = std::mem::size_of::<crate::PrunePolicy>();
         let _ = std::mem::size_of::<crate::ConsolidationProposal>();
         let _ = std::mem::size_of::<crate::MergeGroup>();
 
-        // The forget/prune pair is ALSO reachable through the blanket
+        // The prune pair is ALSO reachable through the blanket
         // `pub use me_types::types;` re-export. `PruneStats` always was;
-        // `ForgetPolicy` became so in S5 when it was hoisted L3 -> L0 to join it
+        // `PrunePolicy` (then `PrunePolicy`) became so in S5 when it was hoisted L3 -> L0 to join it
         // (#985). That is an *additive* surface, and it is pinned here on purpose:
         // `cargo public-api` canonicalizes a type to one definition site, so it
         // CANNOT see a path becoming newly writable. Only a compile-time probe like
         // this one can. Whatever ratchet #941 installs must reason about reachable
         // paths, not item counts.
-        let _ = std::mem::size_of::<crate::types::forgetting::ForgetPolicy>();
-        let _ = std::mem::size_of::<crate::types::forgetting::PruneStats>();
+        let _ = std::mem::size_of::<crate::types::pruning::PrunePolicy>();
+        let _ = std::mem::size_of::<crate::types::pruning::PruneStats>();
 
         // The lifecycle vocabulary is namespaced, never flat: it is reached as `types::lifecycle`
         // through the blanket `types` re-export, and pinned here for the same reason as above.

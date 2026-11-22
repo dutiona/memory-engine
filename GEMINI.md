@@ -4,7 +4,7 @@
 
 ## What This Is
 
-Embedded Rust library (edition 2024, **Rust 1.89+** — the MSRV; the root `Cargo.toml` records what sets it) providing durable long-term memory for AI agents. Single facade type `MemoryEngine` (async-native; DB methods are `async fn` over an `Arc<dyn StorageBackend>`, so `tokio` is non-optional) with 5 primitives: Ingest, Query, Consolidate, Forget, Resolve. Zero LLM/network dependencies — consumers inject intelligence via traits (`EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker`).
+Embedded Rust library (edition 2024, **Rust 1.89+** — the MSRV; the root `Cargo.toml` records what sets it) providing durable long-term memory for AI agents. Single facade type `MemoryEngine` (async-native; DB methods are `async fn` over an `Arc<dyn StorageBackend>`, so `tokio` is non-optional) with 5 primitives: Ingest, Query, Consolidate, Prune, Resolve. Zero LLM/network dependencies — consumers inject intelligence via traits (`EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker`).
 
 Part of a four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence). This crate is the Memory layer. Companion repos: `knowledge-base` (`~/dev/knowledge-base`, Python MCP server, Knowledge layer), `autonomous-agent-project` (`~/dev/autonomous-agent-project`, research, no code).
 
@@ -68,7 +68,7 @@ L0.5  me-traits           consumer/contract traits (EmbeddingProvider, DreamCtx,
 L1    me-storage          persistence PORT: StorageBackend family + MemoryCtx + spawn_join_err
 L2    me-index            backend-free MemoryGraph / ScopeTree projections
       me-backend-sqlite / me-backend-postgres
-L3    me-ingest  me-query  me-consolidate  me-forget  me-resolve  me-archive  me-cognitive
+L3    me-ingest  me-query  me-consolidate  me-prune   me-resolve  me-archive  me-cognitive
 L4    memory-engine       the facade (MemoryEngine + builder + bootstrap + inspect + re-exports)
 ```
 

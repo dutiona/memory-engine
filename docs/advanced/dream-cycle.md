@@ -107,7 +107,7 @@ identity.
 ## Retrieve-before-reflect: `CycleContext`
 
 `DreamCycle::run` receives a `&dyn CycleCtx` — implemented by `CycleContext`, which
-carries the capability bag directly (query / consolidate / forget / promote /
+carries the capability bag directly (query / consolidate / prune / promote /
 `list_undreamt_in_period` / `outcome_counts*`, via the `DreamCtx` supertrait — Wave 2
 #816 / S5, #981) and adds the retrieved prior state:
 

@@ -2,7 +2,7 @@
 //!
 //! Wave 2 #816: homed in `me-storage` (L1) because its load-bearing field is
 //! `&Arc<dyn StorageBackend>` — it is *about* storage access. Defined in S1; the L3
-//! primitive crates (me-forget/me-resolve/me-query/me-ingest/me-consolidate/me-archive)
+//! primitive crates (me-prune/me-resolve/me-query/me-ingest/me-consolidate/me-archive)
 //! consume it in S3/S4. Per-primitive extras (`graph`, `scope_tree`, `reranker`,
 //! `cold`, `db_path`) are passed as explicit parameters so each free-fn signature
 //! *declares* exactly which extra capabilities it uses.

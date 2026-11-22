@@ -1,6 +1,6 @@
 use super::*;
-use crate::forgetting::ForgetPolicy;
 use crate::graph::MemoryGraph;
+use crate::pruning::PrunePolicy;
 use crate::resume::context::ResumeConfig;
 use crate::search::MemoryQuery;
 use crate::traits::{
@@ -1336,7 +1336,7 @@ async fn consolidate_runs_consumer_callbacks_without_holding_write_lock() {
 }
 
 #[tokio::test]
-async fn forget_prunes_stale_facts() {
+async fn prune_expires_stale_facts() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
 
     // Insert a fact with very low importance
@@ -1353,23 +1353,23 @@ async fn forget_prunes_stale_facts() {
     )
     .await;
 
-    let policy = ForgetPolicy {
+    let policy = PrunePolicy {
         min_importance: 0.3,
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
-    let stats = engine.forget(&policy).await.unwrap();
+    let stats = engine.prune(&policy).await.unwrap();
     assert_eq!(stats.facts_expired, 1);
     assert_eq!(stats.facts_evaluated, 1);
 }
 
 #[tokio::test]
-async fn forget_rejects_invalid_policy() {
+async fn prune_rejects_an_invalid_policy() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
-    let policy = ForgetPolicy {
+    let policy = PrunePolicy {
         half_life_days: 0.0, // invalid
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
-    assert!(engine.forget(&policy).await.is_err());
+    assert!(engine.prune(&policy).await.is_err());
 }
 
 #[tokio::test]
@@ -6090,7 +6090,7 @@ mod snapshot_integration {
         fenced(engine.explain_fact(1).await.map(|_| ()));
         fenced(engine.fact_history(1).await.map(|_| ()));
         fenced(engine.statistics().await.map(|_| ()));
-        fenced(engine.forget(&ForgetPolicy::default()).await.map(|_| ()));
+        fenced(engine.prune(&PrunePolicy::default()).await.map(|_| ()));
         fenced(
             engine
                 .resume_context(&ResumeConfig::default())

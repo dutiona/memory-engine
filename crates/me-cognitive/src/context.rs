@@ -2,7 +2,7 @@
 //!
 //! [`CycleContext`] is what the engine hands to [`DreamCycle::run`](me_traits::DreamCycle::run).
 //! It **holds** a `&dyn DreamCtx` (the capability bag — query/consolidate/promote/
-//! forget/`list_undreamt_in_period`/`outcome_counts*`) and adds the retrieved prior
+//! prune/`list_undreamt_in_period`/`outcome_counts*`) and adds the retrieved prior
 //! state — promoted wisdom and recent cycle metadata — plus the time window to
 //! process. Reflecting against accumulated state (rather than the full corpus
 //! blindly) is the DC/ACE "retrieve & synthesize" discipline: it lets a cycle avoid
@@ -28,7 +28,7 @@ use super::{CycleMetadata, TimeWindow};
 
 /// Context passed to [`DreamCycle::run`](me_traits::DreamCycle::run).
 ///
-/// The capability bag (query / list / consolidate / forget / promote /
+/// The capability bag (query / list / consolidate / prune / promote /
 /// `list_undreamt_in_period` / `outcome_counts*`) is available directly on `&dyn
 /// CycleCtx` via the [`DreamCtx`](me_traits::DreamCtx) supertrait; the retrieved
 /// prior state is exposed by [`CycleContext::prior_wisdom`] /
@@ -137,11 +137,11 @@ impl me_traits::DreamCtx for CycleContext<'_> {
         self.dream.consolidate(generator, embedder, config).await
     }
 
-    async fn forget(
+    async fn prune(
         &self,
-        policy: &me_types::types::forgetting::ForgetPolicy,
-    ) -> Result<me_types::types::forgetting::PruneStats> {
-        self.dream.forget(policy).await
+        policy: &me_types::types::pruning::PrunePolicy,
+    ) -> Result<me_types::types::pruning::PruneStats> {
+        self.dream.prune(policy).await
     }
 
     async fn promote(

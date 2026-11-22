@@ -1,7 +1,7 @@
 //! Archival compression delegates for [`MemoryEngine`].
 //!
 //! Extracted into the [`me_archive`] crate (Wave 2 #816 / S4, sub-PR 3b; re-exported
-//! here as `crate::archive`, matching the `pool`/`store`/`graph`/`scope`/`forgetting`
+//! here as `crate::archive`, matching the `pool`/`store`/`graph`/`scope`/`pruning`
 //! carve convention). Each public method below resolves this engine's `MemoryCtx` +
 //! cold-storage handle + in-memory graph + archive directory, then delegates to the
 //! corresponding `me_archive` free function. The `MemoryCtx`-reachable pre-flight (the

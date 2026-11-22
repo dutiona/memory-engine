@@ -945,7 +945,7 @@ mod tests {
 
     /// A client-supplied report (from outside the engine) must not bypass the
     /// importance guard the trusted `add_fact` path enforces: an out-of-range
-    /// `importance` would otherwise persist (no column CHECK) and poison decay/forget
+    /// `importance` would otherwise persist (no column CHECK) and poison decay/prune
     /// ranking. The whole report is rejected and nothing is written.
     #[tokio::test]
     async fn add_fact_out_of_range_importance_rejected() {

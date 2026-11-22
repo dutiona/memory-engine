@@ -20,7 +20,7 @@ repository = "https://github.com/dutiona/memory-engine"
 # default `--workspace` build compiles this crate WITHOUT `test-util` and stays clean; CI's
 # `--all-features` turns `test-util` on and runs the battery. The pub `fixtures`/`factory`
 # harness (minus the test-util-gated `break_facts_table`) compiles WITHOUT `test-util`, so
-# downstream dev-dep consumers (me-forget/me-resolve) get `SqliteFactory::make()` + fixtures
+# downstream dev-dep consumers (me-prune/me-resolve) get `SqliteFactory::make()` + fixtures
 # with no feature flag.
 publish = false
 

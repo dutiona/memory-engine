@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn consolidate_rejects_invalid_config_before_mutating() {
         // The entry point validates its config up front, before touching the store
-        // — mirroring how `prune()` rejects an invalid `ForgetPolicy`.
+        // — mirroring how `prune()` rejects an invalid `PrunePolicy`.
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
 

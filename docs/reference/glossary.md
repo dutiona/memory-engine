@@ -26,8 +26,8 @@ FTS5
 Consolidation
 : Three-pass process that compresses the fact store. Pass 1 (local dedup) expires near-duplicate facts by cosine similarity. Pass 2 (cluster fusion) groups related facts and generates cluster summaries via a `SummaryGenerator`. Pass 3 (global integration) produces cross-cluster summaries.
 
-Forgetting
-: The decay prune (`MemoryEngine::forget`, the CLI's `prune`), not the model's `forget` tool. Ebbinghaus-based decay that soft-deletes low-importance facts. Importance is computed as a weighted sum of four signals: recency (exponential decay with configurable half-life), access frequency, graph connectivity (degree), and base importance. Facts below the threshold have `t_expired` set rather than being physically deleted.
+Prune
+: The decay prune (`MemoryEngine::prune`, the CLI's `prune`), not the model's `forget` tool. Ebbinghaus-based decay that soft-deletes low-importance facts. Importance is computed as a weighted sum of four signals: recency (exponential decay with configurable half-life), access frequency, graph connectivity (degree), and base importance. Facts below the threshold have `t_expired` set rather than being physically deleted.
 
 Forget (retraction)
 : The model's `forget(id, reason)` tool (#1023): "this fact won't come up again". The fact and its active identical copies in the session's Homes end their validity and leave recall; the rows and events stay, and a tombstone keeps the content out of imports and promotions. Only `memory-engine-cli unforget` reverses it.
@@ -51,16 +51,16 @@ Embedding
 : Dense vector representation of text, computed by a consumer-provided `EmbeddingProvider`. Stored as a BLOB in SQLite. Used for cosine-similarity vector search and for dedup/clustering during consolidation. Dimension is fixed per engine instance and validated on open.
 
 Importance
-: Computed score in the range [0, 1] that determines a fact's resistance to forgetting. Combines four weighted signals: recency decay, access frequency (`log(access_count + 1)`), graph degree (`log(edges + 1)`), and the fact's base importance value.
+: Computed score in the range [0, 1] that determines a fact's resistance to pruning. Combines four weighted signals: recency decay, access frequency (`log(access_count + 1)`), graph degree (`log(edges + 1)`), and the fact's base importance value.
 
 Pinned fact
-: A fact marked as unforgettable (`is_pinned = true`). Pinned facts are never expired by forgetting and never deduplicated during consolidation. They appear in tier 1 of `resume_context()`. Facts can be pinned explicitly via `pin_fact()`, through `AddFactOptions { pinned: Some(true) }`, or automatically by a `PersistenceClassifier`.
+: A fact marked as never pruned (`is_pinned = true`). Pinned facts are never expired by the decay prune and never deduplicated during consolidation. They appear in tier 1 of `resume_context()`. Facts can be pinned explicitly via `pin_fact()`, through `AddFactOptions { pinned: Some(true) }`, or automatically by a `PersistenceClassifier`.
 
 Future memory
 : A fact with `t_valid` set in the future. Invisible to present-time queries until `t_valid` arrives. Retrieved via `list_due(now)` when the time comes — the first call stamps `surfaced_at` so callers can distinguish newly-due facts from previously-surfaced ones. Enables reminders, deferred knowledge, and scheduled agent behavior.
 
 Importance score (materialized)
-: A composite score in [0, 1] stored on each fact as `importance_score`. Computed during `forget()` as a weighted sum of recency, frequency, graph connectivity, and base importance. Used by `resume_context()` tier 2 (high-importance) to select facts without recomputation.
+: A composite score in [0, 1] stored on each fact as `importance_score`. Computed during `prune()` as a weighted sum of recency, frequency, graph connectivity, and base importance. Used by `resume_context()` tier 2 (high-importance) to select facts without recomputation.
 
 PersistenceClassifier
 : Consumer-provided trait that decides whether a newly inserted fact should be pinned. Called during `add_fact()` with a pre-insert synthetic `Fact`. Default implementation returns `false` (opt-in). Classifiers should rely on `content`, `fact_type`, `importance`, and `metadata` only.
@@ -72,7 +72,7 @@ Global summary invariant
 : Global-level summaries (consolidation pass 3) are always placed at `scope_id=1` (root scope), regardless of the scopes of the underlying facts. Cluster-level summaries use majority-vote scope assignment.
 
 Resume context
-: Four-tier fact retrieval for bootstrapping a new agent session. Tier 1 (pinned): unforgettable facts, cross-scope. Tier 2 (high-importance): facts above a materialized `importance_score` threshold. Tier 3 (due): future-memory facts whose `t_valid` has arrived. Tier 4 (recent): most recent facts from scope ancestors. Tiers are mutually exclusive.
+: Four-tier fact retrieval for bootstrapping a new agent session. Tier 1 (pinned): facts never pruned, cross-scope. Tier 2 (high-importance): facts above a materialized `importance_score` threshold. Tier 3 (due): future-memory facts whose `t_valid` has arrived. Tier 4 (recent): most recent facts from scope ancestors. Tiers are mutually exclusive.
 
 WAL (Write-Ahead Logging)
 : SQLite journaling mode used by the connection pool. Enables concurrent readers while a single writer commits. The engine opens all connections in WAL mode to maximize read throughput without blocking on writes.

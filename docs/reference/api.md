@@ -121,11 +121,11 @@ The two steps of a deferred-embedding drain (#1021); the drain loop is the consu
 - `dedup_threshold: f32` -- cosine similarity threshold for dedup, in `[0.0, 1.0]` (default 0.90). Facts with similarity **>=** this value are merged; `1.0` merges only exact duplicates.
 - `min_cluster_size: usize` -- minimum facts to form a cluster (must be `>= 2`; default 2).
 
-### Forgetting
+### Pruning
 
 | Method   | Signature                                              | Description                                                               |
 | -------- | ------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `forget` | `(&self, policy: &ForgetPolicy) -> Result<PruneStats>` | Soft-delete facts with computed importance below `policy.min_importance` (the decay prune; the CLI's `prune`). |
+| `prune` | `(&self, policy: &PrunePolicy) -> Result<PruneStats>` | Soft-delete facts with computed importance below `policy.min_importance` (the decay prune; the CLI's `prune`). |
 
 ### Retraction and erasure
 
@@ -143,7 +143,7 @@ resolution, promotion (`promote_atomic` refuses; `apply_cycle_report` skips and 
 activity promotion. Only `add_fact`, `add_fact_precomputed` and `add_fact_deferred`, the single explicit assertion, are
 never blocked.
 
-`ForgetPolicy` fields:
+`PrunePolicy` fields:
 
 - `half_life_days: f64` -- base Ebbinghaus half-life (default: 69.0).
 - `half_life_overrides: HashMap<FactType, f64>` -- per-type overrides.
@@ -203,8 +203,8 @@ its timestamp grammar, `bootstrap::parse_timestamp`.
 
 | Method       | Signature                        | Description                                                        |
 | ------------ | -------------------------------- | ------------------------------------------------------------------ |
-| `pin_fact`   | `(&self, id: i64) -> Result<()>` | Pin a fact (make it unforgettable). Bypasses forgetting and dedup. |
-| `unpin_fact` | `(&self, id: i64) -> Result<()>` | Unpin a fact (allow forgetting).                                   |
+| `pin_fact`   | `(&self, id: i64) -> Result<()>` | Pin a fact (exempt it from pruning). Bypasses pruning and dedup.   |
+| `unpin_fact` | `(&self, id: i64) -> Result<()>` | Unpin a fact (allow pruning).                                      |
 
 ### Inspection
 
@@ -241,7 +241,7 @@ its timestamp grammar, `bootstrap::parse_timestamp`.
 
 `ResumeContext` fields (4 tiers, mutually exclusive):
 
-- `pinned: Vec<Fact>` -- tier 1: unforgettable facts, cross-scope, sorted by `importance_score` descending.
+- `pinned: Vec<Fact>` -- tier 1: facts never pruned, cross-scope, sorted by `importance_score` descending.
 - `high_importance: Vec<Fact>` -- tier 2: top facts by materialized `importance_score`.
 - `due: Vec<Fact>` -- tier 3: future-memory facts whose `t_valid` has arrived.
 - `recent: Vec<Fact>` -- tier 4: most recent facts from scope ancestors.

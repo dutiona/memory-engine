@@ -86,7 +86,7 @@ The workspace contains **18 crates** — the Wave 2 (#816) decomposition is **do
 
 ```
 L0    me-types            data + error vocabulary (incl. the embedding-space registry DTOs,
-                          and the ForgetPolicy/PruneStats pair)
+                          and the PrunePolicy/PruneStats pair)
 L0.5  me-traits           consumer/contract traits: EmbeddingProvider, SummaryGenerator,
                           ConflictArbiter, PersistenceClassifier, Reranker, DreamCycle,
                           DreamCtx (the capability bag), CycleCtx: DreamCtx, DeltaProposer
@@ -95,7 +95,7 @@ L1    me-storage          persistence PORT: StorageBackend trait family + Memory
 L2    me-index            backend-free MemoryGraph / ScopeTree projections
       me-backend-sqlite   SqliteBackend: store + pool + search + snapshot I/O
       me-backend-postgres PgBackend skeleton (#633, optional behind `backend-postgres`)
-L3    me-ingest  me-query  me-consolidate  me-forget  me-resolve
+L3    me-ingest  me-query  me-consolidate  me-prune   me-resolve
       me-archive (feat `archive`)          me-cognitive (dream cycle, #981)
 L4    memory-engine       the facade: MemoryEngine + builder + bootstrap + inspect +
                           reconstruct + resume + the re-export surface
@@ -120,7 +120,7 @@ A repo-local **PreToolUse hook** (`utils/scripts/hooks/cargo-gate-guard.sh`) mec
 
 ## Architecture
 
-Five primitives: **Ingest** (append-only event log) → **Query** (hybrid FTS5 + vector + graph, RRF merge) → **Consolidate** (3-pass: dedup → cluster → global) → **Forget** (Ebbinghaus decay + multi-signal importance) → **Resolve** (bi-temporal conflict arbitration).
+Five primitives: **Ingest** (append-only event log) → **Query** (hybrid FTS5 + vector + graph, RRF merge) → **Consolidate** (3-pass: dedup → cluster → global) → **Prune** (Ebbinghaus decay + multi-signal importance) → **Resolve** (bi-temporal conflict arbitration).
 
 Consumer traits — engine delegates all LLM/network ops:
 
@@ -129,7 +129,7 @@ Consumer traits — engine delegates all LLM/network ops:
 | `EmbeddingProvider`     | Compute text embeddings                     |
 | `SummaryGenerator`      | Generate cluster summaries + embed them     |
 | `ConflictArbiter`       | Decide CRUD action for contradicting facts  |
-| `PersistenceClassifier` | Auto-pin unforgettable facts                |
+| `PersistenceClassifier` | Auto-pin facts that are never pruned        |
 | `Reranker`              | Cross-encoder reranking on top-K candidates |
 
 Read these docs when working on the relevant area:

@@ -75,7 +75,7 @@ pub fn load_snapshot_capped(
     max_cluster_facts: usize,
 ) -> Result<Snapshot> {
     // Validate up front, before any read — mirrors `prune()` rejecting an invalid
-    // `ForgetPolicy` at the forget entry point. In the cap-injecting core so the test
+    // `PrunePolicy` at the prune entry point. In the cap-injecting core so the test
     // cap-path validates too.
     config.validate()?;
 

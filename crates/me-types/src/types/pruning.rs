@@ -1,9 +1,9 @@
-//! `ForgetPolicy` (config **in**) and `PruneStats` (data **out**) for the
-//! forget/prune operation (`me-forget`, L3).
+//! `PrunePolicy` (config **in**) and `PruneStats` (data **out**) for the
+//! decay prune (`me-prune`, L3).
 //!
 //! Both live here in L0 by the same property, not by proximity to *where* the
-//! forgetting layer's scoring logic happens to sit. `PruneStats` is two
-//! `usize` counters. `ForgetPolicy` is `#[derive(Debug, Clone)]` over
+//! prune's scoring logic happens to sit. `PruneStats` is two
+//! `usize` counters. `PrunePolicy` is `#[derive(Debug, Clone)]` over
 //! scalar/collection fields plus two inherent methods (`is_decay_exempt`,
 //! `validate`) whose bodies touch nothing beyond [`crate::error`]
 //! (`Result` / [`MemoryError`](crate::error::MemoryError) /
@@ -11,21 +11,21 @@
 //! [`crate::types::FactType`] — all already L0. Neither type has an L3
 //! dependency, so neither is barred from L0; they are colocated here because
 //! they are the input/output pair of the same operation.
-//! `compute_importance` (the forgetting layer's scoring logic, `me-forget`,
-//! L3) *consumes* `ForgetPolicy` and *produces* `PruneStats` — that pairing
+//! `compute_importance` (the prune's scoring logic, `me-prune`,
+//! L3) *consumes* `PrunePolicy` and *produces* `PruneStats` — that pairing
 //! is a caller/callee relationship documented in prose, not a code
 //! dependency, so it cannot pull either type up to L3.
 
-/// Statistics returned by the forget/prune operation.
+/// Statistics returned by the decay prune.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PruneStats {
     pub facts_expired: usize,
     pub facts_evaluated: usize,
 }
 
-/// Policy for forgetting/pruning stale facts.
+/// Policy for pruning stale facts.
 ///
-/// Importance is computed by the forgetting layer's `compute_importance` as a
+/// Importance is computed by the prune's `compute_importance` as a
 /// weighted sum of 4 signals, **each normalized to `[0, 1]`** before weighting:
 ///
 /// ```text
@@ -47,13 +47,13 @@ pub struct PruneStats {
 ///
 /// Facts with computed importance below `min_importance` get soft-deleted (`t_expired` set).
 #[derive(Debug, Clone)]
-pub struct ForgetPolicy {
+pub struct PrunePolicy {
     /// Base Ebbinghaus half-life in days (default: 69.0).
     pub half_life_days: f64,
     /// Per-`FactType` half-life overrides. E.g., Episodic=30, Procedural=365.
     /// An explicit entry here wins over `decay_exempt_types`.
     pub half_life_overrides: std::collections::HashMap<crate::types::FactType, f64>,
-    /// Fact types exempt from decay-driven forgetting altogether.
+    /// Fact types exempt from decay-driven pruning altogether.
     ///
     /// Content predicate: a type belongs here iff its facts' truth is
     /// independent of time-since-encoding — declarative assertions
@@ -77,7 +77,7 @@ pub struct ForgetPolicy {
     pub base_importance_weight: f64,
 }
 
-impl Default for ForgetPolicy {
+impl Default for PrunePolicy {
     fn default() -> Self {
         Self {
             half_life_days: 69.0,
@@ -97,8 +97,8 @@ impl Default for ForgetPolicy {
     }
 }
 
-impl ForgetPolicy {
-    /// Whether `fact_type` is exempt from decay-driven forgetting.
+impl PrunePolicy {
+    /// Whether `fact_type` is exempt from decay-driven pruning.
     ///
     /// True iff the type is in `decay_exempt_types` and has no explicit
     /// `half_life_overrides` entry — an explicit override wins, re-enabling
@@ -160,11 +160,11 @@ mod tests {
     use super::*;
     use crate::types::FactType;
 
-    // --- ForgetPolicy::default() ---
+    // --- PrunePolicy::default() ---
 
     #[test]
     fn default_has_expected_field_values() {
-        let p = ForgetPolicy::default();
+        let p = PrunePolicy::default();
         assert!((p.half_life_days - 69.0).abs() < f64::EPSILON);
         assert!(p.half_life_overrides.is_empty());
         assert!((p.min_importance - 0.1).abs() < f64::EPSILON);
@@ -176,14 +176,14 @@ mod tests {
 
     #[test]
     fn default_validates_ok() {
-        ForgetPolicy::default().validate().unwrap();
+        PrunePolicy::default().validate().unwrap();
     }
 
-    // --- ForgetPolicy::validate() error paths ---
+    // --- PrunePolicy::validate() error paths ---
 
     #[test]
     fn validate_rejects_zero_half_life() {
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             half_life_days: 0.0,
             ..Default::default()
         };
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_negative_half_life() {
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             half_life_days: -1.0,
             ..Default::default()
         };
@@ -204,7 +204,7 @@ mod tests {
     fn validate_rejects_zero_override_half_life() {
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(FactType::Episodic, 0.0);
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             half_life_overrides: overrides,
             ..Default::default()
         };
@@ -216,7 +216,7 @@ mod tests {
     fn validate_rejects_negative_override_half_life() {
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(FactType::Procedural, -5.0);
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             half_life_overrides: overrides,
             ..Default::default()
         };
@@ -228,7 +228,7 @@ mod tests {
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(FactType::Episodic, 30.0);
         overrides.insert(FactType::Procedural, 365.0);
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             half_life_overrides: overrides,
             ..Default::default()
         };
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_min_importance_above_one() {
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             min_importance: 1.01,
             ..Default::default()
         };
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_negative_min_importance() {
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             min_importance: -0.01,
             ..Default::default()
         };
@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn validate_accepts_boundary_min_importance() {
         for val in [0.0, 1.0] {
-            let p = ForgetPolicy {
+            let p = PrunePolicy {
                 min_importance: val,
                 ..Default::default()
             };
@@ -270,28 +270,28 @@ mod tests {
         let cases = [
             (
                 "recency",
-                ForgetPolicy {
+                PrunePolicy {
                     recency_weight: -0.1,
                     ..Default::default()
                 },
             ),
             (
                 "frequency",
-                ForgetPolicy {
+                PrunePolicy {
                     frequency_weight: -0.1,
                     ..Default::default()
                 },
             ),
             (
                 "graph_degree",
-                ForgetPolicy {
+                PrunePolicy {
                     graph_degree_weight: -0.1,
                     ..Default::default()
                 },
             ),
             (
                 "base_importance",
-                ForgetPolicy {
+                PrunePolicy {
                     base_importance_weight: -0.1,
                     ..Default::default()
                 },
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn validate_accepts_zero_weights() {
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             recency_weight: 0.0,
             frequency_weight: 0.0,
             graph_degree_weight: 0.0,
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn validate_accepts_weights_summing_above_one() {
         // ADR-0006: weights don't need to sum to 1.0
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             recency_weight: 1.0,
             frequency_weight: 1.0,
             graph_degree_weight: 1.0,
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_nan_half_life() {
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             half_life_days: f64::NAN,
             ..Default::default()
         };
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_infinity_half_life() {
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             half_life_days: f64::INFINITY,
             ..Default::default()
         };
@@ -354,7 +354,7 @@ mod tests {
     fn validate_rejects_nan_override_half_life() {
         let mut overrides = std::collections::HashMap::new();
         overrides.insert(FactType::Semantic, f64::NAN);
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             half_life_overrides: overrides,
             ..Default::default()
         };
@@ -364,19 +364,19 @@ mod tests {
     #[test]
     fn validate_rejects_nan_weight() {
         let cases = [
-            ForgetPolicy {
+            PrunePolicy {
                 recency_weight: f64::NAN,
                 ..Default::default()
             },
-            ForgetPolicy {
+            PrunePolicy {
                 frequency_weight: f64::NAN,
                 ..Default::default()
             },
-            ForgetPolicy {
+            PrunePolicy {
                 graph_degree_weight: f64::NAN,
                 ..Default::default()
             },
-            ForgetPolicy {
+            PrunePolicy {
                 base_importance_weight: f64::NAN,
                 ..Default::default()
             },
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_nan_min_importance() {
-        let p = ForgetPolicy {
+        let p = PrunePolicy {
             min_importance: f64::NAN,
             ..Default::default()
         };

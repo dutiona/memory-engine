@@ -1,4 +1,4 @@
-//! Phase 3b integration test: full lifecycle with pinned facts, future memory, and forgetting.
+//! Phase 3b integration test: full lifecycle with pinned facts, future memory, and pruning.
 
 #![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
 
@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use memory_engine::EmbeddingFingerprint;
-use memory_engine::ForgetPolicy;
+use memory_engine::PrunePolicy;
 use memory_engine::ResumeConfig;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
@@ -87,7 +87,7 @@ async fn full_lifecycle_pinned_and_future_memory() {
         .await
         .unwrap();
 
-    // 3. Add normal fact (forgettable)
+    // 3. Add normal fact (prunable)
     engine
         .add_fact(
             &AddFactRequest {
@@ -133,12 +133,12 @@ async fn full_lifecycle_pinned_and_future_memory() {
     let next = engine.next_due_time(None).await.unwrap();
     assert!(next.is_some(), "should have a next due time");
 
-    // 8. Forget with aggressive policy — pinned fact survives
-    let policy = ForgetPolicy {
+    // 8. Prune with aggressive policy — pinned fact survives
+    let policy = PrunePolicy {
         min_importance: 0.99,
-        ..ForgetPolicy::default()
+        ..PrunePolicy::default()
     };
-    let stats = engine.forget(&policy).await.unwrap();
+    let stats = engine.prune(&policy).await.unwrap();
     // At least the coffee fact should be expired (low importance, no graph edges)
     assert!(
         stats.facts_expired >= 1,
@@ -148,7 +148,7 @@ async fn full_lifecycle_pinned_and_future_memory() {
     let fact = engine.get_fact(pin_id).await.unwrap();
     assert!(
         fact.t_expired.is_none(),
-        "pinned fact must survive aggressive forget"
+        "pinned fact must survive aggressive prune"
     );
     assert!(fact.is_pinned);
 

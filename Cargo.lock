@@ -1974,21 +1974,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "me-forget"
-version = "0.2.0-rc.3"
-dependencies = [
- "chrono",
- "me-index",
- "me-storage",
- "me-test-support",
- "me-types",
- "parking_lot",
- "proptest",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "me-index"
 version = "0.2.0-rc.3"
 dependencies = [
@@ -2009,6 +1994,21 @@ dependencies = [
  "me-traits",
  "me-types",
  "parking_lot",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "me-prune"
+version = "0.2.0-rc.3"
+dependencies = [
+ "chrono",
+ "me-index",
+ "me-storage",
+ "me-test-support",
+ "me-types",
+ "parking_lot",
+ "proptest",
  "serde_json",
  "tokio",
 ]
@@ -2115,9 +2115,9 @@ dependencies = [
  "me-backend-sqlite",
  "me-cognitive",
  "me-consolidate",
- "me-forget",
  "me-index",
  "me-ingest",
+ "me-prune",
  "me-query",
  "me-resolve",
  "me-storage",

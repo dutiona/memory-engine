@@ -100,7 +100,7 @@ impl fmt::Display for ConsolidationLevel {
 /// Importance is likewise split across two fields, easily confused:
 /// [`base_importance`](Self::base_importance) is the *static, consumer-supplied prior* set at insertion,
 /// while [`importance_score`](Self::importance_score) is the *computed, decaying score* the
-/// engine ranks and forgets by (the prior is one of its inputs). See those fields' docs.
+/// engine ranks and prunes by (the prior is one of its inputs). See those fields' docs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Fact {
     pub id: i64,
@@ -145,13 +145,13 @@ pub struct Fact {
     #[serde(default)]
     pub is_pinned: bool,
     /// **Materialized importance score** — the *computed, decaying* score the
-    /// engine ranks and forgets by, normally in `[0.0, 1.0]` (seeded from the
+    /// engine ranks and prunes by, normally in `[0.0, 1.0]` (seeded from the
     /// [`base_importance`](Self::base_importance) prior, which the `add_fact` entry points
     /// validate to that range — #571). It is the weighted sum of
     /// four signals (recency via Ebbinghaus decay, access frequency, graph
     /// degree, and the static [`base_importance`](Self::base_importance) prior); see
-    /// `forgetting::compute_importance`. Seeded to `base_importance` at ingest, then
-    /// recomputed over the fact's lifetime by the forgetting pass and `DreamCycle`,
+    /// `compute_importance` (`me-prune`). Seeded to `base_importance` at ingest, then
+    /// recomputed over the fact's lifetime by the prune and `DreamCycle`,
     /// so it drifts away from the base value as the fact ages and is accessed.
     /// `#[serde(default)]` (0.0) keeps pre-v?-column archives readable.
     #[serde(default)]
@@ -285,7 +285,7 @@ pub struct AddFactOptions {
     pub t_valid: Option<DateTime<Utc>>,
     /// Set the real-world validity end time.
     pub t_invalid: Option<DateTime<Utc>>,
-    /// Pin this fact (unforgettable). Overrides auto-classification.
+    /// Pin this fact (never pruned). Overrides auto-classification.
     pub pinned: Option<bool>,
     /// Override system creation time (default: `Utc::now()`).
     /// Used by bootstrap to backdate historical facts.
@@ -534,7 +534,7 @@ impl NewFactBuilder {
         self
     }
 
-    /// Pin the fact (unforgettable). Default `false`.
+    /// Pin the fact (never pruned). Default `false`.
     pub const fn is_pinned(mut self, is_pinned: bool) -> Self {
         self.is_pinned = is_pinned;
         self
@@ -601,7 +601,7 @@ pub struct NewSummary {
 
 /// Lightweight importance-scoring projection of a fact.
 ///
-/// Only the scalar fields the forgetting policy needs, so a full active-set scan
+/// Only the scalar fields the prune policy needs, so a full active-set scan
 /// never deserializes embeddings. See `FactGraph::list_active_facts_scoring`.
 #[derive(Debug, Clone)]
 pub struct FactScoringRow {

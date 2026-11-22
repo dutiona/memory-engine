@@ -48,7 +48,7 @@ use crate::{
 /// A pure aggregation supertrait: any type implementing every bounded-context
 /// trait *is* a `StorageBackend` via the blanket impl below — backends never
 /// write `impl StorageBackend`, they implement the parts. The bounded traits stay
-/// what tests mock in isolation (a forgetting test mocks only [`FactGraph`]); this
+/// what tests mock in isolation (a prune test mocks only [`FactGraph`]); this
 /// umbrella is what the engine depends on.
 ///
 /// `ColdStorage` (feature `archive`) is intentionally **not** a supertrait bound —

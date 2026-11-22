@@ -12,7 +12,7 @@ Provides 5 core primitives for agent long-term memory:
 | **Ingest**      | Append events to an immutable log (source of truth)      |
 | **Query**       | Hybrid retrieval (FTS5 + vector + graph) with filters    |
 | **Consolidate** | Merge, cluster, and integrate memories (dream cycle)     |
-| **Forget**      | Decay, prune, and archive stale facts                    |
+| **Prune**       | Decay, prune, and archive stale facts                    |
 | **Resolve**     | Bi-temporal conflict arbitration for contradicting facts |
 
 Built on SQLite (WAL mode) with zero network or LLM dependencies in the core crate.
@@ -96,7 +96,7 @@ Consumer (AI agent, CLI tool, MCP server)
 ┌──────────────────────────────────────┐
 │           MemoryEngine               │
 │  ingest · add_fact · query           │
-│  consolidate · forget · resolve      │
+│  consolidate · prune · resolve       │
 │  resume_context · scoped queries     │
 │  explain_fact · statistics           │
 ├──────────────────────────────────────┤

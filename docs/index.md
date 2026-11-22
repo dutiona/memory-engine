@@ -3,7 +3,7 @@
 Embedded memory engine for autonomous AI agents.
 
 Provides 5 core primitives for agent long-term memory:
-**Ingest**, **Query**, **Consolidate**, **Forget**, and **Resolve**.
+**Ingest**, **Query**, **Consolidate**, **Prune**, and **Resolve**.
 
 Built on SQLite (WAL mode), with hybrid search (FTS5 + vector + RRF),
 bi-temporal fact management, and trait-based extensibility.

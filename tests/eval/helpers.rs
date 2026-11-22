@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use memory_engine::EmbeddingFingerprint;
-use memory_engine::ForgetPolicy;
+use memory_engine::PrunePolicy;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::error::Result;
 use memory_engine::traits::{
@@ -216,9 +216,9 @@ pub async fn add_fact_with_opts(
         .expect("add_fact failed")
 }
 
-/// Create a `ForgetPolicy` that aggressively forgets (high threshold).
-pub fn aggressive_forget_policy() -> ForgetPolicy {
-    ForgetPolicy {
+/// Create a `PrunePolicy` that aggressively prunes (high threshold).
+pub fn aggressive_prune_policy() -> PrunePolicy {
+    PrunePolicy {
         min_importance: 0.99,
         ..Default::default()
     }

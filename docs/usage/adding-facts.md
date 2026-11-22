@@ -14,7 +14,7 @@ pub enum FactType {
 }
 ```
 
-**Episodic** facts capture concrete occurrences ("User deployed v2.1 on 2025-03-01"). They tend to decay faster and are good candidates for forgetting.
+**Episodic** facts capture concrete occurrences ("User deployed v2.1 on 2025-03-01"). They tend to decay faster and are good candidates for pruning.
 
 **Semantic** facts capture stable knowledge ("Rust uses RAII for memory management"). They persist longer and form the backbone of the agent's world model.
 
@@ -168,7 +168,7 @@ Facts carry four timestamps. Two are set by the consumer, two are managed by the
 | `t_valid`   | Consumer (via `AddFactOptions`) | When the fact became true in the real world.                           |
 | `t_invalid` | Consumer (via `AddFactOptions`) | When the fact stopped being true in the real world.                    |
 | `t_created` | Engine                          | When the fact was inserted into the database.                          |
-| `t_expired` | Engine                          | When the fact was soft-deleted (by forgetting or conflict resolution). |
+| `t_expired` | Engine                          | When the fact was soft-deleted (by pruning or conflict resolution). |
 
 The `t_valid`/`t_invalid` pair represents _validity time_ -- when the fact holds in reality. The `t_created`/`t_expired` pair represents _transaction time_ -- when the database knew about the fact. This bi-temporal model lets you query "what did the agent know at time T?" separately from "what was true at time T?".
 
@@ -180,7 +180,7 @@ Scoping enables:
 
 - Isolating facts per user, project, or session
 - Querying facts with inheritance (a child scope sees its ancestors' facts)
-- Different forgetting policies per scope
+- Different prune policies per scope
 
 When `scope` is `None`, the fact is placed at the root scope (ID 1), which is visible to all scope queries.
 

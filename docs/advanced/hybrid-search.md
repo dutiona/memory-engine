@@ -314,7 +314,7 @@ The HNSW index stays synchronized with the database through lifecycle hooks on `
 | Engine method      | Hook called                                 | Timing          |
 | ------------------ | ------------------------------------------- | --------------- |
 | `add_fact()`       | `notify_insert(fact_id, &embedding)`        | After DB commit |
-| `forget()`         | `notify_expire(fact_id)` for each pruned    | After DB commit |
+| `prune()`          | `notify_expire(fact_id)` for each pruned    | After DB commit |
 | `resolve_conflict` | `notify_expire` + `notify_insert` as needed | After DB commit |
 | `consolidate()`    | `notify_expire(fact_id)` for each deduped   | After DB commit |
 
