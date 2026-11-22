@@ -1,6 +1,6 @@
 # ADR 0014: Delta-based CycleReport + retrieve-before-reflect DreamCycle
 
-**Status:** Accepted (Phase 5a, #49)
+**Status:** Accepted (Phase 5a, #49); amended 2026-11-22 (dutiona/memory-engine#1089: the decay prune is renamed prune)
 **Date:** 2026-06-16
 
 ## Context
@@ -133,3 +133,11 @@ back-edge `DreamContext: &'a MemoryEngine` had been the blocker (see ADR 0018 de
 - ACE (arXiv:2510.04618), DC (arXiv:2504.07952).
 - Implementation plan: archived in [memory-engine#49](https://github.com/dutiona/memory-engine/issues/49).
 - S5 restoration: [memory-engine#981](https://github.com/dutiona/memory-engine/issues/981).
+
+## Amendment (2026-11-22, #1089)
+
+The decay prune is now named `prune` (dutiona/memory-engine#1089); `forget` names only the retraction. This record keeps the names of its time:
+
+| Then | Now |
+|---|---|
+| `DreamCtx::forget` | `DreamCtx::prune` |

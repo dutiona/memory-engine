@@ -40,7 +40,6 @@ mod conflict;
 mod consolidation;
 mod dormant;
 pub(crate) mod embed_queue;
-mod forgetting;
 mod graph;
 mod graph_load;
 mod ingest;
@@ -48,6 +47,7 @@ mod inspect;
 pub(crate) mod lifecycle;
 mod lineage;
 mod outcome;
+mod pruning;
 mod query;
 mod reconstruct;
 pub(crate) mod redaction_counts;
@@ -190,7 +190,7 @@ impl EngineConfig {
     }
 }
 
-/// Facade over all memory primitives: ingest, query, consolidate, forget, resolve.
+/// Facade over all memory primitives: ingest, query, consolidate, prune, resolve.
 ///
 /// `MemoryEngine` is `Send + Sync`. Thread safety is provided by:
 /// - `ConnectionPool` — bounded read pool + exclusive write connection via `parking_lot::Mutex`

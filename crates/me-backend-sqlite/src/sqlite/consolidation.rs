@@ -204,6 +204,19 @@ impl ConsolidationStore for SqliteBackend {
             .block_write(move |conn| {
                 // --- Validation pass (read-only, on the held connection) ---
                 // Every delta is validated before any is applied.
+                let declared =
+                    if report.deltas.iter().any(|d| {
+                        matches!(d, CycleDelta::AddFact(_) | CycleDelta::Synthesize { .. })
+                    }) {
+                        Some(
+                            report
+                                .embedding_fingerprint
+                                .as_deref()
+                                .ok_or(MemoryError::Cycle(CycleError::UndeclaredEmbedding))?,
+                        )
+                    } else {
+                        None
+                    };
                 {
                     fn ensure_active(
                         f: &me_types::types::Fact,
@@ -344,14 +357,12 @@ impl ConsolidationStore for SqliteBackend {
                     .map_err(StorageError::backend)?;
 
                 // #613 guard: AddFact / Synthesize carry pre-computed embeddings with no
-                // live provider — reject against an un-stamped store. Called inside the
+                // live provider — reject against an un-stamped store (a cycle never stamps),
+                // then against a store of another identity (#1062). Called inside the
                 // transaction (on `&tx`), so the check and the writes see one state.
-                if report
-                    .deltas
-                    .iter()
-                    .any(|d| matches!(d, CycleDelta::AddFact(_) | CycleDelta::Synthesize { .. }))
-                {
+                if let Some(declared) = declared {
                     crate::store::embedding_meta::require_present(&tx)?;
+                    crate::store::embedding_meta::check_compatible(&tx, declared)?;
                 }
 
                 let mut result = ApplyResult::default();
@@ -678,6 +689,7 @@ impl ConsolidationStore for SqliteBackend {
         scope_path: Option<&str>,
         source_fact_ids: &[i64],
         provenance: &me_types::types::PromotionProvenance,
+        declared: &me_types::types::EmbeddingFingerprint,
     ) -> Result<(me_types::types::PromotionResult, Vec<i64>)> {
         use crate::store::facts::FactStore;
         use crate::store::lineage::LineageStore;
@@ -692,6 +704,7 @@ impl ConsolidationStore for SqliteBackend {
         let scope_path = scope_path.map(str::to_owned);
         let source_fact_ids = source_fact_ids.to_vec();
         let provenance = provenance.clone();
+        let declared = declared.clone();
 
         let (result, scope_ids_to_cache) = self
             .block_write(move |conn| {
@@ -702,6 +715,7 @@ impl ConsolidationStore for SqliteBackend {
                 // #613/#615 promotion identity guard (pre-computed vector, no live
                 // embedder to stamp the store).
                 crate::store::embedding_meta::require_present(&tx)?;
+                crate::store::embedding_meta::check_compatible(&tx, &declared)?;
 
                 // Resolve scope inside the tx so a new path + the fact commit atomically.
                 let scope_ids_to_cache = if let Some(path) = &scope_path {
@@ -1123,6 +1137,7 @@ mod tests {
                 method_version: "rollback-test".into(),
                 processed_ids: vec![fact_id],
             },
+            embedding_fingerprint: None,
         };
 
         let registry = crate::store::upcaster::UpcasterRegistry::new();
@@ -1180,21 +1195,20 @@ mod tests {
         }
     }
 
+    /// The identity [`forgotten_twin_store`] stamps.
+    fn stamped() -> me_types::types::EmbeddingFingerprint {
+        me_types::types::EmbeddingFingerprint::new("test-model", "tei", DIM)
+    }
+
     /// A stamped store holding active `twin` and `other`, with `twin`'s content blocked by
     /// a tombstone; returns the backend, the pool and both ids.
     #[allow(clippy::significant_drop_tightening)]
     fn forgotten_twin_store() -> (SqliteBackend, Arc<ConnectionPool>, i64, i64) {
-        use me_types::types::EmbeddingFingerprint;
         let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
         let (twin, other) = {
             let conn = pool.write();
             let tx = conn.unchecked_transaction().unwrap();
-            crate::store::embedding_meta::record_if_absent(
-                &tx,
-                &EmbeddingFingerprint::new("test-model", "tei", DIM),
-                DIM,
-            )
-            .unwrap();
+            crate::store::embedding_meta::record_if_absent(&tx, &stamped(), DIM).unwrap();
             let store = FactStore::new(&tx, DIM);
             let ids = (
                 store.insert(&semantic("twin")).unwrap(),
@@ -1233,6 +1247,7 @@ mod tests {
                 method_version: "forgotten-test".into(),
                 processed_ids: Vec::new(),
             },
+            embedding_fingerprint: Some(Box::new(stamped())),
         }
     }
 
@@ -1279,7 +1294,13 @@ mod tests {
         use me_storage::graph::FactGraph as _;
         let (be, _pool, twin, _) = forgotten_twin_store();
         let err = be
-            .promote_atomic(&semantic("twin"), None, &[twin], &test_provenance())
+            .promote_atomic(
+                &semantic("twin"),
+                None,
+                &[twin],
+                &test_provenance(),
+                &stamped(),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -1294,5 +1315,48 @@ mod tests {
             2,
             "nothing written"
         );
+    }
+
+    #[tokio::test]
+    async fn promote_atomic_refuses_another_identity() {
+        use me_storage::graph::FactGraph as _;
+        let (be, _pool, _, other) = forgotten_twin_store();
+        let foreign = me_types::types::EmbeddingFingerprint::new("other-model", "tei", DIM);
+        let err = be
+            .promote_atomic(
+                &semantic("fresh"),
+                None,
+                &[other],
+                &test_provenance(),
+                &foreign,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+            "{err:?}"
+        );
+        assert_eq!(
+            be.list_all_facts().await.unwrap().len(),
+            2,
+            "nothing written"
+        );
+    }
+
+    #[tokio::test]
+    async fn promote_atomic_accepts_the_stores_identity() {
+        use me_storage::graph::FactGraph as _;
+        let (be, _pool, _, other) = forgotten_twin_store();
+        let (result, _) = be
+            .promote_atomic(
+                &semantic("fresh"),
+                None,
+                &[other],
+                &test_provenance(),
+                &stamped(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(be.get_fact(result.fact_id).await.unwrap().content, "fresh");
     }
 }

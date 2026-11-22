@@ -15,7 +15,7 @@ impl MemoryEngine {
     /// in-memory graph share a single source of truth.
     const CO_SESSION_RELATION: &str = RelationType::CoSession.as_str();
     /// Default weight for co-session edges — weaker than explicit semantic
-    /// relationships by design intent. Note: the current forgetting system uses
+    /// relationships by design intent. Note: the decay prune uses
     /// raw `graph.degree()` (unweighted), so the weight does not yet reduce
     /// connectivity impact. It will matter once weighted traversal ships (Phase 5).
     pub(super) const CO_SESSION_WEIGHT: f64 = 0.5;

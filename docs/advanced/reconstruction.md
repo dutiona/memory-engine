@@ -118,6 +118,8 @@ drops the transaction and rolls back, so a mid-promote failure cannot leave part
    `active` rows). **This flip _is_ the identity swap** — `embedding_meta::load` reads the active
    row's fingerprint — so the served identity and the served vectors change together, atomically.
 5. **Delete** the now-redundant `fact_vectors[populating]` rows.
+6. **Clear** consolidation's dedup watermark: every vector is new, so the next consolidation compares every fact
+   again ([incremental operation](consolidation.md#incremental-operation)).
 
 The result is a `PromoteOutcome` (see [below](#promoteoutcome-and-index-rebuild)): the swapped-fact
 count, the deprecated old space's name, the new active fingerprint (carrying the new dim for #742),

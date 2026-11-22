@@ -40,8 +40,86 @@ const SCORING_COLUMNS: &str = "id, fact_type, last_accessed, access_count, impor
 // `FactScoringRow` and `SessionFact` relocated to `me_types::types` (#629 — the
 // dialect-free storage port must not reference types living inside the SQLite
 // store). Shims preserve the original `crate::store::facts::{FactScoringRow,
-// SessionFact}` paths (e.g. `forgetting::policy` keeps its import + trait impl).
+// SessionFact}` paths (e.g. `pruning::policy` keeps its import + trait impl).
 pub use me_types::types::{FactScoringRow, SessionFact};
+
+/// Config key of dedup's watermark (#1080): the highest fact id consolidation has compared.
+///
+/// Ids are `AUTOINCREMENT` and SQLite has one writer, so they grow in commit order:
+/// a fact committed after a snapshot sits above it whatever its `t_created`.
+pub const DEDUP_WATERMARK: &str = "last_consolidated_fact_id";
+
+/// Config key of the consolidation generation (#1080).
+///
+/// Every write that makes a fact the watermark passed eligible again
+/// ([`rewind_dedup_watermark`]) or protects a fact a plan may expire (a pin) bumps it. A plan
+/// loaded under another generation is discarded.
+pub const CONSOLIDATION_GENERATION: &str = "consolidation_generation";
+
+/// The dedup watermark, `None` when no run has compared anything yet.
+///
+/// # Errors
+///
+/// `MemoryError::Migration` on an unparsable value, `MemoryError::Storage` on read failure.
+pub fn read_dedup_watermark(conn: &Connection) -> Result<Option<i64>> {
+    crate::store::schema::get_config(conn, DEDUP_WATERMARK)?
+        .map(|v| v.parse::<i64>())
+        .transpose()
+        .map_err(|e| {
+            me_types::error::MigrationError::Incompatible(format!("invalid {DEDUP_WATERMARK}: {e}"))
+                .into()
+        })
+}
+
+/// The consolidation generation, 0 when never bumped.
+///
+/// # Errors
+///
+/// `MemoryError::Migration` on an unparsable value, `MemoryError::Storage` on read failure.
+pub fn read_consolidation_generation(conn: &Connection) -> Result<u64> {
+    Ok(
+        crate::store::schema::get_config(conn, CONSOLIDATION_GENERATION)?
+            .map(|v| v.parse::<u64>())
+            .transpose()
+            .map_err(|e| {
+                me_types::error::MigrationError::Incompatible(format!(
+                    "invalid {CONSOLIDATION_GENERATION}: {e}"
+                ))
+            })?
+            .unwrap_or(0),
+    )
+}
+
+/// Bump the consolidation generation, in the caller's transaction.
+///
+/// # Errors
+///
+/// As [`read_consolidation_generation`], or `MemoryError::Storage` on write failure.
+pub fn bump_consolidation_generation(conn: &Connection) -> Result<()> {
+    let next = read_consolidation_generation(conn)? + 1;
+    crate::store::schema::set_config(conn, CONSOLIDATION_GENERATION, &next.to_string())
+}
+
+/// Lower the dedup watermark below fact `below` and bump the generation.
+///
+/// A write in the caller's transaction just made `below` a dedup candidate again. A watermark
+/// at 0 is deleted: the next run compares every fact.
+///
+/// # Errors
+///
+/// As [`read_dedup_watermark`], or `MemoryError::Storage` on write failure.
+pub fn rewind_dedup_watermark(conn: &Connection, below: i64) -> Result<()> {
+    if let Some(mark) = read_dedup_watermark(conn)? {
+        let lowered = mark.min(below - 1);
+        if lowered <= 0 {
+            conn.execute("DELETE FROM config WHERE key = ?1", [DEDUP_WATERMARK])
+                .map_err(StorageError::backend)?;
+        } else {
+            crate::store::schema::set_config(conn, DEDUP_WATERMARK, &lowered.to_string())?;
+        }
+    }
+    bump_consolidation_generation(conn)
+}
 
 #[allow(
     clippy::trivially_copy_pass_by_ref,
@@ -479,6 +557,19 @@ impl<'a> FactStore<'a> {
         Ok(usize::try_from(count).unwrap_or(0))
     }
 
+    /// The highest fact id, active or not (0 for an empty store): dedup's next watermark.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query failure.
+    pub fn max_id(&self) -> Result<i64> {
+        self.conn
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM facts", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| StorageError::backend(e).into())
+    }
+
     /// Whether any fact, active or not, has no vector (#1021). Consolidation's watermark
     /// holds while one does: an expired or forgotten fact can come back active, and it must
     /// then sit above the watermark to be compared as new.
@@ -541,7 +632,7 @@ impl<'a> FactStore<'a> {
     /// (`t_expired IS NULL`).
     ///
     /// Like [`list_active`](Self::list_active) but selects only the columns the
-    /// forgetting pass needs (see [`FactScoringRow`]), so the working set never
+    /// prune needs (see [`FactScoringRow`]), so the working set never
     /// materializes `content`, `embedding`, or `metadata`. Used by `prune`,
     /// which must scan the entire active set to compute global importance.
     ///
@@ -820,7 +911,7 @@ impl<'a> FactStore<'a> {
             .map_err(|e| StorageError::backend(e).into())
     }
 
-    /// List active pinned (unforgettable) facts, optionally filtered by scope,
+    /// List active pinned (never pruned) facts, optionally filtered by scope,
     /// ordered by `importance_score` DESC and capped at `limit`.
     ///
     /// Pass empty `scope_ids` to get pinned facts across all scopes. Pass
@@ -1047,16 +1138,34 @@ impl<'a> FactStore<'a> {
     /// Returns `MemoryError::Storage` on SQL failure, or `MemoryError::NotFound`
     /// if no fact with `id` exists.
     pub fn set_pinned(&self, id: i64, pinned: bool) -> Result<()> {
-        let rows = self
+        let tx = self
             .conn
-            .execute(
+            .unchecked_transaction()
+            .map_err(StorageError::backend)?;
+        let was: Option<bool> = tx
+            .query_row("SELECT is_pinned FROM facts WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(StorageError::backend)?;
+        let Some(was) = was else {
+            return Err(me_types::error::MemoryError::NotFound(format!("fact {id}")));
+        };
+        if was != pinned {
+            tx.execute(
                 "UPDATE facts SET is_pinned = ?1 WHERE id = ?2",
                 rusqlite::params![i64::from(pinned), id],
             )
             .map_err(StorageError::backend)?;
-        if rows == 0 {
-            return Err(me_types::error::MemoryError::NotFound(format!("fact {id}")));
+            // Dedup skips pinned facts (#1080): an unpinned one is compared again, and a
+            // plan that chose a now-pinned fact as a loser must not expire it.
+            if pinned {
+                bump_consolidation_generation(&tx)?;
+            } else {
+                rewind_dedup_watermark(&tx, id)?;
+            }
         }
+        tx.commit().map_err(StorageError::backend)?;
         Ok(())
     }
 
@@ -3197,7 +3306,7 @@ mod tests {
 
     // -------------------------------------------------------------------------
     // #405 — unified scope_id IN-list strategy (json_each) across the three
-    // scheduling/forgetting queries that used to build positional placeholder
+    // scheduling/prune queries that used to build positional placeholder
     // strings (list_dormant, list_due, next_due_time). These tests pin the
     // refactor against regressions for 0, 1, and N scope ids — N > 1 being the
     // case the per-element placeholder builder was hand-rolling.

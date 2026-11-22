@@ -34,7 +34,7 @@ use memory_engine::search::SearchConfig;
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::types::{AddFactRequest, FactType};
 use memory_engine::{
-    ArchivePolicy, EmbeddingFingerprint, EngineConfig, ForgetPolicy, MatchType, MemoryQuery,
+    ArchivePolicy, EmbeddingFingerprint, EngineConfig, MatchType, MemoryQuery, PrunePolicy,
     SearchMode, SearchQuery,
 };
 
@@ -104,8 +104,8 @@ async fn nearest_content(
 /// End-to-end flow across `ann` + `archive` + `compress-zstd`.
 ///
 /// The split between survivors and expired facts is made deterministic by
-/// **pinning** the even-topic facts (pinned facts are immune to `forget`) and
-/// then forgetting aggressively — so exactly the odd-topic facts expire. That
+/// **pinning** the even-topic facts (pinned facts are immune to `prune`) and
+/// then pruning aggressively — so exactly the odd-topic facts expire. That
 /// asymmetry (even survive, odd expire) is what makes every later assertion
 /// non-vacuous.
 #[tokio::test]
@@ -124,7 +124,7 @@ async fn ann_archive_compress_end_to_end() {
                 &AddFactRequest {
                     content: format!("topic {topic} memory fact"),
                     // Episodic facts are *not* decay-exempt (unlike Semantic, the
-                    // knowledge-shaped default), so an aggressive `forget` can
+                    // knowledge-shaped default), so an aggressive `prune` can
                     // actually expire the unpinned ones — which is the whole point
                     // of this flow.
                     fact_type: FactType::Episodic,
@@ -140,7 +140,7 @@ async fn ann_archive_compress_end_to_end() {
         fact_ids.push(id);
     }
 
-    // Pin even topics → they survive forget. Odd topics will expire.
+    // Pin even topics → they survive prune. Odd topics will expire.
     let survivor_topics: Vec<usize> = (0..TOPICS).filter(|t| t % 2 == 0).collect();
     let expired_topics: Vec<usize> = (0..TOPICS).filter(|t| t % 2 == 1).collect();
     assert_eq!(survivor_topics.len(), 6);
@@ -161,15 +161,15 @@ async fn ann_archive_compress_end_to_end() {
         );
     }
 
-    // --- Forget aggressively: expire everything unpinned (the odd topics).
+    // --- Prune aggressively: expire everything unpinned (the odd topics).
     // This drives the backend's expire_fact → HNSW notify_expire (tombstone)
     // path for each odd-topic fact (#713), the cross-feature interaction #489
     // calls out.
     let prune = engine
-        .forget(&ForgetPolicy {
+        .prune(&PrunePolicy {
             half_life_days: 0.0001,
             min_importance: 1.0, // expire everything not pinned
-            ..ForgetPolicy::default()
+            ..PrunePolicy::default()
         })
         .await
         .unwrap();
@@ -212,7 +212,7 @@ async fn ann_archive_compress_end_to_end() {
         let topic = OneHotEmbedder::topic_of(&f.content).unwrap();
         assert!(
             topic.is_multiple_of(2),
-            "active fact for odd topic {topic} leaked past forget"
+            "active fact for odd topic {topic} leaked past prune"
         );
         assert!(f.is_pinned, "every surviving fact is pinned");
     }

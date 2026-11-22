@@ -12,8 +12,6 @@ pub mod cycle_report;
 mod embed_queue;
 mod events;
 mod facts;
-/// Forgetting/prune policy (`ForgetPolicy`) and output (`PruneStats`).
-pub mod forgetting;
 /// Inspection statistics + dump-format DTOs.
 pub mod inspect;
 /// The harness-neutral lifecycle record and ADR-0020 §5's segment rule (#1025).
@@ -27,6 +25,8 @@ pub mod lifecycle;
 /// resolvable public intra-doc link back to its own contents).
 mod memory_query;
 mod provenance;
+/// Prune policy (`PrunePolicy`) and output (`PruneStats`).
+pub mod pruning;
 mod redaction;
 mod relation;
 mod retraction;

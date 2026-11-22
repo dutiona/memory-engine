@@ -217,6 +217,10 @@ pub fn unforget(
             .is_none_or(|end| end > now);
         restored.push((fact, prior_expired.is_none() && invalid_later));
     }
+    // A restored fact sits below dedup's watermark (#1080): rewind so it is compared again.
+    if let Some(&(lowest, _)) = restored.first() {
+        crate::store::facts::rewind_dedup_watermark(conn, lowest)?;
+    }
     append_maintenance(
         conn,
         registry,

@@ -4,7 +4,7 @@
 //! so the engine can release its single write lock across the unbounded consumer
 //! `summarize`/`embed` IO:
 //!
-//! 1. [`load_snapshot`] — a brief read: count + `last_consolidated_at` + the active set,
+//! 1. [`load_snapshot`] — a brief read: count + the dedup watermark + the active set,
 //!    loaded once (#389) and short-circuited entirely when over both safety caps (#659).
 //! 2. [`compute_plan`] — **no `Connection`, no lock**: the dedup decision, the cluster
 //!    summaries, and the global summary are all computed (the consumer IO lives here) and
@@ -33,12 +33,12 @@ mod cluster;
 mod dedup;
 mod global;
 
-// `DateTime`/`Utc`/`Connection`/`get_config`/`set_config` are production-unused here
+// `Utc`/`Connection`/`get_config`/`set_config` are production-unused here
 // since `load_snapshot`/`load_snapshot_capped`/`apply_plan` live in me-backend-sqlite —
 // they're needed only by this file's own `#[cfg(test)]` `consolidate`/
 // `consolidate_with_caps` helpers and the test module below (via `use super::*`).
 #[cfg(test)]
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 #[cfg(test)]
 use rusqlite::Connection;
 
@@ -148,6 +148,8 @@ fn compute_plan_capped(
             global_summary: None,
             embedding_fingerprint: None,
             now: snapshot.now,
+            max_fact_id: snapshot.max_fact_id,
+            generation: snapshot.generation,
             skipped_vectorless: snapshot.skipped_vectorless,
         });
     }
@@ -157,7 +159,7 @@ fn compute_plan_capped(
         &snapshot.active_facts,
         config.dedup_threshold,
         max_dedup_facts,
-        snapshot.last,
+        snapshot.watermark,
     );
 
     // Survivors = the loaded active set minus the dedup expirations (no re-query, borrowed
@@ -210,6 +212,8 @@ fn compute_plan_capped(
         global_summary,
         embedding_fingerprint,
         now: snapshot.now,
+        max_fact_id: snapshot.max_fact_id,
+        generation: snapshot.generation,
         skipped_vectorless: snapshot.skipped_vectorless,
     })
 }
@@ -219,7 +223,8 @@ fn compute_plan_capped(
 /// production orchestration (`crate::consolidate`) instead calls the phases separately
 /// so it can drop its write lock across the lock-free [`compute_plan`] (#409).
 ///
-/// Reads `last_consolidated_at` to scope dedup and updates it after a successful run.
+/// Reads the dedup watermark (`last_consolidated_fact_id`, #1080) to scope dedup and
+/// advances it after a successful run.
 /// `generator` produces the summary text; `embedder` projects it into the fact vector
 /// space (#116). Returns the stats and the ids expired (so the engine can update vector
 /// indexes).
@@ -227,7 +232,7 @@ fn compute_plan_capped(
 /// # Errors
 ///
 /// Returns `MemoryError::Conflict` if `config` fails validation
-/// ([`ConsolidationConfig::validate`]), `MemoryError::Migration` if `last_consolidated_at`
+/// ([`ConsolidationConfig::validate`]), `MemoryError::Migration` if the dedup watermark
 /// cannot be parsed, or propagates errors from any pass, the `SummaryGenerator`, or the
 /// `EmbeddingProvider`.
 #[cfg(test)]
@@ -283,9 +288,8 @@ fn consolidate_with_caps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeDelta;
 
-    use me_backend_sqlite::store::facts::FactStore;
+    use me_backend_sqlite::store::facts::{DEDUP_WATERMARK, FactStore};
     use me_backend_sqlite::store::schema::{get_config, init_schema, open_memory, set_config};
     use me_backend_sqlite::store::summaries::SummaryStore;
     use me_traits::test_util::MockEmbedder;
@@ -375,7 +379,7 @@ mod tests {
     #[test]
     fn consolidate_rejects_invalid_config_before_mutating() {
         // The entry point validates its config up front, before touching the store
-        // — mirroring how `prune()` rejects an invalid `ForgetPolicy`.
+        // — mirroring how `prune()` rejects an invalid `PrunePolicy`.
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
 
@@ -533,6 +537,122 @@ mod tests {
         );
     }
 
+    fn run(conn: &Connection) -> usize {
+        consolidate(
+            conn,
+            &MockGenerator,
+            &MockEmbedder::new(DIM),
+            DIM,
+            &ConsolidationConfig::default(),
+        )
+        .unwrap()
+        .0
+        .duplicates_removed
+    }
+
+    /// #1080: a fact created before the watermark but committed after the snapshot is
+    /// still compared for duplicates at the next run.
+    #[test]
+    fn a_fact_committed_after_the_snapshot_is_compared_at_the_next_run() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        insert_fact(&conn, "the sky is blue", vec![1.0, 0.0, 0.0, 0.0], 0.5);
+        assert_eq!(run(&conn), 0);
+
+        let config = ConsolidationConfig::default();
+        let snapshot = load_snapshot_capped(&conn, DIM, &config, usize::MAX, usize::MAX).unwrap();
+        let plan = compute_plan_capped(
+            &snapshot,
+            &MockGenerator,
+            &MockEmbedder::new(DIM),
+            DIM,
+            &config,
+            usize::MAX,
+            usize::MAX,
+        )
+        .unwrap();
+        let late = insert_fact(&conn, "the sky is blue!", vec![1.0, 0.0, 0.0, 0.0], 0.3);
+        conn.execute(
+            "UPDATE facts SET t_created = ?1 WHERE id = ?2",
+            rusqlite::params![
+                (snapshot.now - chrono::TimeDelta::hours(1)).to_rfc3339(),
+                late
+            ],
+        )
+        .unwrap();
+        apply_plan(&conn, &plan, DIM).unwrap();
+
+        assert_eq!(run(&conn), 1, "the late duplicate is compared and merged");
+    }
+
+    /// #1080: a fact created before the watermark but embedded after the snapshot is still
+    /// compared for duplicates at the next run.
+    #[test]
+    fn a_fact_embedded_after_the_snapshot_is_compared() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        insert_fact(&conn, "the sky is blue", vec![1.0, 0.0, 0.0, 0.0], 0.5);
+        assert_eq!(run(&conn), 0);
+        let late = insert_fact(&conn, "the sky is blue!", vec![1.0, 0.0, 0.0, 0.0], 0.3);
+        let backdated = (Utc::now() - chrono::TimeDelta::days(10)).to_rfc3339();
+        conn.execute(
+            "UPDATE facts SET embedding = X'', t_created = ?1 WHERE id = ?2",
+            rusqlite::params![backdated, late],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO embed_queue (fact_id, enqueued_at, next_attempt_at) VALUES (?1, ?2, ?2)",
+            rusqlite::params![late, backdated],
+        )
+        .unwrap();
+
+        let config = ConsolidationConfig::default();
+        let snapshot = load_snapshot_capped(&conn, DIM, &config, usize::MAX, usize::MAX).unwrap();
+        let plan = compute_plan_capped(
+            &snapshot,
+            &MockGenerator,
+            &MockEmbedder::new(DIM),
+            DIM,
+            &config,
+            usize::MAX,
+            usize::MAX,
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE facts SET embedding = ?1 WHERE id = ?2",
+            rusqlite::params![
+                me_backend_sqlite::store::serialize_embedding(&[1.0, 0.0, 0.0, 0.0]),
+                late
+            ],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM embed_queue WHERE fact_id = ?1", [late])
+            .unwrap();
+        apply_plan(&conn, &plan, DIM).unwrap();
+
+        assert_eq!(
+            run(&conn),
+            1,
+            "the late-embedded duplicate is compared and merged"
+        );
+    }
+
+    /// #1080: a fact backdated before the last run is still new to dedup.
+    #[test]
+    fn a_backdated_fact_is_compared() {
+        let conn = open_memory().unwrap();
+        init_schema(&conn).unwrap();
+        insert_fact(&conn, "the sky is blue", vec![1.0, 0.0, 0.0, 0.0], 0.5);
+        assert_eq!(run(&conn), 0);
+        let old = insert_fact(&conn, "the sky is blue!", vec![1.0, 0.0, 0.0, 0.0], 0.3);
+        conn.execute(
+            "UPDATE facts SET t_created = '2000-01-01T00:00:00+00:00' WHERE id = ?1",
+            [old],
+        )
+        .unwrap();
+        assert_eq!(run(&conn), 1);
+    }
+
     #[test]
     fn watermark_written_after_success() {
         let conn = open_memory().unwrap();
@@ -540,9 +660,8 @@ mod tests {
         seed_cluster(&conn);
 
         // No watermark before the first run.
-        assert!(get_config(&conn, "last_consolidated_at").unwrap().is_none());
+        assert!(get_config(&conn, DEDUP_WATERMARK).unwrap().is_none());
 
-        let before = Utc::now();
         consolidate(
             &conn,
             &MockGenerator,
@@ -551,17 +670,17 @@ mod tests {
             &ConsolidationConfig::default(),
         )
         .unwrap();
-        let after = Utc::now();
 
-        let raw = get_config(&conn, "last_consolidated_at")
+        let raw = get_config(&conn, DEDUP_WATERMARK)
             .unwrap()
             .expect("watermark must be written after a successful run");
-        let watermark = DateTime::parse_from_rfc3339(&raw)
-            .unwrap()
-            .with_timezone(&Utc);
-        assert!(
-            watermark >= before && watermark <= after,
-            "watermark {watermark} not within [{before}, {after}]"
+        let highest: i64 = conn
+            .query_row("SELECT MAX(id) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            raw,
+            highest.to_string(),
+            "the watermark is the highest fact id"
         );
     }
 
@@ -570,13 +689,10 @@ mod tests {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
 
-        // Seed a watermark in the future so EVERY existing fact predates it.
-        let future = Utc::now() + TimeDelta::days(1);
-        set_config(&conn, "last_consolidated_at", &future.to_rfc3339()).unwrap();
-
-        // Two near-duplicate facts, both created "now" (before the watermark).
+        // Two near-duplicate facts, then a watermark at the second's id, so neither is new.
         insert_fact(&conn, "old A", vec![1.0, 0.0, 0.0, 0.0], 0.5);
-        insert_fact(&conn, "old B", vec![0.99, 0.01, 0.0, 0.0], 0.3);
+        let b = insert_fact(&conn, "old B", vec![0.99, 0.01, 0.0, 0.0], 0.3);
+        set_config(&conn, DEDUP_WATERMARK, &b.to_string()).unwrap();
 
         let (stats, expired) = consolidate(
             &conn,
@@ -587,7 +703,7 @@ mod tests {
         )
         .unwrap();
 
-        // Because both facts predate the watermark, dedup's "new facts" set is
+        // Because both facts sit at or below the watermark, dedup's "new facts" set is
         // empty and nothing is removed — proving the watermark is read and applied.
         assert_eq!(stats.duplicates_removed, 0);
         assert_eq!(expired, [] as [i64; 0]);
@@ -601,7 +717,7 @@ mod tests {
     fn invalid_watermark_in_config_errors() {
         let conn = open_memory().unwrap();
         init_schema(&conn).unwrap();
-        set_config(&conn, "last_consolidated_at", "not-a-timestamp").unwrap();
+        set_config(&conn, DEDUP_WATERMARK, "not-an-id").unwrap();
 
         let err = consolidate(
             &conn,
@@ -668,7 +784,7 @@ mod tests {
         );
 
         assert!(
-            get_config(&conn, "last_consolidated_at").unwrap().is_none(),
+            get_config(&conn, DEDUP_WATERMARK).unwrap().is_none(),
             "watermark must not advance when consolidation rolls back"
         );
     }
@@ -693,11 +809,11 @@ mod tests {
         assert_eq!(expired, [] as [i64; 0]);
 
         // An empty run is still a successful run: the watermark advances.
-        assert!(get_config(&conn, "last_consolidated_at").unwrap().is_some());
+        assert!(get_config(&conn, DEDUP_WATERMARK).unwrap().is_some());
     }
 
     /// #439 / #306: when dedup is skipped (corpus over the cap), the orchestrator
-    /// must NOT advance `last_consolidated_at`, so the over-cap facts are retried on
+    /// must NOT advance the dedup watermark, so the over-cap facts are retried on
     /// the next run. Driven through `consolidate_with_caps` with a tiny dedup cap so
     /// the skip path is reachable without a 50 000-fact corpus. The cluster pass
     /// (separate, much larger cap) still runs — only the dedup-driven watermark
@@ -709,7 +825,7 @@ mod tests {
         seed_cluster(&conn); // 3 near-duplicates
 
         assert!(
-            get_config(&conn, "last_consolidated_at").unwrap().is_none(),
+            get_config(&conn, DEDUP_WATERMARK).unwrap().is_none(),
             "precondition: no watermark before the run"
         );
 
@@ -749,7 +865,7 @@ mod tests {
 
         // ...and crucially the watermark is held so the skipped facts are retried.
         assert!(
-            get_config(&conn, "last_consolidated_at").unwrap().is_none(),
+            get_config(&conn, DEDUP_WATERMARK).unwrap().is_none(),
             "watermark must NOT advance when dedup is skipped (over cap)"
         );
     }
@@ -800,7 +916,7 @@ mod tests {
             "no fact is expired when over both caps"
         );
         assert!(
-            get_config(&conn, "last_consolidated_at").unwrap().is_none(),
+            get_config(&conn, DEDUP_WATERMARK).unwrap().is_none(),
             "watermark must NOT advance when over both caps"
         );
     }

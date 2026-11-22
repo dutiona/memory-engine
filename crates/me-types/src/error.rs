@@ -42,7 +42,7 @@ pub enum ConflictError {
 
     /// A configuration or policy parameter is out of its accepted range — e.g. a
     /// non-positive half-life, a weight below zero, or a ratio/percentile outside
-    /// `[0.0, 1.0]`. Raised by `ForgetPolicy::validate`
+    /// `[0.0, 1.0]`. Raised by `PrunePolicy::validate`
     /// and [`DreamCycleConfig::validate`](crate::types::DreamCycleConfig::validate).
     /// The string describes the offending parameter and its value.
     #[error("{0}")]
@@ -387,6 +387,12 @@ pub enum CycleError {
     /// means the apply path must be extended for the new variant.
     #[error("unsupported cycle delta variant (apply path predates a newer CycleDelta)")]
     UnsupportedDelta,
+
+    /// An `AddFact` or `Synthesize` delta carries a vector, but the report's
+    /// [`embedding_fingerprint`](crate::types::cycle_report::CycleReport::embedding_fingerprint)
+    /// is `None`: a vector of unknown identity cannot be checked against the store's.
+    #[error("cycle report carries a vector but declares no embedding identity (ADR-0015 §3)")]
+    UndeclaredEmbedding,
 }
 
 /// A failure that originates **at the pluggable-storage seam** and cannot be
@@ -1062,6 +1068,10 @@ mod tests {
             CycleError::MalformedReport { facts_selected: 5 }
                 .to_string()
                 .contains("processed_ids is empty")
+        );
+        assert_eq!(
+            CycleError::UndeclaredEmbedding.to_string(),
+            "cycle report carries a vector but declares no embedding identity (ADR-0015 §3)"
         );
     }
 

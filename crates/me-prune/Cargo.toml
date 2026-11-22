@@ -1,9 +1,9 @@
 [package]
-name = "me-forget"
+name = "me-prune"
 version = "0.2.0-rc.3"
 edition = "2024"
 rust-version.workspace = true
-description = "Forget primitive: Ebbinghaus decay + multi-signal importance pruning (Wave 2 #816 / S3, sub-PR 2)"
+description = "Prune primitive: Ebbinghaus decay + multi-signal importance pruning (Wave 2 #816 / S3, sub-PR 2)"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dutiona/memory-engine"
 # Workspace-internal crate: never published, so it uses bare path-deps and is exempt

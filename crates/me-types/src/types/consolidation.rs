@@ -11,7 +11,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::types::{EmbeddingFingerprint, Fact, NewSummary};
+use crate::types::{EmbeddingFingerprint, Fact, FactId, NewSummary};
 
 /// An immutable read-phase snapshot of everything `compute_plan` needs.
 ///
@@ -24,9 +24,17 @@ pub struct Snapshot {
     /// The active set, loaded once (#389). Empty when `over_both_caps` (the load was
     /// short-circuited, #659) — distinguished from a genuinely empty store by the flag.
     pub active_facts: Vec<Fact>,
-    /// `last_consolidated_at` watermark scoping the dedup "new facts" set.
-    pub last: Option<DateTime<Utc>>,
-    /// Single run-level timestamp; the watermark advances to this on success.
+    /// Dedup's watermark (#1080): the facts with an id above it are compared as new; `None`
+    /// compares every fact. Ids grow in commit order, so a fact committed after an earlier
+    /// run sits above it whatever its `t_created`.
+    pub watermark: Option<FactId>,
+    /// The highest fact id when the load began, read before the active set: the watermark
+    /// a successful run advances to.
+    pub max_fact_id: FactId,
+    /// The consolidation generation the load saw; a plan whose store has since changed
+    /// generation is discarded at apply.
+    pub generation: u64,
+    /// Single run-level timestamp (expiry stamp).
     pub now: DateTime<Utc>,
     /// The corpus exceeded BOTH safety caps, so the (expensive) `list_active` load was
     /// skipped (#659): the plan is a complete no-op (dedup skipped, clustering skipped).
@@ -58,8 +66,12 @@ pub struct ConsolidationPlan {
     /// The embedder's fingerprint to stamp, set **iff** a summary vector was produced
     /// (#643). Captured during compute so `apply_plan` needs no embedder.
     pub embedding_fingerprint: Option<EmbeddingFingerprint>,
-    /// Run-level timestamp (expiry stamp + watermark).
+    /// Run-level timestamp (expiry stamp).
     pub now: DateTime<Utc>,
+    /// Carried from [`Snapshot::max_fact_id`]: the watermark a successful run advances to.
+    pub max_fact_id: FactId,
+    /// Carried from [`Snapshot::generation`]: the apply discards the plan when it changed.
+    pub generation: u64,
     /// Carried from [`Snapshot::skipped_vectorless`]: the watermark must not advance.
     pub skipped_vectorless: bool,
 }

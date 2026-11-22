@@ -18,7 +18,7 @@
 //! - **Four thin delegates** (`record_insight`, `run_dream_cycle`,
 //!   `run_dream_cycle_guarded`, `apply_cycle_report`) forwarding to
 //!   [`me_cognitive`] via the `crate::cognitive` alias (the `pool`/`store`/`graph`/
-//!   `scope`/`archive`/`forgetting` convention).
+//!   `scope`/`archive`/`pruning` convention).
 
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ use chrono::Utc;
 
 use crate::engine::MemoryEngine;
 use crate::error::{MemoryError, Result};
-use crate::forgetting::{ForgetPolicy, PruneStats};
+use crate::pruning::{PrunePolicy, PruneStats};
 use crate::traits::{
     ConsolidationConfig, ConsolidationStats, DreamCtx, EmbeddingProvider, SummaryGenerator,
 };
@@ -45,7 +45,7 @@ pub use crate::types::Insight;
 /// # Why this is a newtype and **not** `impl DreamCtx for MemoryEngine`
 ///
 /// Five of `DreamCtx`'s nine methods share a name with an inherent `MemoryEngine`
-/// method (`query`, `list_active_facts`, `get_fact`, `consolidate`, `forget`). Had
+/// method (`query`, `list_active_facts`, `get_fact`, `consolidate`, `prune`). Had
 /// `MemoryEngine` implemented `DreamCtx` directly, each impl body would have to call
 /// the same-named inherent method on `self` — and Rust resolves inherent-before-trait,
 /// so it works *only for as long as the inherent method keeps its name*. Rename or
@@ -104,8 +104,8 @@ impl DreamCtx for EngineDreamCtx<'_> {
         self.0.consolidate(generator, embedder, config).await
     }
 
-    async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
-        self.0.forget(policy).await
+    async fn prune(&self, policy: &PrunePolicy) -> Result<PruneStats> {
+        self.0.prune(policy).await
     }
 
     async fn promote(&self, req: &PromoteRequest) -> Result<PromotionResult> {
@@ -282,7 +282,12 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// - [`MemoryError::ReadOnly`] if the engine is read-only.
-    /// - [`MemoryError::Cycle`] if any delta fails validation.
+    /// - [`MemoryError::Cycle`] if any delta fails validation, including
+    ///   [`CycleError::UndeclaredEmbedding`](crate::error::CycleError::UndeclaredEmbedding)
+    ///   when an `AddFact`/`Synthesize` vector comes in a report whose
+    ///   `embedding_fingerprint` is `None`.
+    /// - [`MemoryError::EmbeddingModelMismatch`] if the report declares another
+    ///   embedding identity than the store's.
     /// - [`MemoryError::EmbeddingDimension`] if an
     ///   `AddFact`/`Promote`/`Synthesize` embedding does not match the engine dimension.
     /// - [`MemoryError::Storage`] on a backend failure.
@@ -328,6 +333,7 @@ impl MemoryEngine {
             deltas,
             identity: report.identity.clone(),
             metadata,
+            embedding_fingerprint: report.embedding_fingerprint.clone(),
         };
         let mut result = crate::cognitive::apply_cycle_report(
             self.mem_ctx(),
@@ -522,7 +528,7 @@ impl MemoryEngine {
             last_accessed: now,
             metadata,
             scope_id: 1,     // placeholder — promote_atomic patches it from scope_path
-            is_pinned: true, // promoted wisdom is pinned (unforgettable)
+            is_pinned: true, // promoted wisdom is pinned (never pruned)
         };
 
         // Atomic fact + lineage insert below the seam (identity guard + scope resolution
@@ -534,6 +540,7 @@ impl MemoryEngine {
                 req.scope.as_deref(),
                 &req.source_fact_ids,
                 &req.provenance,
+                &req.embedding_fingerprint,
             )
             .await?;
 
@@ -621,6 +628,7 @@ mod tests {
                     method_version: "noop".into(),
                     processed_ids: vec![],
                 },
+                embedding_fingerprint: None,
             })
         }
     }
@@ -672,6 +680,7 @@ mod tests {
                     method_version: "capability-probe".into(),
                     processed_ids: vec![],
                 },
+                embedding_fingerprint: None,
             })
         }
     }
@@ -818,6 +827,7 @@ mod tests {
                     method_version: "bad".into(),
                     processed_ids: vec![], // ...but marks nothing → contract violation
                 },
+                embedding_fingerprint: None,
             })
         }
     }
@@ -953,6 +963,7 @@ mod tests {
             content: "promoted wisdom".into(),
             fact_type: FactType::Semantic,
             embedding: vec![0.1; 8], // wrong dim (engine expects 4)
+            embedding_fingerprint: crate::types::EmbeddingFingerprint::new("mock", "test", 4),
             importance: 0.9,
             metadata: serde_json::json!({}),
             scope: None,
@@ -985,6 +996,7 @@ mod tests {
             content: "promoted wisdom".into(),
             fact_type: FactType::Semantic,
             embedding: vec![0.1, 0.2, 0.3, 0.4], // correct dim — dim check passes
+            embedding_fingerprint: crate::types::EmbeddingFingerprint::new("mock", "test", 4),
             importance: 0.9,
             metadata: serde_json::json!({}),
             scope: None,
@@ -1019,6 +1031,7 @@ mod tests {
             content: "User prefers terse responses".into(),
             fact_type: FactType::Semantic,
             embedding: vec![0.1, 0.2, 0.3, 0.4],
+            embedding_fingerprint: crate::types::EmbeddingFingerprint::new("mock", "test", 4),
             importance: 0.9,
             metadata: serde_json::json!({}),
             scope: None,
@@ -1054,6 +1067,7 @@ mod tests {
             content,
             fact_type: FactType::Semantic,
             embedding: vec![0.1, 0.2, 0.3, 0.4],
+            embedding_fingerprint: crate::types::EmbeddingFingerprint::new("mock", "test", 4),
             importance: 0.9,
             metadata: serde_json::json!({ "note": format!("key {aws}") }),
             scope: None,
@@ -1114,6 +1128,7 @@ mod tests {
             content: "wisdom fact".into(),
             fact_type: FactType::Semantic,
             embedding: vec![1.0, 0.0, 0.0, 0.0],
+            embedding_fingerprint: crate::types::EmbeddingFingerprint::new("mock", "test", 4),
             importance: 0.95,
             metadata: serde_json::json!({"existing": "data"}),
             scope: None,
@@ -1142,7 +1157,7 @@ mod tests {
     /// `explain_fact` — a facade-only module (`engine::inspect`), so this
     /// cross-module assertion cannot live in `me-cognitive` itself.
     #[tokio::test]
-    async fn quarantine_is_distinguishable_from_forgetting_in_explain_fact() {
+    async fn quarantine_is_reported_as_quarantined_in_explain_fact() {
         use crate::inspect::{ExpiredReason, FactState};
         let engine = MemoryEngine::builder(4).build().unwrap();
         engine
@@ -1170,6 +1185,7 @@ mod tests {
                 method_version: "test".into(),
                 processed_ids: vec![id],
             },
+            embedding_fingerprint: None,
         };
         engine.apply_cycle_report(&report).await.unwrap();
         let explanation = engine.explain_fact(id).await.unwrap();

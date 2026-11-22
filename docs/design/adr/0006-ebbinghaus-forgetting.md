@@ -1,6 +1,6 @@
 # ADR-0006: Multi-Signal Importance Scoring for Forgetting
 
-**Status:** Accepted
+**Status:** Accepted; amended 2026-11-22 (dutiona/memory-engine#1089: the decay prune is renamed prune)
 **Date:** 2026-03-10
 
 ## Context
@@ -64,3 +64,13 @@ Normalization uses `ln_1p` for numerical accuracy near zero, with named ceiling 
 - Phase 3b plans `is_pinned` flag and `PersistenceClassifier` trait to mark unforgettable facts, providing a hard override for the scoring system.
 - Phase 4 plans materialized importance scores on facts for fast retrieval without recomputation.
 - Graph rebuild is performed after consolidation (ADR-0005), keeping the graph consistent before forgetting runs.
+
+## Amendment (2026-11-22, #1089)
+
+The decay prune is now named `prune` (dutiona/memory-engine#1089); `forget` names only the retraction. This record keeps the names of its time:
+
+| Then | Now |
+|---|---|
+| `ForgetPolicy` | `PrunePolicy` |
+| `ForgetPolicy::validate()` | `PrunePolicy::validate()` |
+| `forget()` (the decay prune) | `prune()` |

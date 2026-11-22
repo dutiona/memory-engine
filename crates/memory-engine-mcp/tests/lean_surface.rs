@@ -45,7 +45,11 @@ async fn every_answer_starts_with_its_call_id() {
         ("remember", json!({ "content": "" }), true),
         ("set_level", json!({ "level": "user" }), true),
         ("set_level", json!({ "id": 1, "level": "global" }), true),
-        ("set_level", json!({ "id": 999_999, "level": "user" }), true),
+        (
+            "set_level",
+            json!({ "id": 999_999, "level": "user" }),
+            false,
+        ),
         ("forget", json!({ "id": 999_999, "reason": "wrong" }), false),
         ("forget", json!({ "id": 1 }), true),
         ("forget", json!({ "id": 1, "reason": " " }), true),

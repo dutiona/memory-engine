@@ -95,10 +95,19 @@ advances the `last_dream_cycle_at` watermark to the window end, so a sequential 
 is a near no-op (idempotency). Concurrent double-fires are _not_ idempotent — mutual
 exclusion is #207 (distributed lock) / #209.
 
+A report declares the embedding identity of the vectors its `AddFact` and `Synthesize`
+deltas carry, in `CycleReport::embedding_fingerprint` (ADR-0015 §3, #1062). The apply
+refuses the whole report, before any write, when such a delta comes with no declaration
+(`CycleError::UndeclaredEmbedding`), when the store has no identity yet, or when the
+declaration differs from the store's (`EmbeddingModelMismatch`). A report without vectors
+declares nothing: a `Promote` delta copies a vector already stored. `DreamCtx::promote` is
+held to the same rule: its `PromoteRequest::embedding_fingerprint` must equal the store's
+identity.
+
 ## Retrieve-before-reflect: `CycleContext`
 
 `DreamCycle::run` receives a `&dyn CycleCtx` — implemented by `CycleContext`, which
-carries the capability bag directly (query / consolidate / forget / promote /
+carries the capability bag directly (query / consolidate / prune / promote /
 `list_undreamt_in_period` / `outcome_counts*`, via the `DreamCtx` supertrait — Wave 2
 #816 / S5, #981) and adds the retrieved prior state:
 
@@ -145,7 +154,8 @@ in pure Rust; `LlmDreamCycle` delegates the _what to merge_ decision to an LLM.
   `HttpDeltaProposer`) drives Ollama `/api/generate` in JSON mode at temperature 0.
 - an **`EmbeddingProvider`** — the backend embeds its own summary text, so the engine never
   embeds on a backend's behalf (`apply_cycle_report` validates the embedding's dimension but
-  does not compute it).
+  does not compute it). Its report declares this embedder's identity, so the summaries apply
+  only when it is the store's.
 
 `run` then mirrors `DefaultDreamCycle`'s loop — select the undreamt window, decide, emit a
 delta `CycleReport` — turning each merge group into a `Synthesize` delta. Three rails make an

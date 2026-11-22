@@ -122,7 +122,7 @@ The arbiter can return an error to abort the resolution with no side effects.
 
 ### PersistenceClassifier
 
-Called during `add_fact()` to decide whether a newly inserted fact should be pinned (unforgettable). This is an optional parameter — passing `None` for the classifier skips auto-pinning.
+Called during `add_fact()` to decide whether a newly inserted fact should be pinned (never pruned). This is an optional parameter — passing `None` for the classifier skips auto-pinning.
 
 ```rust
 pub trait PersistenceClassifier {
@@ -302,24 +302,24 @@ pub struct SearchConfig {
 
 Controls when the engine switches from brute-force to HNSW. Passed via `MemoryEngine::builder(dim).search_config(...)` (or `EngineConfig::new(path, dim).with_search_config(...)`). Without `SearchConfig` (or without the `ann` feature), brute-force is always used.
 
-## ForgetPolicy: Configuration, Not a Trait
+## PrunePolicy: Configuration, Not a Trait
 
-`ForgetPolicy` is a plain struct with configurable fields, not a trait. The forgetting algorithm (Ebbinghaus decay + multi-signal scoring) is fixed in the engine. Consumers tune it through weights and thresholds rather than replacing the algorithm entirely.
+`PrunePolicy` is a plain struct with configurable fields, not a trait. The prune algorithm (Ebbinghaus decay + multi-signal scoring) is fixed in the engine. Consumers tune it through weights and thresholds rather than replacing the algorithm entirely.
 
 ```rust
-let policy = ForgetPolicy {
+let policy = PrunePolicy {
     half_life_days: 90.0,
     min_importance: 0.2,
     recency_weight: 0.4,
     frequency_weight: 0.1,
     graph_degree_weight: 0.3,
     base_importance_weight: 0.2,
-    ..ForgetPolicy::default()
+    ..PrunePolicy::default()
 };
-engine.forget(&policy)?;
+engine.prune(&policy)?;
 ```
 
-This is a policy (parameter set), not a strategy (pluggable algorithm). See [Forgetting](forgetting.md) for the full scoring formula.
+This is a policy (parameter set), not a strategy (pluggable algorithm). See [Forgetting](forgetting.md) (the decay prune) for the full scoring formula.
 
 ## Summary of Extension Points
 
@@ -331,6 +331,6 @@ This is a policy (parameter set), not a strategy (pluggable algorithm). See [For
 | `PersistenceClassifier` | consumer trait | `add_fact()`          | Auto-pinning logic                                |
 | `Reranker`              | consumer trait | `query()`             | Cross-encoder reranking (Phase 4a)                |
 | `SessionExtractor`      | consumer trait | `bootstrap_session()` | Episode-to-fact extraction                        |
-| `ForgetPolicy`          | struct         | `forget()`            | Decay parameters                                  |
+| `PrunePolicy`          | struct         | `prune()`             | Decay parameters                                  |
 | `VectorSearchStrategy`  | internal trait | `query()`             | Engine (BruteForce or HnswStrategy)               |
 | `SearchConfig`          | struct         | `builder()`           | ANN dispatch threshold                            |

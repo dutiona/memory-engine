@@ -105,6 +105,11 @@ pub struct PromoteRequest {
     pub fact_type: FactType,
     /// Precomputed embedding vector.
     pub embedding: Vec<f32>,
+    /// The identity of the embedder that computed [`Self::embedding`] (ADR-0015 §3). The
+    /// promotion is refused with
+    /// [`MemoryError::EmbeddingModelMismatch`](crate::error::MemoryError::EmbeddingModelMismatch)
+    /// unless it equals the store's identity.
+    pub embedding_fingerprint: EmbeddingFingerprint,
     /// Importance score for the promoted fact.
     pub importance: f64,
     /// Metadata JSON (will have `promotion_provenance` key injected).

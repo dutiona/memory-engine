@@ -1,6 +1,6 @@
 # ADR-0012: Decay Exemption for Knowledge-Shaped Fact Types
 
-**Status:** Accepted
+**Status:** Accepted; amended 2026-11-22 (dutiona/memory-engine#1089: the decay prune is renamed prune)
 **Date:** 2026-06-12
 
 ## Context
@@ -35,3 +35,12 @@ Lifecycle for exempt facts: supersession (`t_expired` via conflict resolution) a
 - Eval/conformance suites updated: decay-mechanics scenarios now use `Episodic` subjects; the pinned=false conformance test exercises the override-wins escape hatch.
 - Episodic facts remain on the 69-day default until session-backfill telemetry fits a measured constant (#139/#140) — the transplanted value now governs only the type it can defensibly govern.
 - Storage growth for exempt types is bounded by supersession and consolidation, not decay.
+
+## Amendment (2026-11-22, #1089)
+
+The decay prune is now named `prune` (dutiona/memory-engine#1089); `forget` names only the retraction. This record keeps the names of its time:
+
+| Then | Now |
+|---|---|
+| `ForgetPolicy` | `PrunePolicy` |
+| `ForgetPolicy::is_decay_exempt` | `PrunePolicy::is_decay_exempt` |

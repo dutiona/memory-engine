@@ -71,19 +71,19 @@ for operations that require external models:
 `ConflictArbiter`
 : Decide how to resolve contradicting facts (Add/Update/Delete/Noop). Called during `resolve_conflict()`.
 
-`ForgetPolicy`
+`PrunePolicy`
 : Configuration struct (not a trait) controlling Ebbinghaus decay parameters.
 
 `PersistenceClassifier`
-: Decide whether a new fact should be pinned (unforgettable). Called during `add_fact()`. Optional.
+: Decide whether a new fact should be pinned (never pruned). Called during `add_fact()`. Optional.
 
 This design means the core crate compiles without any ML framework, HTTP client, or API key.
 
 ## Pinned Facts
 
-Facts can be marked as **pinned** (unforgettable). Pinned facts:
+Facts can be marked as **pinned** (never pruned). Pinned facts:
 
-- Are never expired by the forgetting system (`forget()` skips them)
+- Are never expired by the decay prune (`prune()` skips them)
 - Are never deduplicated during consolidation
 - Appear in the top tier of `resume_context()` (tier 1: pinned)
 - Can be pinned explicitly via `pin_fact(id)` / `unpin_fact(id)`, through `AddFactOptions { pinned: Some(true), .. }`, or automatically via a `PersistenceClassifier`
@@ -129,7 +129,7 @@ Scope queries control visibility:
 | **Ingest**      | `ingest()`                      | Append event to the audit log                       |
 | **Query**       | `query()`                       | Hybrid search with temporal and scope filters       |
 | **Consolidate** | `consolidate()`                 | Merge duplicates, cluster facts, summarize          |
-| **Forget**      | `forget()`                      | Decay and prune low-importance facts (skips pinned) |
+| **Prune**       | `prune()`                       | Decay and prune low-importance facts (skips pinned) |
 | **Resolve**     | `resolve_conflict()`            | Arbitrate contradicting facts                       |
 | **Schedule**    | `list_due()`, `next_due_time()` | Surface future-memory facts and poll timing         |
 | **Resume**      | `resume_context()`              | 4-tier session bootstrapping                        |

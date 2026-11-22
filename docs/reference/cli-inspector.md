@@ -163,7 +163,7 @@ memory-engine-cli --db new-agent.db import backup.json
 memory-engine-cli --db new-agent.db import backup.json.gz --embed-dim 384
 ```
 
-Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots.
+Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots. The first `consolidate` afterwards compares every fact for duplicates: the snapshot's dedup watermark is not imported.
 
 A JSON snapshot carries the lifecycle route's two tables, `lifecycle_receipts` and `lifecycle_segments` (#1025), so a
 restored store keeps its idempotency keys (a client's resend of an event the old store had stored is still a
@@ -235,7 +235,7 @@ memory-engine-cli --format json prune --min-importance 0.2 --half-life-override 
 ```
 
 Expires (never deletes) every fact whose decayed importance falls below `--min-importance`, scored with the Ebbinghaus
-policy of the forgetting engine. Flags, each defaulting to `ForgetPolicy::default()`: `--half-life-days`,
+policy of the decay prune. Flags, each defaulting to `PrunePolicy::default()`: `--half-life-days`,
 `--min-importance` (in [0, 1]), `--recency-weight`, `--frequency-weight`, `--graph-degree-weight`,
 `--base-importance-weight`, and the repeatable `--half-life-override TYPE=DAYS`. An invalid policy is refused before
 the store is opened. Pinned facts and the decay-exempt types (Semantic and Procedural by default, so every memory the
@@ -254,8 +254,8 @@ It restores every fact that forget retracted (the named one and the identical co
 `t_expired`/`t_invalid` it had before, drops their tombstones and appends an `unforget` maintenance record. A copy
 erased since then keeps its block. Output, one line per restored fact: `unforgot fact 412: back in recall`, or
 `…: still out of recall (it was expired or invalid before the forget)`; `{"restored":[{"fact_id":412,"active":true}]}`;
-`fact_id=412 active=true`. A fact that is not forgotten, or does not exist, exits 1. It writes the store, so it takes
-the store lock: stop the server first.
+`fact_id=412 active=true`. A fact that is not forgotten, or does not exist, exits 1. The restored facts are compared
+for duplicates again at the next `consolidate`. It writes the store, so it takes the store lock: stop the server first.
 
 To find what to unforget: `dump events` lists the forget call records (`"tool":"forget"`), `explain <id>` shows a
 fact's forget and its reason, then `unforget <id>`.
@@ -348,8 +348,14 @@ prints a machine-readable JSON result:
 ```
 
 The `--backend llm` path requires all four `--llm-*` / `--embed-*` flags (the LLM backend
-embeds its own summaries). Because of the #209 guard, the first invocation after a write
-**defers** (`"outcome": "skipped"`); a subsequent quiet invocation runs. This is the
+embeds its own summaries). The embedder flags (`--embed-model`, `--embed-provider`, the MRL
+and served-artifact flags) must name the identity the store records: it is checked before
+the LLM is called, and a mismatch exits 1 with `embedding identity check failed` and no JSON
+(#1062). A store that records no identity yet (for example, every fact still waits for its vector) passes
+that check; the apply then refuses the summaries (#613), after the LLM calls, and the JSON says
+`failed`. The #209 guard defers a cycle that follows a caller write; the command retries a
+deferred cycle up to 8 times in one invocation, so one call runs, and it reports
+`"outcome": "skipped"` only when a concurrent writer keeps it deferred. This is the
 subprocess seam the efficiency×quality benchmark drives — see
 [Dream Cycle: pluggable backends](../advanced/dream-cycle.md#pluggable-backends-llmdreamcycle-554).
 

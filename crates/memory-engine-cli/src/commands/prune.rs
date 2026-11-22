@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use memory_engine::ForgetPolicy;
+use memory_engine::PrunePolicy;
 use memory_engine::types::FactType;
 
 use crate::db::open_engine_writable;
@@ -48,8 +48,8 @@ fn parse_override(value: &str) -> Result<(FactType, f64), String> {
     Ok((fact_type, days))
 }
 
-fn policy(args: &PruneArgs) -> anyhow::Result<ForgetPolicy> {
-    let mut policy = ForgetPolicy::default();
+fn policy(args: &PruneArgs) -> anyhow::Result<PrunePolicy> {
+    let mut policy = PrunePolicy::default();
     let fields = [
         (args.half_life_days, &mut policy.half_life_days),
         (args.min_importance, &mut policy.min_importance),
@@ -82,7 +82,7 @@ pub async fn run(db: &Path, args: &PruneArgs, format: OutputFormat) -> anyhow::R
     // An invalid policy is refused before the store is touched.
     let policy = policy(args)?;
     let mut engine = open_engine_writable(db)?;
-    let stats = engine.forget(&policy).await?;
+    let stats = engine.prune(&policy).await?;
     engine.close().await?;
 
     match format {
@@ -119,9 +119,9 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_the_forget_policy_defaults() {
+    fn defaults_are_the_prune_policy_defaults() {
         let built = policy(&args(Vec::new())).unwrap();
-        let default = ForgetPolicy::default();
+        let default = PrunePolicy::default();
         assert_eq!(built.half_life_days, default.half_life_days);
         assert_eq!(built.min_importance, default.min_importance);
         assert!(built.half_life_overrides.is_empty());

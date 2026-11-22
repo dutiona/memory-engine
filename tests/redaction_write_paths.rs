@@ -126,9 +126,9 @@ const EXEMPT: &[(&str, &str)] = &[
         "unforget_fact",
         "reverses a forget; its record holds ids only",
     ),
-    ("forget", "decay pruning; no new text"),
+    ("prune", "decay pruning; no new text"),
     (
-        "impl:DreamCtx for EngineDreamCtx::forget",
+        "impl:DreamCtx for EngineDreamCtx::prune",
         "decay pruning; no new text",
     ),
     (

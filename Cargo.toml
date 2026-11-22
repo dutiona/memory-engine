@@ -8,7 +8,7 @@ members = [
     "crates/me-backend-sqlite",
     "crates/me-backend-postgres",
     "crates/me-test-support",
-    "crates/me-forget",
+    "crates/me-prune",
     "crates/me-resolve",
     "crates/me-ingest",
     "crates/me-query",

@@ -19,7 +19,7 @@ use memory_engine::redact::ScrubbingProposer;
 use memory_engine::{
     CycleOutcome, DefaultDreamCycle, DreamCycle, LlmDreamCycle, MemoryEngine, SkipReason,
 };
-use memory_engine_embed::HttpDeltaProposer;
+use memory_engine_embed::{HttpDeltaProposer, ProposerStats};
 
 use crate::commands::embedding_args::EmbeddingArgs;
 use crate::db::open_engine_writable;
@@ -92,6 +92,66 @@ fn require<'a>(value: Option<&'a String>, flag: &str) -> anyhow::Result<&'a str>
         .with_context(|| format!("--backend llm requires {flag}"))
 }
 
+/// Build the LLM backend (proposer + summary embedder), run it through the #209 guard and
+/// return the run's result with the proposer's token stats. Setup errors (missing flags,
+/// a client build, a foreign embedder) are `Err`; the run's own error is in the inner result.
+async fn run_llm(
+    engine: &MemoryEngine,
+    args: &ConsolidateArgs,
+) -> anyhow::Result<(anyhow::Result<CycleOutcome>, ProposerStats)> {
+    let llm_url = require(args.llm_url.as_ref(), "--llm-url")?.to_owned();
+    let llm_model = require(args.llm_model.as_ref(), "--llm-model")?.to_owned();
+    // The engine is already open in scope — use its dim rather than reopening
+    // the DB to re-read the config (per review).
+    let dim = engine.embed_dim();
+    let embed_args = args.embed.clone();
+    let timeout_secs = args.timeout_secs;
+
+    // Both the proposer and the embedder own a `reqwest::blocking::Client`.
+    // Building one spins up a temporary tokio runtime and then DROPS it; doing
+    // that on the `#[tokio::main]` executor thread panics ("cannot drop a
+    // runtime in a context where blocking is not allowed"). Build them on a
+    // blocking thread so neither construction nor the later drop ever touches
+    // the executor.
+    // Summary embedder: shared config (provider/MRL identity per #619). Required
+    // for the LLM backend — errors if --embed-url/--embed-model are absent.
+    let embedder = std::sync::Arc::new(
+        tokio::task::spawn_blocking(move || embed_args.build_required(dim))
+            .await
+            .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))??,
+    );
+    // The apply would refuse the summaries of a foreign embedder (#1062): refuse
+    // it before the LLM is called, as `query` does. A store with no identity yet passes
+    // here and is refused by the apply (#613). A refused embedder has sent no
+    // request, so dropping it here, on the executor, is safe (as in `query`).
+    engine
+        .verify_embedding_identity(&*embedder)
+        .await
+        .map_err(|e| anyhow::anyhow!("embedding identity check failed: {e}"))?;
+    let proposer = std::sync::Arc::new(
+        tokio::task::spawn_blocking(move || {
+            HttpDeltaProposer::new(llm_url, llm_model, None, timeout_secs)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("join error building proposer: {e}"))??,
+    );
+    // #1024: the cycle embeds its proposer's summaries, so they are scrubbed first.
+    let cycle = LlmDreamCycle::new(
+        std::sync::Arc::new(ScrubbingProposer(std::sync::Arc::clone(&proposer) as _)),
+        std::sync::Arc::clone(&embedder) as std::sync::Arc<dyn memory_engine::EmbeddingProvider>,
+    );
+    let result = run_with_drain(engine, &cycle).await;
+    // Snapshot token counters AFTER the run (a failed run still burned LLM
+    // calls — fail-loud accounting). `stats()` reads the live atomics.
+    let stats = proposer.stats();
+    // Drop every blocking-client owner — the cycle plus our retained handles —
+    // on a blocking thread, for the same runtime-drop reason as construction.
+    tokio::task::spawn_blocking(move || drop((cycle, proposer, embedder)))
+        .await
+        .map_err(|e| anyhow::anyhow!("join error dropping LLM backend: {e}"))?;
+    Ok((result, stats))
+}
+
 pub async fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::Result<()> {
     let mut engine = open_engine_writable(db)?;
     let start = Instant::now();
@@ -108,49 +168,7 @@ pub async fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> any
             (run_with_drain(&engine, &cycle).await, None)
         }
         BackendArg::Llm => {
-            let llm_url = require(args.llm_url.as_ref(), "--llm-url")?.to_owned();
-            let llm_model = require(args.llm_model.as_ref(), "--llm-model")?.to_owned();
-            // The engine is already open in scope — use its dim rather than reopening
-            // the DB to re-read the config (per review).
-            let dim = engine.embed_dim();
-            let embed_args = args.embed.clone();
-            let timeout_secs = args.timeout_secs;
-
-            // Both the proposer and the embedder own a `reqwest::blocking::Client`.
-            // Building one spins up a temporary tokio runtime and then DROPS it; doing
-            // that on the `#[tokio::main]` executor thread panics ("cannot drop a
-            // runtime in a context where blocking is not allowed"). Build them on a
-            // blocking thread so neither construction nor the later drop ever touches
-            // the executor.
-            let proposer = std::sync::Arc::new(
-                tokio::task::spawn_blocking(move || {
-                    HttpDeltaProposer::new(llm_url, llm_model, None, timeout_secs)
-                })
-                .await
-                .map_err(|e| anyhow::anyhow!("join error building proposer: {e}"))??,
-            );
-            // Summary embedder: shared config (provider/MRL identity per #619). Required
-            // for the LLM backend — errors if --embed-url/--embed-model are absent.
-            let embedder = std::sync::Arc::new(
-                tokio::task::spawn_blocking(move || embed_args.build_required(dim))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))??,
-            );
-            // #1024: the cycle embeds its proposer's summaries, so they are scrubbed first.
-            let cycle = LlmDreamCycle::new(
-                std::sync::Arc::new(ScrubbingProposer(std::sync::Arc::clone(&proposer) as _)),
-                std::sync::Arc::clone(&embedder)
-                    as std::sync::Arc<dyn memory_engine::EmbeddingProvider>,
-            );
-            let result = run_with_drain(&engine, &cycle).await;
-            // Snapshot token counters AFTER the run (a failed run still burned LLM
-            // calls — fail-loud accounting). `stats()` reads the live atomics.
-            let stats = proposer.stats();
-            // Drop every blocking-client owner — the cycle plus our retained handles —
-            // on a blocking thread, for the same runtime-drop reason as construction.
-            tokio::task::spawn_blocking(move || drop((cycle, proposer, embedder)))
-                .await
-                .map_err(|e| anyhow::anyhow!("join error dropping LLM backend: {e}"))?;
+            let (result, stats) = run_llm(&engine, args).await?;
             (result, Some(stats))
         }
     };

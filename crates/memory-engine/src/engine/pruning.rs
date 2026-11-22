@@ -1,9 +1,9 @@
-//! Forgetting and pinning operations for [`MemoryEngine`].
+//! Pruning and pinning operations for [`MemoryEngine`].
 
 use chrono::Utc;
 
 use crate::error::Result;
-use crate::forgetting::{ForgetPolicy, PruneStats};
+use crate::pruning::{PrunePolicy, PruneStats};
 
 use super::MemoryEngine;
 
@@ -17,7 +17,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::ReadOnly` if the engine was opened read-only.
     /// Returns `MemoryError::Conflict` if the policy is invalid.
     /// Returns `MemoryError::Storage` on SQL failure.
-    pub async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats> {
+    pub async fn prune(&self, policy: &PrunePolicy) -> Result<PruneStats> {
         self.ensure_open()?;
         // The prune walk reads the in-memory graph (degree per fact) *before* any
         // port write and mutates it (`remove_edges_by_fact`) *after* the expiries
@@ -27,11 +27,11 @@ impl MemoryEngine {
         // inside the backend's `expire_fact` (Stage B, #713), so the old engine-side
         // `notify_expire` loop is gone.
         let (stats, _pruned_ids) =
-            crate::forgetting::prune(self.mem_ctx(), &self.graph, policy, Utc::now()).await?;
+            crate::pruning::prune(self.mem_ctx(), &self.graph, policy, Utc::now()).await?;
         Ok(stats)
     }
 
-    /// Pin a fact (make it unforgettable).
+    /// Pin a fact (exempt it from pruning).
     ///
     /// # Errors
     ///
@@ -42,7 +42,7 @@ impl MemoryEngine {
         self.storage.set_fact_pinned(id, true).await
     }
 
-    /// Unpin a fact (allow forgetting).
+    /// Unpin a fact (allow pruning).
     ///
     /// # Errors
     ///

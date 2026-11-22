@@ -21,7 +21,7 @@ me-traits = { path = "../me-traits" }
 me-storage = { path = "../me-storage" }
 # `MemoryGraph`/`EdgeData` — `apply_cycle_report` mirrors supersede edges into the
 # in-memory graph, and the orchestration free fns thread `&RwLock<MemoryGraph>`
-# through from the facade, mirroring `me-consolidate`/`me-forget`/`me-resolve`.
+# through from the facade, mirroring `me-consolidate`/`me-prune`/`me-resolve`.
 me-index = { path = "../me-index" }
 async-trait = "0.1"
 chrono = "0.4"

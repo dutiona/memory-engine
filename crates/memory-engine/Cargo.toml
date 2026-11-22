@@ -37,9 +37,9 @@ me-backend-sqlite = { path = "../me-backend-sqlite" }
 # pulled only by `backend-postgres` — so a `backend-sqlite`-only build never compiles
 # `tokio-postgres`/`deadpool-postgres`.
 me-backend-postgres = { path = "../me-backend-postgres", optional = true }
-# L3 Forget primitive: Ebbinghaus decay + multi-signal importance pruning (Wave 2
-# #816 / S3, sub-PR 2). The facade re-exports it as `crate::forgetting`.
-me-forget = { path = "../me-forget" }
+# L3 Prune primitive: Ebbinghaus decay + multi-signal importance pruning (Wave 2
+# #816 / S3, sub-PR 2). The facade re-exports it as `crate::pruning`.
+me-prune = { path = "../me-prune" }
 # L3 Resolve primitive: bi-temporal arbiter-driven conflict resolution (Wave 2
 # #816 / S3, sub-PR 3). `MemoryEngine::resolve_conflict` delegates to it directly.
 me-resolve = { path = "../me-resolve" }
@@ -62,7 +62,7 @@ me-consolidate = { path = "../me-consolidate" }
 # L3 Cognitive primitive: Phase 5a `DreamCycle` orchestration (produce/apply split)
 # over `MemoryCtx` + the `DreamCtx` capability trait (Wave 2 #816 / S5, sub-PR 2,
 # closes #981). The facade re-exports it as `crate::cognitive` (the `pool`/`store`/
-# `graph`/`scope`/`archive`/`forgetting` alias convention); `impl DreamCtx for
+# `graph`/`scope`/`archive`/`pruning` alias convention); `impl DreamCtx for
 # MemoryEngine` and the four thin delegates it needs stay in
 # `engine/cognitive.rs`.
 me-cognitive = { path = "../me-cognitive" }

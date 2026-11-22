@@ -1,6 +1,6 @@
 # Graph Relationships
 
-memory-engine maintains a knowledge graph where facts are nodes and edges represent typed relationships between them. The graph is used for importance scoring (during forgetting), connected component analysis, and traversal queries.
+memory-engine maintains a knowledge graph where facts are nodes and edges represent typed relationships between them. The graph is used for importance scoring (during pruning), connected component analysis, and traversal queries.
 
 ## Architecture
 
@@ -23,7 +23,7 @@ Edges are produced by three processes -- two internal and one consumer-triggered
 
 Co-session edges have weight `0.5` (strong enough to influence importance scoring, weaker than explicit semantic relationships) and `scope_id = 1` (root scope, since co-session is cross-scope by nature). The method is idempotent -- calling it twice for the same session does not create duplicate edges.
 
-The optional `scope` parameter restricts the lookup to facts within a scope subtree. When `None`, all scopes are included (global lookup). This matters in multi-tenant deployments where different scopes might reuse session IDs (e.g., `user:alice/session:1` and `user:bob/session:1`): without scope filtering, unrelated facts could be linked, and those edges influence `graph_degree` in importance scoring (`forget()`), meaning one tenant's session could change pruning decisions for another. Passing `Some("user:alice")` prevents this cross-scope contamination. (See [issue #73](https://github.com/dutiona/memory-engine/issues/73), identified during [PR #67 review](https://github.com/dutiona/memory-engine/pull/67#discussion_r2957128940).)
+The optional `scope` parameter restricts the lookup to facts within a scope subtree. When `None`, all scopes are included (global lookup). This matters in multi-tenant deployments where different scopes might reuse session IDs (e.g., `user:alice/session:1` and `user:bob/session:1`): without scope filtering, unrelated facts could be linked, and those edges influence `graph_degree` in importance scoring (`prune()`), meaning one tenant's session could change pruning decisions for another. Passing `Some("user:alice")` prevents this cross-scope contamination. (See [issue #73](https://github.com/dutiona/memory-engine/issues/73), identified during [PR #67 review](https://github.com/dutiona/memory-engine/pull/67#discussion_r2957128940).)
 
 ```rust
 // Global lookup (backward-compatible):
@@ -34,7 +34,7 @@ let new_edges = engine.link_session_facts("session-abc-123", Some("user:alice"))
 println!("Created {new_edges} co-session edges");
 ```
 
-The consumer calls `link_session_facts()` after completing a session's fact ingestion. This follows the existing pattern where `consolidate()` and `forget()` are also consumer-triggered.
+The consumer calls `link_session_facts()` after completing a session's fact ingestion. This follows the existing pattern where `consolidate()` and `prune()` are also consumer-triggered.
 
 ## The `Edge` and `NewEdge` structs
 
@@ -87,7 +87,7 @@ All graph methods take `&self` and are thread-safe (the graph is behind an `RwLo
 
 ### `graph_degree(fact_id) -> usize`
 
-Returns the total degree (in-edges + out-edges) for a fact. Returns 0 if the fact is not in the graph. This is used internally by the forgetting system -- highly connected facts get a higher importance score and are less likely to be pruned.
+Returns the total degree (in-edges + out-edges) for a fact. Returns 0 if the fact is not in the graph. This is used internally by the decay prune -- highly connected facts get a higher importance score and are less likely to be pruned.
 
 ```rust
 let degree = engine.graph_degree(fact_id);
@@ -135,13 +135,13 @@ Edges follow the same soft-delete pattern as facts:
 - **Active**: `t_expired IS NULL` -- the edge is in the in-memory graph and participates in queries.
 - **Expired**: `t_expired IS NOT NULL` -- the edge is removed from the in-memory graph but remains in SQLite for audit.
 
-When a fact is expired (by forgetting or conflict resolution), all edges involving that fact are also expired. The in-memory graph is updated to reflect this within the same write lock.
+When a fact is expired (by pruning or conflict resolution), all edges involving that fact are also expired. The in-memory graph is updated to reflect this within the same write lock.
 
 On engine reopen, `MemoryGraph::load_from_db` rebuilds the in-memory graph from only the active edges. Expired edges are not loaded.
 
-## Graph-aware forgetting
+## Graph-aware pruning
 
-The forgetting system uses graph connectivity as one of four signals for computing a fact's importance:
+The decay prune uses graph connectivity as one of four signals for computing a fact's importance:
 
 ```
 importance = recency * decay
@@ -150,4 +150,4 @@ importance = recency * decay
            + base * fact.base_importance
 ```
 
-High-degree facts (many connections) are more resistant to pruning. This prevents the forgetting system from removing facts that serve as important connectors in the knowledge graph.
+High-degree facts (many connections) are more resistant to pruning. This prevents the decay prune from removing facts that serve as important connectors in the knowledge graph.

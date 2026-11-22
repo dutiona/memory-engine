@@ -17,7 +17,7 @@ graph TB
         add_fact["add_fact() / add_fact_deferred()"]
         query["query()"]
         consolidate["consolidate()"]
-        forget["forget()"]
+        prune["prune()"]
         resolve["resolve_conflict()"]
         resume["resume_context()"]
     end
@@ -62,8 +62,8 @@ graph TB
     strategy --> vec
     consolidate --> summary
     consolidate --> facts
-    forget --> graph
-    forget --> facts
+    prune --> graph
+    prune --> facts
     resolve --> arbiter
     resume --> facts
 
@@ -108,7 +108,7 @@ Concurrency is provided by four mechanisms:
 
 1. **`Arc<dyn StorageBackend>`** -- All persistence flows through the storage port. The default `SqliteBackend` owns the `ConnectionPool` (N SQLite reader connections, default 4, behind a semaphore + 1 exclusive writer connection behind a `parking_lot::Mutex`; readers use SQLite WAL mode for concurrent access without blocking writes) and offloads every blocking SQLite call onto the tokio blocking pool via `spawn_blocking`, so synchronous DB work never stalls the async executor. In read-only mode (`EngineConfig::read_only`), the writer slot holds a read-only connection and `try_write()` returns `MemoryError::ReadOnly`.
 
-2. **RwLock\<MemoryGraph\>** -- The in-memory petgraph is behind a `parking_lot::RwLock`. Read operations (`graph_degree`, `graph_neighbors`, etc.) take a shared read lock; mutations (conflict resolution, forgetting, consolidation) take an exclusive write lock. The lock is **never held across an `.await`** -- the guard is scoped tightly around the synchronous in-memory access.
+2. **RwLock\<MemoryGraph\>** -- The in-memory petgraph is behind a `parking_lot::RwLock`. Read operations (`graph_degree`, `graph_neighbors`, etc.) take a shared read lock; mutations (conflict resolution, pruning, consolidation) take an exclusive write lock. The lock is **never held across an `.await`** -- the guard is scoped tightly around the synchronous in-memory access.
 
 3. **RwLock\<ScopeTree\>** -- The hierarchical scope tree is behind a separate `RwLock`, with the same never-across-`.await` discipline. Scope resolution during queries takes a read lock; scope creation during `add_fact` takes a write lock.
 
@@ -143,7 +143,7 @@ The module boxes in the diagrams above describe the _logical_ layering; Wave 2 (
 graph TD
     facade["memory-engine (L4 facade)"]
     subgraph L3["L3 — primitives"]
-        prims["me-ingest · me-query · me-consolidate<br/>me-forget · me-resolve · me-archive"]
+        prims["me-ingest · me-query · me-consolidate<br/>me-prune · me-resolve · me-archive"]
     end
     subgraph L2["L2 — backends + projections"]
         backends["me-backend-sqlite · me-backend-postgres · me-index"]
@@ -184,7 +184,7 @@ Two gates are relocated verbatim from `engine::mod` onto the handle:
 
 **Universal borrow-bundle + loose extras.** The handle deliberately does _not_ carry every capability a primitive might use. Per-primitive extras — `graph`, `scope_tree`, `reranker`, `cold`, `db_path` — are passed as **explicit loose parameters**, so each free-fn signature _declares_ exactly which extra capabilities it uses (ADR 0018 decision #3). This keeps the universal handle small and makes each primitive's capability set greppable from its signature.
 
-`MemoryCtx` is homed in `me-storage` (L1), not the facade and not a separate `me-ctx` crate, because its load-bearing field is the storage port — it is _about_ storage access. It is **defined in S1**; the L3 primitive crates (me-ingest / me-query / me-consolidate / me-forget / me-resolve / me-archive) **consume it in S3/S4**.
+`MemoryCtx` is homed in `me-storage` (L1), not the facade and not a separate `me-ctx` crate, because its load-bearing field is the storage port — it is _about_ storage access. It is **defined in S1**; the L3 primitive crates (me-ingest / me-query / me-consolidate / me-prune / me-resolve / me-archive) **consume it in S3/S4**.
 
 ## Data Flow
 
@@ -200,7 +200,7 @@ The core data flow follows an event-sourced pattern:
 
 4. **Consolidate** -- Three-pass memory compression: (1) local dedup merges near-duplicates by embedding cosine similarity, (2) cluster fusion groups related facts into thematic summaries, (3) global integration produces high-level summaries. All three passes run in a single SQLite transaction.
 
-5. **Forget** -- Ebbinghaus decay with multi-signal importance scoring. Each fact's importance is computed as a weighted sum of recency (exponential decay), access frequency, graph connectivity, and base importance. Facts below the threshold are soft-deleted (`t_expired` set).
+5. **Prune** -- Ebbinghaus decay with multi-signal importance scoring. Each fact's importance is computed as a weighted sum of recency (exponential decay), access frequency, graph connectivity, and base importance. Facts below the threshold are soft-deleted (`t_expired` set).
 
 6. **Resolve Conflict** -- When the consumer detects contradicting facts, it calls `resolve_conflict` with a `ConflictArbiter`. The arbiter returns a CRUD decision (Add, Update, Delete, Noop). Mutations are atomic; the graph is updated only after the transaction commits.
 
@@ -210,7 +210,7 @@ Session bootstrapping uses 4-tier retrieval to populate the agent's context wind
 
 | Tier                | Source          | Selection Criteria                                                           |
 | ------------------- | --------------- | ---------------------------------------------------------------------------- |
-| **Pinned**          | Cross-scope     | Unforgettable facts (`is_pinned = true`), sorted by `importance_score` desc. |
+| **Pinned**          | Cross-scope     | Facts never pruned (`is_pinned = true`), sorted by `importance_score` desc. |
 | **High-importance** | Scope ancestors | Facts with materialized `importance_score` above a configurable threshold.   |
 | **Due**             | Scope ancestors | Future-memory facts whose `t_valid` has arrived (`t_valid <= now`).          |
 | **Recent**          | Scope ancestors | Most recently created facts. Current working context.                        |

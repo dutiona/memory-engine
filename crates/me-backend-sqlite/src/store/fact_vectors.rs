@@ -264,6 +264,9 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
     .map_err(StorageError::backend)?;
     tx.execute("DELETE FROM embed_queue", [])
         .map_err(StorageError::backend)?;
+    // Every vector is new (#1080): dedup compares every fact again, and a plan computed in
+    // the old space is discarded.
+    crate::store::facts::rewind_dedup_watermark(&tx, 1)?;
 
     tx.commit().map_err(StorageError::backend)?;
 

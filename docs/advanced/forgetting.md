@@ -2,9 +2,9 @@
 
 **Status: Implemented**
 
-The forgetting system prunes stale facts using Ebbinghaus decay combined with multi-signal importance scoring. Facts scoring below a configurable threshold are soft-deleted. This keeps the active fact store bounded without losing history.
+The decay prune expires stale facts using Ebbinghaus decay combined with multi-signal importance scoring. Facts scoring below a configurable threshold are soft-deleted. This keeps the active fact store bounded without losing history.
 
-This is the decay prune (`MemoryEngine::forget`, the CLI's `prune`). The model's `forget` tool is a different
+This is the decay prune (`MemoryEngine::prune`, the CLI's `prune`). The model's `forget` tool is a different
 operation: a retraction behind a tombstone (#1023), reversed only by `memory-engine-cli unforget`.
 
 ## Importance Scoring
@@ -58,12 +58,12 @@ connectivity = ln(degree + 1) / ln(51)
 
 The `fact.base_importance` field, set at insertion time (default 0.5, configurable via `AddFactOptions`). Already in [0, 1].
 
-## ForgetPolicy
+## PrunePolicy
 
-All parameters are configurable through the `ForgetPolicy` struct:
+All parameters are configurable through the `PrunePolicy` struct:
 
 ```rust
-pub struct ForgetPolicy {
+pub struct PrunePolicy {
     pub half_life_days: f64,           // default: 69.0
     pub half_life_overrides: HashMap<FactType, f64>,
     pub min_importance: f64,           // default: 0.1
@@ -74,7 +74,7 @@ pub struct ForgetPolicy {
 }
 ```
 
-`ForgetPolicy` is a struct, not a trait. It represents a parameter set (policy), not a pluggable strategy.
+`PrunePolicy` is a struct, not a trait. It represents a parameter set (policy), not a pluggable strategy.
 
 ### Per-FactType Half-Life Overrides
 
@@ -83,15 +83,15 @@ Different fact types can have different decay rates. Episodic memories (conversa
 ```rust
 use std::collections::HashMap;
 use memory_engine::types::FactType;
-use memory_engine::ForgetPolicy;
+use memory_engine::PrunePolicy;
 
 let mut overrides = HashMap::new();
 overrides.insert(FactType::Episodic, 30.0);     // 30-day half-life
 overrides.insert(FactType::Procedural, 365.0);  // 1-year half-life
 
-let policy = ForgetPolicy {
+let policy = PrunePolicy {
     half_life_overrides: overrides,
-    ..ForgetPolicy::default()
+    ..PrunePolicy::default()
 };
 ```
 
@@ -99,23 +99,23 @@ Facts with a type not in the override map use `half_life_days` (default 69 days)
 
 ### Validation
 
-`ForgetPolicy::validate()` checks all parameters before pruning begins:
+`PrunePolicy::validate()` checks all parameters before pruning begins:
 
 - `half_life_days` must be > 0
 - All `half_life_overrides` values must be > 0
 - `min_importance` must be in [0, 1]
 - All weights must be >= 0
 
-Returns `MemoryError::Conflict` on invalid parameters. The `forget()` method calls `validate()` automatically.
+Returns `MemoryError::Conflict` on invalid parameters. The `prune()` method calls `validate()` automatically.
 
 ## Pruning Process
 
 ```rust
-let policy = ForgetPolicy {
+let policy = PrunePolicy {
     min_importance: 0.3,
-    ..ForgetPolicy::default()
+    ..PrunePolicy::default()
 };
-let stats = engine.forget(&policy)?;
+let stats = engine.prune(&policy)?;
 ```
 
 The pruning process:
@@ -142,7 +142,7 @@ pub struct PruneStats {
 
 ## Edge Cascade
 
-When a fact is expired by the forgetting system, all edges involving that fact (both as source and target) are also expired in SQLite and removed from the in-memory graph:
+When a fact is expired by the decay prune, all edges involving that fact (both as source and target) are also expired in SQLite and removed from the in-memory graph:
 
 ```rust
 for &fact_id in &to_expire {

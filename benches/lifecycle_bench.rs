@@ -1,4 +1,4 @@
-//! Criterion benchmarks for lifecycle operations (consolidate, forget, ingest).
+//! Criterion benchmarks for lifecycle operations (consolidate, prune, ingest).
 //!
 //! These benchmarks measure the core write-path primitives at various corpus
 //! sizes to track performance regressions and validate scaling behavior.
@@ -7,7 +7,7 @@
 //!
 //! ```bash
 //! cargo bench -- consolidation              # consolidation only
-//! cargo bench -- forgetting                 # forget only
+//! cargo bench -- pruning                    # prune only
 //! cargo bench -- add_fact_single            # single ingest
 //! cargo bench -- add_facts_batch            # batch ingest
 //! cargo bench -- --save-baseline v0.1.0     # save named baseline
@@ -20,7 +20,7 @@
 //! - `ConstEmbedder` mirrors `search_bench.rs` for consistency.
 //! - `ConcatSummaryGenerator` joins fact content and produces a constant
 //!   embedding — no LLM cost, deterministic output.
-//! - `consolidate()` and `forget()` are idempotent — `iter_with_setup`
+//! - `consolidate()` and `prune()` are idempotent — `iter_with_setup`
 //!   creates a fresh engine per iteration to measure actual work, not no-ops.
 
 #![allow(clippy::unwrap_used)] // test/bench code: panic-on-unwrap is the intended failure signal (#725)
@@ -28,7 +28,7 @@
 use chrono::{Duration, Utc};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use memory_engine::EmbeddingFingerprint;
-use memory_engine::ForgetPolicy;
+use memory_engine::PrunePolicy;
 use memory_engine::engine::MemoryEngine;
 use memory_engine::traits::{
     ConsolidationConfig, EmbeddingProvider, SummarizableContent, SummaryGenerator,
@@ -132,9 +132,9 @@ fn setup_engine(rt: &tokio::runtime::Runtime, n: usize) -> (MemoryEngine, tempfi
 }
 
 /// Create a file-backed engine with `n` old, low-importance facts that will
-/// actually be expired by `forget()`. Without this, fresh high-importance facts
+/// actually be expired by `prune()`. Without this, fresh high-importance facts
 /// all survive and the benchmark only measures scan overhead.
-fn setup_forgettable_engine(
+fn setup_prunable_engine(
     rt: &tokio::runtime::Runtime,
     n: usize,
 ) -> (MemoryEngine, tempfile::TempDir) {
@@ -230,11 +230,11 @@ fn bench_consolidation(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// Forgetting benchmark
+// Pruning benchmark
 // ---------------------------------------------------------------------------
 
-fn bench_forgetting(c: &mut Criterion) {
-    let mut group = c.benchmark_group("forgetting");
+fn bench_pruning(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pruning");
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     for &size in &[100, 1_000, 5_000, 10_000, 50_000] {
@@ -243,14 +243,14 @@ fn bench_forgetting(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &n| {
             b.iter_with_setup(
-                || setup_forgettable_engine(&rt, n),
+                || setup_prunable_engine(&rt, n),
                 |(engine, _dir)| {
-                    let policy = ForgetPolicy {
+                    let policy = PrunePolicy {
                         min_importance: 0.3,
                         ..Default::default()
                     };
                     rt.block_on(async {
-                        engine.forget(&policy).await.unwrap();
+                        engine.prune(&policy).await.unwrap();
                     });
                 },
             );
@@ -352,7 +352,7 @@ fn bench_add_facts_batch(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_consolidation,
-    bench_forgetting,
+    bench_pruning,
     bench_add_fact_single,
     bench_add_facts_batch
 );

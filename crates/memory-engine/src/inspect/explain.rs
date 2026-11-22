@@ -10,7 +10,7 @@ pub fn determine_state(fact: &Fact, now: DateTime<Utc>) -> FactState {
     // Priority: Expired > Invalidated > Pinned > Due > Active
     if fact.t_expired.is_some() {
         // A DreamCycle quarantine leaves a `quarantine` metadata marker, letting us
-        // distinguish it from ordinary Ebbinghaus forgetting.
+        // distinguish it from decay pruning.
         let reason = if fact.metadata.get("quarantine").is_some() {
             ExpiredReason::Quarantined
         } else {

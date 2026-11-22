@@ -1,7 +1,7 @@
 # ADR 0018: Wave 2 — per-concern crate decomposition + `MemoryCtx`
 
 **Status:** Accepted (Wave 2, #816). S1 (keystone + L0/L0.5/L1 leaves) and S2 (backends +
-projections: `me-index`, `me-backend-sqlite`, `me-backend-postgres`) landed; S3–S6 pending.
+projections: `me-index`, `me-backend-sqlite`, `me-backend-postgres`) landed; S3–S6 pending; amended 2026-11-22 (dutiona/memory-engine#1089: the decay prune is renamed prune).
 **Date:** 2026-07-01
 
 ## Context
@@ -295,3 +295,13 @@ The value is real *then*, and the design below is build-not-research by that poi
 - Epic: [memory-engine#816](https://github.com/dutiona/memory-engine/issues/816).
 - Predecessor: Wave 1 (#814). Builds on the `Arc<dyn StorageBackend>` port (#628/#631).
 - Follow-up: `rusqlite`-off-`me-types` decoupling ([#926](https://github.com/dutiona/memory-engine/issues/926)).
+
+## Amendment (2026-11-22, #1089)
+
+The decay prune is now named `prune` (dutiona/memory-engine#1089); `forget` names only the retraction. This record keeps the names of its time:
+
+| Then | Now |
+|---|---|
+| `ForgetPolicy` | `PrunePolicy` |
+| `me-forget` | `me-prune` |
+| `types::forgetting` | `types::pruning` |

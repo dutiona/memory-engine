@@ -1,6 +1,6 @@
 # ADR-0005: Three-Pass Consolidation Pipeline
 
-**Status:** Accepted
+**Status:** Accepted; amended 2026-11-22 (dutiona/memory-engine#1089: the decay prune is renamed prune)
 **Date:** 2026-03-10
 **Amended by:** [ADR-0021](0021-memory-scope-model.md) (in the memory service, passes 2 and 3 summarize only within one visibility meet of their sources, never across the entire store)
 
@@ -54,3 +54,11 @@ After consolidation, the in-memory graph is rebuilt from SQLite to keep degree-b
 - Consumers who want dedup-only can set `min_cluster_size` to a very large value, effectively skipping Passes 2 and 3.
 - The O(N^2) dedup can be optimized with locality-sensitive hashing or ANN pre-filtering in a future phase, gated by benchmarks.
 - The `last_consolidated_at` config key tracks the most recent consolidation timestamp. Incremental consolidation (only facts since last run) is supported, bounding the working set.
+
+## Amendment (2026-11-22, #1089)
+
+The decay prune is now named `prune` (dutiona/memory-engine#1089); `forget` names only the retraction. This record keeps the names of its time:
+
+| Then | Now |
+|---|---|
+| `forget()` (the decay prune) | `prune()` |

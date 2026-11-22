@@ -36,7 +36,7 @@ Every interaction enters the system through an append-only event log (`EventStor
 
 ## Soft Deletion **{Implemented}**
 
-Facts are expired by setting `t_expired`, never hard-deleted. This applies to forgetting (Ebbinghaus decay), the model's `forget` retraction, conflict resolution (superseded facts), and deduplication (consolidation). The exceptions are deliberate: archival moves expired facts into a `.pak`, and `memory-engine-cli erase` (#1023) is the one operator command that deletes.
+Facts are expired by setting `t_expired`, never hard-deleted. This applies to pruning (Ebbinghaus decay), the model's `forget` retraction, conflict resolution (superseded facts), and deduplication (consolidation). The exceptions are deliberate: archival moves expired facts into a `.pak`, and `memory-engine-cli erase` (#1023) is the one operator command that deletes.
 
 **Rationale:** Graphiti's bi-temporal model requires full history for temporal reasoning. Hard deletion destroys audit trails and makes it impossible to answer "what did the agent believe at time T?" Soft deletion also makes undo trivial (clear `t_expired`).
 
@@ -98,11 +98,11 @@ Scopes form a tree (not a flat namespace). Scope paths like `"user:michael/proje
 
 ---
 
-## Unforgettable Facts
+## Pinned facts are never pruned
 
-An `is_pinned: bool` flag on facts, with a `PersistenceClassifier` trait hook that lets the consumer decide which facts should never be forgotten.
+An `is_pinned: bool` flag on facts, with a `PersistenceClassifier` trait hook that lets the consumer decide which facts should never be pruned.
 
-**Rationale:** Identity facts ("the user's name is Michael", "this agent runs on Mac Mini M4") must survive all forgetting cycles. Without pinning, the Ebbinghaus decay curve would eventually expire them if they are not accessed frequently enough.
+**Rationale:** Identity facts ("the user's name is Michael", "this agent runs on Mac Mini M4") must survive every prune. Without pinning, the Ebbinghaus decay curve would eventually expire them if they are not accessed frequently enough.
 
 **Design:** The `PersistenceClassifier::should_pin(&ClassifierInput) -> bool` trait lets the consumer use LLM-based classification, rule-based logic, or a combination.
 

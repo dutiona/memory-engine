@@ -9,7 +9,7 @@
 //!
 //! ADR 0014 (Accepted, Phase 5a, #49) decision #3 designed a **capability bag**
 //! (`DreamContext`, a struct narrowing `&MemoryEngine` to query/list/consolidate/
-//! forget/promote/`list_undreamt_in_period`/`outcome_counts*`) that `CycleContext`
+//! prune/promote/`list_undreamt_in_period`/`outcome_counts*`) that `CycleContext`
 //! wrapped **by composition**, explicitly to preserve it. S1 of this epic re-typed
 //! `DreamCycle::run` from a concrete `&CycleContext` to `&dyn CycleCtx` — necessary so
 //! `me-traits` (L0.5) never names the engine/consolidation type that owns the cycle's
@@ -66,7 +66,7 @@
 //! **Never `impl DreamCtx for T` when `T` has inherent methods sharing those names.**
 //!
 //! Five of `DreamCtx`'s nine method names collide with inherent `MemoryEngine` methods
-//! (`query`, `list_active_facts`, `get_fact`, `consolidate`, `forget`). In such an impl
+//! (`query`, `list_active_facts`, `get_fact`, `consolidate`, `prune`). In such an impl
 //! the body must call the same-named inherent method on `self`; Rust resolves
 //! inherent-before-trait, so it works — **only while that inherent method keeps its
 //! name**. Rename it and the call silently re-resolves to *the trait method being

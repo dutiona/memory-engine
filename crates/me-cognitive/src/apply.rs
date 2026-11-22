@@ -33,7 +33,12 @@ use me_types::types::cycle_report::{ApplyResult, CycleReport};
 /// # Errors
 ///
 /// - [`MemoryError::ReadOnly`](me_types::error::MemoryError::ReadOnly) if the engine is read-only.
-/// - [`MemoryError::Cycle`](me_types::error::MemoryError::Cycle) if any delta fails validation.
+/// - [`MemoryError::Cycle`](me_types::error::MemoryError::Cycle) if any delta fails validation,
+///   including [`CycleError::UndeclaredEmbedding`](me_types::error::CycleError::UndeclaredEmbedding)
+///   when an `AddFact`/`Synthesize` vector comes in a report whose `embedding_fingerprint`
+///   is `None`.
+/// - [`MemoryError::EmbeddingModelMismatch`](me_types::error::MemoryError::EmbeddingModelMismatch)
+///   if the report declares another embedding identity than the store's.
 /// - [`MemoryError::EmbeddingDimension`](me_types::error::MemoryError::EmbeddingDimension) if an
 ///   `AddFact`/`Promote`/`Synthesize` embedding does not match the engine dimension.
 /// - [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a backend failure.
@@ -84,9 +89,14 @@ mod tests {
     use crate::test_support::TestEngine;
     use me_types::error::{CycleError, MemoryError};
     use me_types::types::cycle_report::{CycleDelta, CycleMetadata, IdentityOutput, TimeWindow};
-    use me_types::types::{FactType, NewFact, Outcome, PromotionProvenance};
+    use me_types::types::{EmbeddingFingerprint, FactType, NewFact, Outcome, PromotionProvenance};
 
     const DIM: usize = 4;
+
+    /// The identity [`TestEngine::stamp_identity`] records.
+    fn stamped() -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", DIM)
+    }
 
     async fn engine() -> TestEngine {
         let engine = TestEngine::new(DIM).await;
@@ -122,6 +132,7 @@ mod tests {
             deltas,
             identity: IdentityOutput::empty(),
             metadata: meta(processed),
+            embedding_fingerprint: Some(Box::new(stamped())),
         }
     }
 
@@ -934,7 +945,7 @@ mod tests {
 
     /// A client-supplied report (from outside the engine) must not bypass the
     /// importance guard the trusted `add_fact` path enforces: an out-of-range
-    /// `importance` would otherwise persist (no column CHECK) and poison decay/forget
+    /// `importance` would otherwise persist (no column CHECK) and poison decay/prune
     /// ranking. The whole report is rejected and nothing is written.
     #[tokio::test]
     async fn add_fact_out_of_range_importance_rejected() {
@@ -1067,5 +1078,90 @@ mod tests {
             MemoryError::Cycle(CycleError::UnknownFact(999_999))
         ));
         assert!((importance_of(&engine, id).await - before).abs() < 1e-9);
+    }
+
+    /// The whole report is refused before any write: no fact added, the sources still
+    /// active, the window not marked.
+    async fn assert_nothing_written(engine: &TestEngine, sources: &[i64]) {
+        let facts = engine.storage.list_all_facts().await.unwrap();
+        assert_eq!(facts.len(), sources.len(), "no fact added");
+        assert!(
+            facts.iter().all(|f| f.t_expired.is_none()),
+            "sources active"
+        );
+        assert!(
+            engine
+                .storage
+                .get_config("last_dream_cycle_at")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_vector_is_refused_and_nothing_is_written() {
+        let engine = engine().await;
+        let s1 = engine.add("source one").await;
+        let s2 = engine.add("source two").await;
+        for delta in [
+            CycleDelta::AddFact(synthetic("derived")),
+            CycleDelta::Synthesize {
+                sources: vec![s1, s2],
+                new_fact: synthetic("merged"),
+            },
+        ] {
+            let undeclared = CycleReport {
+                embedding_fingerprint: None,
+                ..report(vec![delta], vec![s1, s2])
+            };
+            let err = apply(&engine, &undeclared).await.unwrap_err();
+            assert!(
+                matches!(err, MemoryError::Cycle(CycleError::UndeclaredEmbedding)),
+                "{err:?}"
+            );
+            assert_nothing_written(&engine, &[s1, s2]).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_vector_declared_under_another_identity_is_refused() {
+        let engine = engine().await;
+        let s1 = engine.add("source one").await;
+        let other = EmbeddingFingerprint::new("nomic-embed-text", "ollama", DIM);
+        let foreign = CycleReport {
+            embedding_fingerprint: Some(Box::new(other)),
+            ..report(
+                vec![CycleDelta::Synthesize {
+                    sources: vec![s1],
+                    new_fact: synthetic("merged"),
+                }],
+                vec![s1],
+            )
+        };
+        let err = apply(&engine, &foreign).await.unwrap_err();
+        assert!(
+            matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+            "{err:?}"
+        );
+        assert_nothing_written(&engine, &[s1]).await;
+    }
+
+    #[tokio::test]
+    async fn a_report_without_vectors_needs_no_identity() {
+        let engine = engine().await;
+        let id = engine.add("f").await;
+        let vectorless = CycleReport {
+            embedding_fingerprint: None,
+            ..report(
+                vec![CycleDelta::AdjustScore {
+                    fact_id: id,
+                    adjustment: 2,
+                }],
+                vec![id],
+            )
+        };
+        let res = apply(&engine, &vectorless).await.unwrap();
+        assert_eq!(res.scores_adjusted, 1);
     }
 }

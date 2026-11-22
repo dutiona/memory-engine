@@ -26,7 +26,7 @@ pub struct SnapshotHeader {
 /// Catches inserts (`max_*_id` changes), soft-deletes (`active_*_count`
 /// changes) and a vector filled in for a fact that waited for one
 /// (`vectorless_fact_count`). **Not** based on the `events` table — many mutators
-/// (`add_fact`, `forget`, `consolidate`, `link_session_facts`) modify
+/// (`add_fact`, `prune`, `consolidate`, `link_session_facts`) modify
 /// `facts`/`edges`/`scopes` without appending an event.
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DbFingerprint {

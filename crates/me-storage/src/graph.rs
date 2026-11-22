@@ -453,7 +453,7 @@ pub trait FactGraph: Send + Sync {
     /// Atomically materialize importance scores for the active set and expire the
     /// sub-threshold facts (cascading edge expiry) in a single transaction.
     ///
-    /// This is the write phase of `forgetting::policy::prune` (the importance sweep)
+    /// This is the write phase of `pruning::policy::prune` (the importance sweep)
     /// moved below the seam. Scoring reads in-memory graph degrees, so it stays
     /// engine-side; the engine passes the precomputed `scored` pairs (one `(id,
     /// score)` per active fact) and the `to_expire` subset that fell below the
@@ -476,7 +476,7 @@ pub trait FactGraph: Send + Sync {
         scored: &[(i64, f64)],
         to_expire: &[i64],
         now: DateTime<Utc>,
-    ) -> Result<(me_types::types::forgetting::PruneStats, Vec<i64>)>;
+    ) -> Result<(me_types::types::pruning::PruneStats, Vec<i64>)>;
 
     // -------------------------------------------------------------------------
     // Bootstrap batch ingest — the transactional envelope behind BOTH bootstrap

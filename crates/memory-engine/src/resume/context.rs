@@ -93,7 +93,7 @@ impl ResumeConfig {
 /// Result of [`MemoryEngine::resume_context`](crate::MemoryEngine::resume_context).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResumeContext {
-    /// Pinned (unforgettable) facts — agent identity, core beliefs.
+    /// Pinned (never pruned) facts — agent identity, core beliefs.
     pub pinned: Vec<Fact>,
     /// High-importance facts by materialized score.
     pub high_importance: Vec<Fact>,

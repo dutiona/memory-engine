@@ -5,10 +5,10 @@ use me_index::graph::MemoryGraph;
 use me_storage::MemoryCtx;
 use me_types::error::Result;
 use me_types::types::FactScoringRow;
-use me_types::types::forgetting::PruneStats;
+use me_types::types::pruning::PruneStats;
 use me_types::types::{Fact, FactType};
 
-use crate::ForgetPolicy;
+use crate::PrunePolicy;
 
 /// Argument to `ln()` for access-frequency normalization: 100 + 1.
 /// Gives `ln(101)` as the divisor so that 100 accesses produce a full score of 1.0.
@@ -28,7 +28,7 @@ const CONNECTIVITY_NORMALIZATION_ARG: f64 = 51.0;
 /// outside the stated `[0, 1]` retention range **without panicking** (e.g.
 /// `ebbinghaus_decay(0.0, 0.0)` is `-0.0 / 0.0 = NaN`; a negative `half_life`
 /// yields a value above `1.0`). When reached through [`prune`], this is
-/// guaranteed by [`ForgetPolicy::validate`]. Direct callers own the precondition.
+/// guaranteed by [`PrunePolicy::validate`]. Direct callers own the precondition.
 #[must_use]
 pub fn ebbinghaus_decay(age_days: f64, half_life: f64) -> f64 {
     f64::exp2(-age_days / half_life)
@@ -93,7 +93,7 @@ impl ImportanceInputs for FactScoringRow {
 ///
 /// The result therefore lies in `[0, sum_of_weights]`, **not** `[0, 1]` in
 /// general (the four weights need not sum to 1.0 — see ADR-0006). For
-/// [`ForgetPolicy::default`] the weights sum to `1.0`, so the default-policy
+/// [`PrunePolicy::default`] the weights sum to `1.0`, so the default-policy
 /// score is in `[0, 1]`.
 ///
 /// # Precondition
@@ -103,13 +103,13 @@ impl ImportanceInputs for FactScoringRow {
 /// precondition [`ebbinghaus_decay`] carries, since the recency term delegates
 /// to it. A non-positive or `NaN` half-life propagates `NaN` into the score
 /// **without panicking**. When reached through [`prune`], this is guaranteed by
-/// [`ForgetPolicy::validate`]; direct callers own the precondition.
+/// [`PrunePolicy::validate`]; direct callers own the precondition.
 #[must_use]
 pub fn compute_importance(
     fact: &impl ImportanceInputs,
     graph_degree: usize,
     now: DateTime<Utc>,
-    policy: &ForgetPolicy,
+    policy: &PrunePolicy,
 ) -> f64 {
     // Knowledge-shaped types don't lose validity with age: recency stays 1.0.
     // An explicit half-life override wins and re-enables decay.
@@ -151,7 +151,7 @@ pub fn compute_importance(
 /// fact against the in-memory graph degree, expires the sub-threshold unpinned /
 /// non-exempt set atomically below the seam ([`me_storage::FactGraph::prune_atomic`]), then
 /// reconciles the in-memory graph. Pinned facts and decay-exempt fact types are
-/// unforgettable — they still get a materialized score but bypass the expiry filter.
+/// never pruned — they still get a materialized score but bypass the expiry filter.
 ///
 /// # `Send`-safety
 ///
@@ -172,7 +172,7 @@ pub fn compute_importance(
 ///
 /// # Example
 ///
-/// `prune` is a crate-internal entry point (the `forgetting` module is
+/// `prune` is a crate-internal entry point (the `pruning` module is
 /// `pub(crate)`), so this sketch is `ignore`d rather than run as a doctest — it
 /// shows the intended call shape, not a compilable public API:
 ///
@@ -182,7 +182,7 @@ pub fn compute_importance(
 ///
 /// let ctx: MemoryCtx = /* the universal capability handle (see `MemoryEngine::mem_ctx`) */;
 /// let graph = RwLock::new(MemoryGraph::new());
-/// let policy = ForgetPolicy::default();
+/// let policy = PrunePolicy::default();
 ///
 /// // Score every active fact and soft-expire the sub-threshold set.
 /// let (stats, expired) = prune(ctx, &graph, &policy, Utc::now()).await?;
@@ -191,14 +191,14 @@ pub fn compute_importance(
 pub async fn prune(
     ctx: MemoryCtx<'_>,
     graph: &RwLock<MemoryGraph>,
-    policy: &ForgetPolicy,
+    policy: &PrunePolicy,
     now: DateTime<Utc>,
 ) -> Result<(PruneStats, Vec<i64>)> {
     // The #742 read-fence, self-guarded at the primitive entry like every other L3
     // free function (`ingest`/`query`/`consolidate`/`resolve`/`archive`/the dream
     // cycle). `prune` is a `pub` primitive reachable by callers other than the facade
     // delegate, so the fence is the primitive's own floor, not the wrapper's alone.
-    // Base enforced it inside `MemoryEngine::forget` (`self.ensure_open()`), which
+    // Base enforced it inside `MemoryEngine::prune` (`self.ensure_open()`), which
     // still calls it as archive-style defence-in-depth.
     ctx.ensure_open()?;
     // Fail fast on a read-only engine, as the fundamental write-capability precondition
@@ -315,7 +315,7 @@ mod tests {
             read_only: false,
             reopen_required: &fenced,
         };
-        let err = prune(ctx, &graph, &ForgetPolicy::default(), Utc::now())
+        let err = prune(ctx, &graph, &PrunePolicy::default(), Utc::now())
             .await
             .expect_err("a fenced handle must reject prune before touching storage");
         assert!(
@@ -341,7 +341,7 @@ mod tests {
             read_only: true,
             reopen_required: &NO_REOPEN,
         };
-        let err = prune(ctx, &graph, &ForgetPolicy::default(), Utc::now())
+        let err = prune(ctx, &graph, &PrunePolicy::default(), Utc::now())
             .await
             .expect_err("a read-only handle must reject prune before touching storage");
         assert!(
@@ -371,7 +371,7 @@ mod tests {
     #[tokio::test]
     async fn high_access_recent_connected_beats_neglected_isolated() {
         let now = Utc::now();
-        let policy = ForgetPolicy::default();
+        let policy = PrunePolicy::default();
 
         // Fact A: recently accessed, high access count, connected, high importance
         let fact_a = Fact {
@@ -432,9 +432,9 @@ mod tests {
         overrides.insert(FactType::Episodic, 30.0);
         overrides.insert(FactType::Procedural, 365.0);
 
-        let policy = ForgetPolicy {
+        let policy = PrunePolicy {
             half_life_overrides: overrides,
-            ..ForgetPolicy::default()
+            ..PrunePolicy::default()
         };
 
         let base_fact = Fact {
@@ -551,9 +551,9 @@ mod tests {
             .unwrap();
 
         let graph = parking_lot::RwLock::new(MemoryGraph::new());
-        let policy = ForgetPolicy {
+        let policy = PrunePolicy {
             min_importance: 0.3,
-            ..ForgetPolicy::default()
+            ..PrunePolicy::default()
         };
 
         let (stats, _expired_ids) = prune(test_ctx(&storage), &graph, &policy, now)
@@ -608,7 +608,7 @@ mod tests {
         // Unpinned fact with same characteristics — should be pruned
         storage
             .insert_fact(&NewFact {
-                content: "forgettable".into(),
+                content: "prunable".into(),
                 content_hash: "hf".into(),
                 embedding: vec![0.2; embed_dim],
                 fact_type: FactType::Episodic,
@@ -628,9 +628,9 @@ mod tests {
             .unwrap();
 
         let graph = parking_lot::RwLock::new(MemoryGraph::new());
-        let policy = ForgetPolicy {
+        let policy = PrunePolicy {
             min_importance: 0.3,
-            ..ForgetPolicy::default()
+            ..PrunePolicy::default()
         };
         let (stats, _pruned_ids) = prune(test_ctx(&storage), &graph, &policy, now)
             .await
@@ -676,7 +676,7 @@ mod tests {
             .unwrap();
 
         let graph = parking_lot::RwLock::new(MemoryGraph::new());
-        let policy = ForgetPolicy::default();
+        let policy = PrunePolicy::default();
         prune(test_ctx(&storage), &graph, &policy, now)
             .await
             .unwrap();
@@ -693,7 +693,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::field_reassign_with_default)]
     async fn policy_validation_rejects_invalid() {
-        let mut policy = ForgetPolicy::default();
+        let mut policy = PrunePolicy::default();
 
         // Zero half-life
         policy.half_life_days = 0.0;
@@ -765,9 +765,9 @@ mod tests {
             .unwrap();
 
         let graph = parking_lot::RwLock::new(MemoryGraph::new());
-        let policy = ForgetPolicy {
+        let policy = PrunePolicy {
             min_importance: 0.3,
-            ..ForgetPolicy::default()
+            ..PrunePolicy::default()
         };
         let (stats, expired) = prune(test_ctx(&storage), &graph, &policy, now)
             .await
@@ -793,7 +793,7 @@ mod tests {
     #[tokio::test]
     async fn exempt_type_recency_does_not_decay() {
         let now = Utc::now();
-        let policy = ForgetPolicy::default();
+        let policy = PrunePolicy::default();
 
         let ancient = Fact {
             id: 1,
@@ -838,10 +838,10 @@ mod tests {
 
         let mut overrides = HashMap::new();
         overrides.insert(FactType::Semantic, 30.0);
-        let policy = ForgetPolicy {
+        let policy = PrunePolicy {
             half_life_overrides: overrides,
             min_importance: 0.3,
-            ..ForgetPolicy::default()
+            ..PrunePolicy::default()
         };
 
         let graph = parking_lot::RwLock::new(MemoryGraph::new());
@@ -856,12 +856,12 @@ mod tests {
 
     #[tokio::test]
     async fn default_exemption_set_and_override_interaction() {
-        let policy = ForgetPolicy::default();
+        let policy = PrunePolicy::default();
         assert!(policy.is_decay_exempt(&FactType::Semantic));
         assert!(policy.is_decay_exempt(&FactType::Procedural));
         assert!(!policy.is_decay_exempt(&FactType::Episodic));
 
-        let mut overridden = ForgetPolicy::default();
+        let mut overridden = PrunePolicy::default();
         overridden
             .half_life_overrides
             .insert(FactType::Semantic, 30.0);
@@ -1009,9 +1009,9 @@ mod tests {
             "survivor bridges victim and bystander"
         );
 
-        let policy = ForgetPolicy {
+        let policy = PrunePolicy {
             min_importance: 0.3,
-            ..ForgetPolicy::default()
+            ..PrunePolicy::default()
         };
         let (stats, expired) = prune(test_ctx(&storage), &graph, &policy, now)
             .await
@@ -1076,7 +1076,7 @@ mod tests {
 
         // Insert nothing — the store is empty.
         let graph = parking_lot::RwLock::new(MemoryGraph::new());
-        let policy = ForgetPolicy::default();
+        let policy = PrunePolicy::default();
         let (stats, expired) = prune(test_ctx(&storage), &graph, &policy, now)
             .await
             .unwrap();
@@ -1095,12 +1095,12 @@ mod tests {
     async fn future_last_accessed_clamps_recency_to_one() {
         let now = Utc::now();
         // recency-only policy: isolates the recency term so the score *is* recency.
-        let policy = ForgetPolicy {
+        let policy = PrunePolicy {
             recency_weight: 1.0,
             frequency_weight: 0.0,
             graph_degree_weight: 0.0,
             base_importance_weight: 0.0,
-            ..ForgetPolicy::default()
+            ..PrunePolicy::default()
         };
 
         // Episodic (non-exempt → recency actually decays) but accessed 30 days
@@ -1189,7 +1189,7 @@ mod tests {
 
         /// #455 + #497 (sub-finding 3): `compute_importance` output bounds. With the
         /// non-negative-weight default policy and arbitrary valid inputs, the score
-        /// is in `[0, SUM_OF_WEIGHTS]`. For `ForgetPolicy::default()` the four
+        /// is in `[0, SUM_OF_WEIGHTS]`. For `PrunePolicy::default()` the four
         /// weights sum to `1.0`, so the bound is `[0, 1]` — asserted as the ACTUAL
         /// computed weight sum, not a blind `[0, 1]`.
         #[test]
@@ -1201,7 +1201,7 @@ mod tests {
             graph_degree in 0usize..1_000_000,
             age_secs in 0i64..(3650 * 86400),
         ) {
-            let policy = ForgetPolicy::default();
+            let policy = PrunePolicy::default();
             let weight_sum = policy.recency_weight
                 + policy.frequency_weight
                 + policy.graph_degree_weight

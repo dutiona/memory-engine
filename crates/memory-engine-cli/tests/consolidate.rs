@@ -162,7 +162,9 @@ async fn llm_backend_synthesizes_via_wiremock_end_to_end() {
             "--embed-url",
             &embed_url,
             "--embed-model",
-            "nomic-embed-text",
+            "mock",
+            "--embed-provider",
+            "test",
         ];
         run_consolidate(Path::new(&db_str), &extra)
     })
@@ -178,6 +180,81 @@ async fn llm_backend_synthesizes_via_wiremock_end_to_end() {
     assert_eq!(res["llm"]["llm_calls"], 1);
     assert_eq!(res["llm"]["eval_count"], 40);
     assert_eq!(res["llm"]["prompt_eval_count"], 15);
+}
+
+/// The store is stamped by `FakeEmbed` (`mock`/`test`); a summary embedder of another
+/// identity is a setup error, refused before the LLM is called (#1062).
+#[tokio::test]
+async fn llm_backend_refuses_a_summary_embedder_of_another_identity() {
+    let (_dir, db) = create_db().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/generate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "response": r#"{"merges":[{"source_ids":[1,2],"summary":"the sky is blue/azure"}]}"#,
+            "done": true, "eval_count": 40, "prompt_eval_count": 15
+        })))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "embedding": [0.1, 0.2, 0.3, 0.4]
+        })))
+        .mount(&server)
+        .await;
+    let llm_url = format!("{}/api/generate", server.uri());
+    let embed_url = format!("{}/v1/embeddings", server.uri());
+    let db_str = db.to_str().unwrap().to_owned();
+
+    let out = tokio::task::spawn_blocking(move || {
+        Command::cargo_bin("memory-engine-cli")
+            .unwrap()
+            .args([
+                "--db",
+                &db_str,
+                "--format",
+                "json",
+                "consolidate",
+                "--backend",
+                "llm",
+                "--llm-url",
+                &llm_url,
+                "--llm-model",
+                "gemma4:26b",
+                "--embed-url",
+                &embed_url,
+                "--embed-model",
+                "nomic-embed-text",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .expect("join");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("embedding identity check failed"),
+        "stderr:\n{stderr}"
+    );
+    assert!(out.stdout.is_empty(), "a setup error emits no JSON");
+
+    let engine = memory_engine::MemoryEngine::builder(DIM)
+        .path(db)
+        .build()
+        .unwrap();
+    let mut active: Vec<_> = engine
+        .list_active_facts(None)
+        .await
+        .unwrap()
+        .iter()
+        .map(|f| f.id)
+        .collect();
+    active.sort_unstable();
+    assert_eq!(active, [1, 2, 3], "the three facts active, none added");
 }
 
 #[tokio::test]
@@ -225,7 +302,9 @@ async fn consolidate_failure_emits_json_and_exits_nonzero() {
                 "--embed-url",
                 &embed_url,
                 "--embed-model",
-                "e",
+                "mock",
+                "--embed-provider",
+                "test",
             ])
             .output()
             .unwrap()

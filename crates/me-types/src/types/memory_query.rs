@@ -64,7 +64,7 @@ pub struct MemoryQuery {
     pub fact_type: Option<FactType>,
     /// Minimum materialized importance score threshold (filters on `Fact.importance_score`).
     pub min_importance_score: Option<f64>,
-    /// Return only pinned (unforgettable) facts.
+    /// Return only pinned (never pruned) facts.
     pub pinned_only: bool,
     /// Maximum number of results. Default: 50.
     pub limit: Option<usize>,
@@ -207,7 +207,7 @@ impl MemoryQuery {
         self
     }
 
-    /// Return only pinned (unforgettable) facts.
+    /// Return only pinned (never pruned) facts.
     #[must_use]
     pub const fn pinned_only(mut self) -> Self {
         self.pinned_only = true;

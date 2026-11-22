@@ -261,7 +261,8 @@ pub trait SchemaManager: Send + Sync {
     /// Atomically promote the `populating` space to active (#623 D6): in one
     /// transaction, retain the old active vectors for rollback, copy-swap the
     /// populating vectors into `facts.embedding`, and flip the registry status
-    /// (the identity flip). **Same-dim only** this wave — a different-dim
+    /// (the identity flip), clearing the dedup watermark and bumping the consolidation
+    /// generation (#1080). **Same-dim only** this wave — a different-dim
     /// populating space is rejected (the engine `embed_dim` is frozen at open;
     /// different-dim is #742).
     ///

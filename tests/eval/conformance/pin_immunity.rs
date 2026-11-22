@@ -1,16 +1,16 @@
 //! B4: Pin immunity conformance tests.
 //!
-//! Verifies that pinned facts survive aggressive forgetting, that
+//! Verifies that pinned facts survive aggressive pruning, that
 //! `PersistenceClassifier` auto-pins by type, and that explicit
 //! `pinned=false` overrides the classifier.
 
 use memory_engine::traits::{EmbeddingProvider, PersistenceClassifier};
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
-use crate::helpers::{PinByType, TestEmbedder, add_fact, aggressive_forget_policy, eval_engine};
+use crate::helpers::{PinByType, TestEmbedder, add_fact, aggressive_prune_policy, eval_engine};
 
 #[tokio::test]
-async fn all_pinned_survive_aggressive_forget() {
+async fn all_pinned_survive_aggressive_prune() {
     let engine = eval_engine();
 
     // 3 pinned facts.
@@ -38,15 +38,15 @@ async fn all_pinned_survive_aggressive_forget() {
         unpinned_ids.push(id);
     }
 
-    let policy = aggressive_forget_policy();
-    let stats = engine.forget(&policy).await.expect("forget failed");
+    let policy = aggressive_prune_policy();
+    let stats = engine.prune(&policy).await.expect("prune failed");
 
     // All pinned facts should survive.
     for &pid in &pinned_ids {
         let fact = engine.get_fact(pid).await.expect("get pinned fact");
         assert!(
             fact.t_expired.is_none(),
-            "pinned fact {pid} should survive aggressive forget"
+            "pinned fact {pid} should survive aggressive prune"
         );
     }
 
@@ -55,7 +55,7 @@ async fn all_pinned_survive_aggressive_forget() {
         let fact = engine.get_fact(uid).await.expect("get unpinned fact");
         assert!(
             fact.t_expired.is_some(),
-            "unpinned fact {uid} should be expired by aggressive forget"
+            "unpinned fact {uid} should be expired by aggressive prune"
         );
     }
 
@@ -91,7 +91,7 @@ async fn persistence_classifier_auto_pins_by_type() {
         .expect("add procedural fact");
 
     // Add an Episodic fact — classifier should NOT pin it, and as a
-    // decaying type it stays forgettable (Semantic would be decay-exempt).
+    // decaying type it stays prunable (Semantic would be decay-exempt).
     let epi_id = engine
         .add_fact(
             &AddFactRequest {
@@ -119,22 +119,22 @@ async fn persistence_classifier_auto_pins_by_type() {
         "Episodic fact should NOT be auto-pinned"
     );
 
-    // Verify the pinned fact survives forget.
-    let policy = aggressive_forget_policy();
-    engine.forget(&policy).await.expect("forget failed");
+    // Verify the pinned fact survives prune.
+    let policy = aggressive_prune_policy();
+    engine.prune(&policy).await.expect("prune failed");
 
     let proc_after = engine
         .get_fact(proc_id)
         .await
-        .expect("get procedural after forget");
+        .expect("get procedural after prune");
     let epi_after = engine
         .get_fact(epi_id)
         .await
-        .expect("get episodic after forget");
+        .expect("get episodic after prune");
 
     assert!(
         proc_after.t_expired.is_none(),
-        "auto-pinned Procedural fact should survive forget"
+        "auto-pinned Procedural fact should survive prune"
     );
     assert!(
         epi_after.t_expired.is_some(),
@@ -175,25 +175,25 @@ async fn explicit_pinned_false_overrides_classifier() {
         "explicit pinned=false should override PersistenceClassifier"
     );
 
-    // Verify it gets expired by aggressive forget. Procedural is decay-exempt
+    // Verify it gets expired by aggressive prune. Procedural is decay-exempt
     // by default, so re-enable its decay via an explicit half-life override
     // (an explicit override wins over the exemption) — the property under
     // test is the pinned=false override, not persistence semantics.
-    let mut policy = aggressive_forget_policy();
+    let mut policy = aggressive_prune_policy();
     policy
         .half_life_overrides
         .insert(FactType::Procedural, 69.0);
-    engine.forget(&policy).await.expect("forget failed");
+    engine.prune(&policy).await.expect("prune failed");
 
-    let fact_after = engine.get_fact(id).await.expect("get fact after forget");
+    let fact_after = engine.get_fact(id).await.expect("get fact after prune");
     assert!(
         fact_after.t_expired.is_some(),
-        "fact with explicit pinned=false should be expired by forget"
+        "fact with explicit pinned=false should be expired by prune"
     );
 }
 
 #[tokio::test]
-async fn unpin_allows_forgetting() {
+async fn unpin_allows_pruning() {
     let engine = eval_engine();
 
     let id = add_fact(&engine, "once pinned, now unpinned", FactType::Episodic).await;
@@ -206,13 +206,13 @@ async fn unpin_allows_forgetting() {
     engine.unpin_fact(id).await.expect("unpin_fact");
     assert!(!engine.get_fact(id).await.unwrap().is_pinned);
 
-    // Now it should be forgettable.
-    let policy = aggressive_forget_policy();
-    engine.forget(&policy).await.expect("forget");
+    // Now it should be prunable.
+    let policy = aggressive_prune_policy();
+    engine.prune(&policy).await.expect("prune");
 
-    let fact = engine.get_fact(id).await.expect("get after forget");
+    let fact = engine.get_fact(id).await.expect("get after prune");
     assert!(
         fact.t_expired.is_some(),
-        "unpinned fact should be expired after forget"
+        "unpinned fact should be expired after prune"
     );
 }

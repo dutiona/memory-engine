@@ -32,7 +32,7 @@ pub struct NewEvent {
 pub enum EventType {
     Interaction,   // User/agent conversational turns
     ToolCall,      // Tool invocations and their results
-    MemoryOp,      // Internal memory operations (consolidation, forgetting)
+    MemoryOp,      // Internal memory operations (consolidation, pruning)
     SystemEvent,   // Lifecycle events (startup, shutdown, config changes)
 }
 ```

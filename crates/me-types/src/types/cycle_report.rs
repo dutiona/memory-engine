@@ -16,7 +16,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::{FactId, NewFact, Outcome, PromotionProvenance};
+use crate::types::{EmbeddingFingerprint, FactId, NewFact, Outcome, PromotionProvenance};
 
 /// Quantum for importance adjustments.
 ///
@@ -152,6 +152,15 @@ pub struct CycleReport {
     pub deltas: Vec<CycleDelta>,
     pub identity: IdentityOutput,
     pub metadata: CycleMetadata,
+    /// The embedding identity of every vector the `AddFact` and `Synthesize` deltas carry
+    /// (ADR-0015 §3); `None` only when no delta carries one (a `Promote` copies a stored
+    /// vector). The apply refuses an undeclared vector with
+    /// [`CycleError::UndeclaredEmbedding`](crate::error::CycleError::UndeclaredEmbedding) and
+    /// one declared under another identity than the store's with
+    /// [`MemoryError::EmbeddingModelMismatch`](crate::error::MemoryError::EmbeddingModelMismatch).
+    /// Boxed to keep [`CycleOutcome`] small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_fingerprint: Option<Box<EmbeddingFingerprint>>,
 }
 
 /// Why `MemoryEngine::run_dream_cycle_guarded`
@@ -340,11 +349,53 @@ mod tests {
                 method_version: "dbscan-v1".into(),
                 processed_ids: vec![1, 2, 3, 4, 5],
             },
+            embedding_fingerprint: Some(Box::new(EmbeddingFingerprint::new("m", "p", 2))),
         };
 
         let json = serde_json::to_string(&report).unwrap();
         let back: CycleReport = serde_json::from_str(&json).unwrap();
         assert_eq!(report, back, "wire format must round-trip");
         assert_eq!(report.identity.anchors, [] as [FactId; 0]);
+    }
+
+    fn vectorless(embedding_fingerprint: Option<Box<EmbeddingFingerprint>>) -> CycleReport {
+        CycleReport {
+            deltas: vec![],
+            identity: IdentityOutput::empty(),
+            metadata: CycleMetadata {
+                cycle_id: 1,
+                ran_at: tw().start,
+                time_window: tw(),
+                facts_selected: 0,
+                method_version: "v".into(),
+                processed_ids: vec![],
+            },
+            embedding_fingerprint,
+        }
+    }
+
+    #[test]
+    fn an_undeclared_identity_is_not_serialized() {
+        let json = serde_json::to_value(vectorless(None)).unwrap();
+        assert!(json.get("embedding_fingerprint").is_none(), "{json}");
+    }
+
+    #[test]
+    fn a_report_without_the_key_reads_as_undeclared() {
+        let declared = vectorless(Some(Box::new(EmbeddingFingerprint::new("m", "p", 4))));
+        let mut json = serde_json::to_value(declared).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("embedding_fingerprint");
+        let back: CycleReport = serde_json::from_value(json).unwrap();
+        assert_eq!(back.embedding_fingerprint, None);
+    }
+
+    #[test]
+    fn a_declared_identity_round_trips() {
+        let report = vectorless(Some(Box::new(EmbeddingFingerprint::new("m", "p", 4))));
+        let json = serde_json::to_string(&report).unwrap();
+        let back: CycleReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, report);
     }
 }

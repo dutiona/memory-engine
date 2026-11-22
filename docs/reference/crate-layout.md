@@ -6,7 +6,7 @@ all **18 crates** exist:
 
 - **L0** `me-types` · **L0.5** `me-traits` · **L1** `me-storage` (the port)
 - **L2** `me-index`, `me-backend-sqlite`, `me-backend-postgres`
-- **L3** `me-ingest`, `me-query`, `me-consolidate`, `me-forget`, `me-resolve`,
+- **L3** `me-ingest`, `me-query`, `me-consolidate`, `me-prune`, `me-resolve`,
   `me-archive`, `me-cognitive`
 - **L4** `memory-engine` (the facade)
 - plus `me-test-support` (dev-only) and three facade consumers: `memory-engine-cli`,
@@ -37,7 +37,7 @@ graph TD
         query["me-query"]
         consolidate["me-consolidate"]
         cognitive["me-cognitive"]
-        forget["me-forget"]
+        prune["me-prune"]
         resolve["me-resolve"]
         archive["me-archive"]
     end
@@ -56,9 +56,9 @@ graph TD
         types["me-types"]
     end
 
-    facade --> ingest & query & consolidate & cognitive & forget & resolve & archive
+    facade --> ingest & query & consolidate & cognitive & prune & resolve & archive
     facade --> sqlite & postgres
-    ingest & query & consolidate & cognitive & forget & resolve & archive --> storage & index
+    ingest & query & consolidate & cognitive & prune & resolve & archive --> storage & index
     sqlite & postgres --> storage
     storage --> traits
     storage --> types
@@ -107,7 +107,7 @@ facade re-exports the extracted crates so the public four-layer seam
 | `me-query`               | L3    | ✅ **DONE** (S4)                                    | The **Query** primitive: hybrid FTS5 + vector + graph retrieval, RRF merge. Carried the `VectorSearchStrategy` break — resolved as an **un-export**, not the originally-planned signature change (see ADR 0018 §8b).                                                        | `search/`, `engine::query`                                                 |
 | `me-consolidate`         | L3    | ✅ **DONE** (S4)                                    | The **Consolidate** primitive: the 3-pass dedup → cluster → global pipeline. At S4 this deliberately excluded the dream-cycle layer (`DreamContext` held `&MemoryEngine`, an L3→L4 back-edge); **S5's `me-cognitive` carve (below) resolves that** by inverting the bag into a trait, so the two are siblings now, not one waiting on the other. | `consolidation/`, `engine::consolidation`                                  |
 | `me-cognitive`           | L3    | ✅ **DONE** (S5, #981)                              | The **Cognitive/dream-cycle** primitive (Phase 5a): `DreamCycle` produce/apply orchestration (`run_dream_cycle`/`run_dream_cycle_guarded`/`apply_cycle_report`), `CycleContext`, `DefaultDreamCycle`, `LlmDreamCycle`, and the pure DBSCAN core. Depends on `me-traits`'s new `DreamCtx` capability trait (the ADR 0014 decision #3 bag, restored). The engine's implementation stays in the facade, carried by the private `EngineDreamCtx(&MemoryEngine)` newtype — **not** `impl DreamCtx for MemoryEngine`, which would make an inherent-method rename a silent stack overflow (ADR 0014's S5 amendment). | `engine::cycle`, `engine::cognitive` (orchestration half)                  |
-| `me-forget`              | L3    | ✅ **DONE** (S3)                                    | The **Forget** primitive: Ebbinghaus decay + multi-signal importance scoring.                                                                                                                                                                                              | `forgetting/`, `engine::forgetting`                                        |
+| `me-prune`               | L3    | ✅ **DONE** (S3)                                    | The **Prune** primitive: Ebbinghaus decay + multi-signal importance scoring.                                                                                                                                                                                              | `forgetting/`, `engine::pruning`                                        |
 | `me-resolve`             | L3    | ✅ **DONE** (S3)                                    | The **Resolve** primitive: bi-temporal conflict arbitration.                                                                                                                                                                                                               | `engine::conflict`                                                         |
 | `me-archive`             | L3    | ✅ **DONE** (S4)                                    | The **Archive** primitive: cold-storage `.pak` snapshots (feature-gated). Owning `build_pak` here makes the `.pak` schema guard compiler-enforced: no backend edge exists, so neither half can name a backend's schema constant.                                            | `archive/`, `engine::archive`                                              |
 | `me-test-support`        | dev   | ✅ **DONE** (S3)                                    | Cross-crate test-only helpers (`publish = false`, `[dev-dependencies]`).                                                                                                                                                                                                   | `test_utils`                                                               |
@@ -149,7 +149,7 @@ and `pool/` — the S2 scope — are **no longer facade modules**; they physical
 [the extracted crates](#the-extracted-crates) below.)
 
 `engine`
-: Facade over all memory primitives. Defines `MemoryEngine` (the main entry point) and `EngineConfig`. The engine is async-native: its DB-touching methods are `async fn` that `.await` an `Arc<dyn StorageBackend>` port, so thread safety and blocking-IO offload live in the backend (`spawn_blocking`); the in-memory caches the engine still owns stay `RwLock`-protected. `engine::conflict` holds the bi-temporal `MemoryEngine::resolve_conflict` (delegated to the consumer `ConflictArbiter`) → **me-resolve**. `engine::query` → **me-query**; `engine::ingest` → **me-ingest**; `engine::forgetting` → **me-forget**; `engine::archive` → **me-archive**. `MemoryCtx` and its `ensure_open`/`ensure_writable` gates were relocated **out** of `engine::mod` into `me-storage` in S1.
+: Facade over all memory primitives. Defines `MemoryEngine` (the main entry point) and `EngineConfig`. The engine is async-native: its DB-touching methods are `async fn` that `.await` an `Arc<dyn StorageBackend>` port, so thread safety and blocking-IO offload live in the backend (`spawn_blocking`); the in-memory caches the engine still owns stay `RwLock`-protected. `engine::conflict` holds the bi-temporal `MemoryEngine::resolve_conflict` (delegated to the consumer `ConflictArbiter`) → **me-resolve**. `engine::query` → **me-query**; `engine::ingest` → **me-ingest**; `engine::pruning` → **me-prune**; `engine::archive` → **me-archive**. `MemoryCtx` and its `ensure_open`/`ensure_writable` gates were relocated **out** of `engine::mod` into `me-storage` in S1.
 
 `engine::cognitive` (Phase-5a dream-cycle subsystem, #49)
 : `engine::cycle` (the former `CycleContext`/`DefaultDreamCycle`/`LlmDreamCycle`/`apply_cycle_report`/`dbscan` module tree) and the orchestration half of `engine::cognitive` → **me-cognitive** (S5, #981). What stays in the facade's (now much smaller) `engine::cognitive`: `EngineDreamCtx` — a **private borrow-newtype** over `&MemoryEngine` carrying the 9 capability delegates of the `DreamCtx` trait that replaced `DreamContext`. It is deliberately **not** `impl DreamCtx for MemoryEngine`: five of the trait's names collide with inherent engine methods, and Rust's inherent-before-trait resolution would turn any future rename into a silent stack overflow (qualification does not help; `unconditional_recursion` does not fire through `#[async_trait]`). The newtype makes that `E0599` instead — see ADR 0014's S5 amendment. Also staying: `promote_with_lineage` (needs the engine-owned `ScopeTree` cache, a loose parameter `MemoryCtx` does not carry), and four thin delegates (`record_insight`, `run_dream_cycle`, `run_dream_cycle_guarded`, `apply_cycle_report`). See `docs/advanced/dream-cycle.md` and ADR 0014 (+ its Wave 2 #816 / S5 amendment) for the design, and ADR 0018 decision #8(d) for the break.
@@ -176,7 +176,7 @@ and `pool/` — the S2 scope — are **no longer facade modules**; they physical
    Accepts a `SummaryGenerator` trait object, an `EmbeddingProvider` trait object (to embed the generated summaries), and `ConsolidationConfig`.
 
 `forgetting/`
-: Ebbinghaus-based decay with multi-signal importance scoring → **me-forget**. Computes a weighted combination of recency (exponential decay), access frequency, graph connectivity, and base importance. Facts scoring below `ForgetPolicy::min_importance` are soft-deleted (their `t_expired` is set). Returns `PruneStats`.
+: Ebbinghaus-based decay with multi-signal importance scoring → **me-prune**. Computes a weighted combination of recency (exponential decay), access frequency, graph connectivity, and base importance. Facts scoring below `PrunePolicy::min_importance` are soft-deleted (their `t_expired` is set). Returns `PruneStats`.
 
 `engine::conflict`
 : Bi-temporal conflict resolution (`MemoryEngine::resolve_conflict`) → **me-resolve**. Given an existing fact and a candidate, delegates to a `ConflictArbiter` for the decision (`Add`, `Update`, `Delete`, `Noop`). On `Update`, the old fact is expired and a `superseded_by` edge is created in the graph. All mutations run in a single transaction.
@@ -205,7 +205,7 @@ and `pool/` — the S2 scope — are **no longer facade modules**; they physical
 `resume/`
 : Session bootstrapping via `ResumeConfig` and `ResumeContext` → **facade** (stays home; ADR 0018 decision #5). Implements 4-tier retrieval:
 
-1. **Pinned** -- unforgettable facts (`is_pinned = true`), cross-scope, sorted by `importance_score` descending.
+1. **Pinned** -- facts never pruned (`is_pinned = true`), cross-scope, sorted by `importance_score` descending.
 2. **High-importance** -- facts with materialized `importance_score` above a configurable threshold.
 3. **Due** -- future-memory facts whose `t_valid` has arrived (`t_valid <= now`).
 4. **Recent** -- most recent facts from scope ancestors.
@@ -227,10 +227,10 @@ L0→L4 DAG. The L0–L2 foundation crates, as separate workspace members under
 `crates/`:
 
 `me-types` (L0 — `crates/me-types/`)
-: Three module trees, relocated verbatim so the cycle-break and the crate-carve stayed independently verifiable. `types` — the domain DTOs (`Event`, `Fact`, `Edge`, `Summary`, `ScopeNode`, insertion structs, enums, option structs) **plus** the relocated `snapshot`/`cycle-report`/search-result sidecar vocabularies, and (S2) the `EmbeddingSpace`/`SpaceStatus` embedding-space-registry DTOs (moved out of `me-backend-sqlite` so `me-backend-postgres` can share them without a backend-to-backend dependency), and the forget/prune pair `PruneStats` (S1) + `ForgetPolicy` (S5, #985) — pure data-out/config-in with no L3 deps; `ForgetPolicy` was hoisted out of `me-forget` to rejoin `PruneStats` so an L0.5 trait signature can name it (`DreamCtx::forget`, #981). `error` — `MemoryError` (`thiserror`), its typed sub-enums, and the `Result` alias. `limits` — the ingest-time payload size caps enforced during (de)serialization, plus the consolidation dedup/cluster safety caps (#983, single-sourced here so `me-consolidate` and `me-backend-sqlite` cannot drift and so they stay off the facade's public API). `types::lifecycle` (#1025, namespaced, never flat-exported) is the neutral lifecycle record an adapter hands the engine, the order key and ADR-0020 section 5's segment rule as the pure function `step`, and the port's write DTOs. No internal (`me-*`) deps — the acyclic leaf.
+: Three module trees, relocated verbatim so the cycle-break and the crate-carve stayed independently verifiable. `types` — the domain DTOs (`Event`, `Fact`, `Edge`, `Summary`, `ScopeNode`, insertion structs, enums, option structs) **plus** the relocated `snapshot`/`cycle-report`/search-result sidecar vocabularies, and (S2) the `EmbeddingSpace`/`SpaceStatus` embedding-space-registry DTOs (moved out of `me-backend-sqlite` so `me-backend-postgres` can share them without a backend-to-backend dependency), and the prune pair `PruneStats` (S1) + `PrunePolicy` (S5, #985) — pure data-out/config-in with no L3 deps; `PrunePolicy` was hoisted out of `me-prune` to rejoin `PruneStats` so an L0.5 trait signature can name it (`DreamCtx::prune`, #981). `error` — `MemoryError` (`thiserror`), its typed sub-enums, and the `Result` alias. `limits` — the ingest-time payload size caps enforced during (de)serialization, plus the consolidation dedup/cluster safety caps (#983, single-sourced here so `me-consolidate` and `me-backend-sqlite` cannot drift and so they stay off the facade's public API). `types::lifecycle` (#1025, namespaced, never flat-exported) is the neutral lifecycle record an adapter hands the engine, the order key and ADR-0020 section 5's segment rule as the pure function `step`, and the port's write DTOs. No internal (`me-*`) deps — the acyclic leaf.
 
 `me-traits` (L0.5 — `crates/me-traits/`)
-: The consumer-implemented capability traits the engine delegates to — `EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker` — plus the trait-adjacent policy types (`ConsolidationConfig`, `CrudDecision`, …) and the `CycleCtx` read-set trait that lets `DreamCycle::run` take `&dyn CycleCtx` without pulling in `me-consolidate`. Depends only on `me-types`. (`ForgetPolicy` is **not** here — it is a pure-data policy DTO and lives in `me-types` alongside its `PruneStats` output; see S5.)
+: The consumer-implemented capability traits the engine delegates to — `EmbeddingProvider`, `SummaryGenerator`, `ConflictArbiter`, `PersistenceClassifier`, `Reranker` — plus the trait-adjacent policy types (`ConsolidationConfig`, `CrudDecision`, …) and the `CycleCtx` read-set trait that lets `DreamCycle::run` take `&dyn CycleCtx` without pulling in `me-consolidate`. Depends only on `me-types`. (`PrunePolicy` is **not** here — it is a pure-data policy DTO and lives in `me-types` alongside its `PruneStats` output; see S5.)
 
 `me-storage` (L1 — `crates/me-storage/`)
 : The persistence **port**. Owns the `StorageBackend` umbrella supertrait over the bounded-context traits (`FactGraph`, `EventLog`, `SearchIndex`, `ConsolidationStore`, `SessionStore`, `SchemaManager`, `Retraction`, `Lifecycle`) + the feature-gated `ColdStorage`; the closed `FactFilter`/`TemporalFilter` query vocabulary; the `BackendCapabilities`/`LexicalRanker` tier signal; `MemoryCtx` (the universal capability handle — see the [architecture overview](../design/architecture-overview.md)); and `UpcasterRegistry` (event-payload versioning the port applies on read). No SQL string or driver type appears here — backends implement the traits and map driver errors to the driver-opaque `StorageError` at the seam. Depends on `{me-types, me-traits}`.
@@ -257,7 +257,7 @@ siblings: no L3 crate depends on another.
 `me-consolidate` (L3 — `crates/me-consolidate/`)
 : The three-pass consolidation pipeline (dedup → cluster → global), lock-free compute + atomic apply (#409). The SQL-touching load/apply halves live in `me-backend-sqlite`; the pure `compute_plan` stays here. Depends on `{me-types, me-traits, me-storage, me-index}`.
 
-`me-forget` (L3 — `crates/me-forget/`)
+`me-prune` (L3 — `crates/me-prune/`)
 : The Ebbinghaus-decay + multi-signal-importance prune primitive (`prune`, `compute_importance`). Scores the active set against in-memory graph degree and soft-expires the sub-threshold set atomically below the seam. Depends on `{me-types, me-storage, me-index}`.
 
 `me-resolve` (L3 — `crates/me-resolve/`)

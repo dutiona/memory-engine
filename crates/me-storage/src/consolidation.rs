@@ -87,6 +87,14 @@ pub trait ConsolidationStore: Send + Sync {
     /// push-down uses `scope_id = 1` for all promotions, matching the current
     /// behavior exactly.
     ///
+    /// ## Embedding identity (ADR-0015 §3, #1062)
+    ///
+    /// A report whose `AddFact` or `Synthesize` deltas carry vectors must declare their
+    /// identity in `report.embedding_fingerprint`: `None` is refused with
+    /// `CycleError::UndeclaredEmbedding` before the transaction, and inside it a blank
+    /// store is refused (#613) and a declaration that differs from the store's identity is
+    /// refused with `MemoryError::EmbeddingModelMismatch`, before any delta writes.
+    ///
     /// ## Contract
     ///
     /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.
@@ -132,13 +140,14 @@ pub trait ConsolidationStore: Send + Sync {
     /// Phase 1 — load the consolidation read snapshot under a brief read lock.
     /// Wraps `consolidation::load_snapshot`, preserving the #659 over-both-caps
     /// short-circuit (no embedding-BLOB materialization when the corpus is over
-    /// both caps).
+    /// both caps). It reads the consolidation generation, the dedup watermark (a fact id,
+    /// #1080) and the highest fact id before the active set.
     ///
     /// # Errors
     ///
     /// Returns [`MemoryError::Conflict`](me_types::error::MemoryError::Conflict) if
     /// `config` fails validation, [`MemoryError::Migration`](me_types::error::MemoryError::Migration)
-    /// if the stored watermark cannot be parsed, or
+    /// if the stored watermark or generation cannot be parsed, or
     /// [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a read failure.
     async fn load_consolidation_snapshot(
         &self,
@@ -147,7 +156,10 @@ pub trait ConsolidationStore: Send + Sync {
 
     /// Phase 3 — apply a fully-computed `ConsolidationPlan`
     /// in a single transaction, firing the post-commit HNSW `notify_expire` for the
-    /// ids it actually expired (Stage B).
+    /// ids it actually expired (Stage B). A plan whose generation no longer matches the
+    /// store's writes nothing and returns zero counts (#1080); otherwise the dedup watermark
+    /// advances to the plan's highest fact id when dedup ran, no fact was vectorless and no
+    /// survivor was lost.
     ///
     /// # Returns
     ///
@@ -169,10 +181,11 @@ pub trait ConsolidationStore: Send + Sync {
     /// transaction — the standalone `promote()` write path. Resolves `scope_path`
     /// inside the transaction (returning any newly-created scope ids for the engine
     /// to cache), guards that the store has a recorded embedding identity
-    /// (#613/#615), inserts the pinned fact and its lineage record, and fires the
-    /// post-commit HNSW `notify_insert` (Stage B). The provenance is already injected
-    /// into `fact.metadata` engine-side; `fact.scope_id` is a placeholder patched
-    /// from the resolved `scope_path`.
+    /// (#613/#615) equal to `declared`, the identity of `fact.embedding`
+    /// (`MemoryError::EmbeddingModelMismatch` otherwise), inserts the pinned fact and
+    /// its lineage record, and fires the post-commit HNSW `notify_insert` (Stage B).
+    /// The provenance is already injected into `fact.metadata` engine-side;
+    /// `fact.scope_id` is a placeholder patched from the resolved `scope_path`.
     ///
     /// Content a forget's tombstone blocks (#1023) is refused with `Conflict(Forgotten)`
     /// and nothing is written; [`apply_cycle_deltas_atomic`](Self::apply_cycle_deltas_atomic)
@@ -199,5 +212,6 @@ pub trait ConsolidationStore: Send + Sync {
         scope_path: Option<&str>,
         source_fact_ids: &[i64],
         provenance: &me_types::types::PromotionProvenance,
+        declared: &me_types::types::EmbeddingFingerprint,
     ) -> Result<(me_types::types::PromotionResult, Vec<i64>)>;
 }

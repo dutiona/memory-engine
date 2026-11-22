@@ -1,6 +1,6 @@
 # ADR-0008: Materialized Importance Score on Facts
 
-**Status:** Accepted
+**Status:** Accepted; amended 2026-11-22 (dutiona/memory-engine#1089: the decay prune is renamed prune)
 **Date:** 2026-03-10
 **Phase:** 3b
 
@@ -47,3 +47,11 @@ Store `importance_score` as a materialized column on the `facts` table (`REAL NO
 
 - `importance_score` exists on `Fact` (read from DB) but NOT on `NewFact` (consumer input). The engine computes it; consumers don't set it.
 - Default value of 0.5 means newly inserted facts appear in the middle of the ranking until the next prune cycle materializes their true score.
+
+## Amendment (2026-11-22, #1089)
+
+The decay prune is now named `prune` (dutiona/memory-engine#1089); `forget` names only the retraction. This record keeps the names of its time:
+
+| Then | Now |
+|---|---|
+| `forget()` (the decay prune) | `prune()` |

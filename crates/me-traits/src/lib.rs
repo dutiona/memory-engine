@@ -20,7 +20,7 @@ use async_trait::async_trait;
 
 use me_types::error::Result;
 use me_types::types::cycle_report::{CycleMetadata, CycleReport, TimeWindow};
-use me_types::types::forgetting::{ForgetPolicy, PruneStats};
+use me_types::types::pruning::{PrunePolicy, PruneStats};
 use me_types::types::search::{SearchQuery, SearchResult};
 use me_types::types::{
     ClassifierInput, ConsolidationProposal, EmbeddingFingerprint, Fact, OutcomeCounts,
@@ -255,7 +255,7 @@ pub enum CrudDecision {
 
 // --- Phase 3b: Persistence classifier ---
 
-/// Trait for classifying whether a fact should be pinned (unforgettable).
+/// Trait for classifying whether a fact should be pinned (never pruned).
 ///
 /// Consumers implement this to apply domain-specific rules:
 /// LLM-based classification, regex matching, importance thresholds, etc.
@@ -274,7 +274,7 @@ pub enum CrudDecision {
 /// Requires `Send + Sync`: classifiers are shared across the engine's worker
 /// threads alongside the other consumer providers.
 pub trait PersistenceClassifier: Send + Sync {
-    /// Decide if a fact should be pinned (never forgotten).
+    /// Decide if a fact should be pinned (never pruned).
     fn should_pin(&self, input: &ClassifierInput) -> bool {
         let _ = input;
         false
@@ -351,7 +351,7 @@ pub trait InsightStream: Send + Sync {
 /// The engine capability bag handed to a [`DreamCycle`] (via [`CycleCtx`]'s supertrait).
 ///
 /// More broadly, this is the "narrowed `MemoryEngine`" surface: read, engine-internal
-/// batch ops (consolidate/forget), and the one new write path (promotion).
+/// batch ops (consolidate/prune), and the one new write path (promotion).
 ///
 /// # History (ADR 0014 decision #3, restored — Wave 2 #816, S5, closes #981)
 ///
@@ -378,7 +378,7 @@ pub trait InsightStream: Send + Sync {
 /// # ⚠️ Before you add a third
 ///
 /// **Do not `impl DreamCtx for T` when `T` has inherent methods sharing these names**
-/// (`query`, `list_active_facts`, `get_fact`, `consolidate`, `forget` all collide on
+/// (`query`, `list_active_facts`, `get_fact`, `consolidate`, `prune` all collide on
 /// `MemoryEngine`). Rust resolves inherent-before-trait, so such an impl works only
 /// until the inherent method is renamed — after which the call silently re-resolves to
 /// the trait method being defined: unbounded recursion, stack overflow, in the
@@ -433,8 +433,8 @@ pub trait DreamCtx: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an error if the forget operation fails.
-    async fn forget(&self, policy: &ForgetPolicy) -> Result<PruneStats>;
+    /// Returns an error if the prune fails.
+    async fn prune(&self, policy: &PrunePolicy) -> Result<PruneStats>;
 
     /// Atomically promote a fact to wisdom with lineage tracking.
     ///
@@ -487,7 +487,7 @@ pub trait DreamCtx: Send + Sync {
 /// concrete `CycleContext`; abstracting it behind this trait is what lets the
 /// `DreamCycle` contract name no engine/consolidation type (Wave 2 #816 — the trait
 /// layer stays a leaf over the data layer). The write capabilities the supertrait
-/// exposes (consolidate / forget / promote) are available here too, but the shipped
+/// exposes (consolidate / prune / promote) are available here too, but the shipped
 /// cycles run them later, through the engine's apply path — not through this handle.
 #[async_trait]
 pub trait CycleCtx: DreamCtx {
@@ -609,8 +609,8 @@ impl ConsolidationConfig {
     ///
     /// Enforced at the consolidation entry point
     /// (`MemoryEngine::consolidate`), mirroring
-    /// `ForgetPolicy::validate` at the
-    /// forget entry point.
+    /// `PrunePolicy::validate` at the
+    /// prune entry point.
     ///
     /// # Errors
     ///

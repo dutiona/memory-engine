@@ -1,6 +1,6 @@
 # ADR-0004: Zero LLM/Network Dependencies in Core
 
-**Status:** Accepted
+**Status:** Accepted; amended 2026-11-22 (dutiona/memory-engine#1089: the decay prune is renamed prune)
 **Date:** 2026-03-10
 
 ## Context
@@ -63,3 +63,12 @@ Traits added since original decision: `PersistenceClassifier` (Phase 3b) for unf
 - Trait implementations are typically thin wrappers (5-20 lines) around existing LLM client libraries.
 - The `ForgetPolicy` struct has sensible defaults via `Default::default()`, so consumers who want forgetting only need to call `forget()` with no configuration.
 - Future companion crates (e.g., `memory-engine-ollama`) could provide ready-made trait implementations for common providers.
+
+## Amendment (2026-11-22, #1089)
+
+The decay prune is now named `prune` (dutiona/memory-engine#1089); `forget` names only the retraction. This record keeps the names of its time:
+
+| Then | Now |
+|---|---|
+| `ForgetPolicy` | `PrunePolicy` |
+| `forget()` (the decay prune) | `prune()` |
