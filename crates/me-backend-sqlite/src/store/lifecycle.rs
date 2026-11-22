@@ -10,8 +10,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use serde_json::Value;
 
 use super::activities::ActivityStore;
 use super::events::{EventStore, event_type_to_str};
@@ -62,6 +63,9 @@ pub(crate) fn record_delivery(
 /// Record an upload's `items` in one transaction that takes the write lock first, and commit it
 /// only for a [`BatchMode::Write`] whose preview is the batch's and that met no collision.
 ///
+/// Before any item, it reads once per session of the captures its first live event and the
+/// other imports holding it on `machine`; each capture then yields as [`yields`] says.
+///
 /// # Errors
 ///
 /// As [`record_delivery`]; nothing is written on any error.
@@ -77,19 +81,38 @@ pub(crate) fn record_deliveries(
     mode: BatchMode,
 ) -> Result<Batch> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(classify)?;
-    let sessions: BTreeSet<&str> = items
+    let sessions: BTreeSet<(&str, &str)> = items
         .iter()
         .filter_map(|item| match &item.write {
-            DeliveryWrite::Capture(capture) => Some(capture.session_id.as_str()),
+            DeliveryWrite::Capture(capture) => {
+                Some((capture.session_id.as_str(), capture.event.source.as_str()))
+            }
             _ => None,
         })
         .collect();
     let mut live_since = BTreeMap::new();
-    for session in sessions {
-        if let Some(start) = first_live_event(&tx, machine, session)? {
+    let mut held_by: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut held = BTreeMap::new();
+    for (session, source) in sessions {
+        if !live_since.contains_key(session)
+            && let Some(start) = first_live_event(&tx, machine, session)?
+        {
             live_since.insert(session.to_owned(), start);
         }
+        let holders = held_by.entry(session.to_owned()).or_default();
+        if live_since.contains_key(session) {
+            holders.insert(LIVE.to_owned());
+        }
+        let mut kinds = BTreeSet::new();
+        for (other, actor, kind) in other_imports(&tx, machine, session, source)? {
+            holders.insert(other);
+            if let (Some(actor), Some(kind)) = (actor, kind) {
+                kinds.insert((actor, kind));
+            }
+        }
+        held.insert((session, source), kinds);
     }
+    held_by.retain(|_, holders| !holders.is_empty());
     let mut applied = Vec::with_capacity(items.len());
     for item in items {
         let key = ReceiptKey {
@@ -98,8 +121,12 @@ pub(crate) fn record_deliveries(
             body_sha256: &item.body_sha256,
             received_at,
         };
-        let live = match &item.write {
-            DeliveryWrite::Capture(capture) => live_since.get(&capture.session_id),
+        let answer = match &item.write {
+            DeliveryWrite::Capture(capture) => yields(
+                capture,
+                live_since.get(&capture.session_id),
+                held.get(&(capture.session_id.as_str(), capture.event.source.as_str())),
+            ),
             _ => None,
         };
         applied.push(apply_one(
@@ -108,7 +135,7 @@ pub(crate) fn record_deliveries(
             embed_dim,
             &key,
             &item.write,
-            live,
+            answer,
         )?);
     }
     let preview = preview_digest(context, items, &applied);
@@ -128,20 +155,50 @@ pub(crate) fn record_deliveries(
         preview,
         applied,
         live_since,
+        held_by,
     })
+}
+
+/// How long before a session's first live event a copy's capture already yields to it: the
+/// offset between a plugin's hook clock and live capture's for the same event (#1117).
+const LIVE_SLACK: TimeDelta = TimeDelta::seconds(60);
+
+/// What a batch's capture writes instead of itself, given its session's first live event and
+/// the `(actor, kind)`s other imports hold of the session; `None` when it is written.
+///
+/// A capture at or after the first live event is [`Applied::LiveOverlap`] (#1026). A plugin
+/// store's copy yields from [`LIVE_SLACK`] before it, and otherwise is [`Applied::Superseded`]
+/// when another import holds its actor and kind in the session (#1117). A copy never yields
+/// to its own store's rows, and nothing yields to a copy.
+fn yields(
+    capture: &CaptureWrite,
+    live_since: Option<&OrderKey>,
+    held: Option<&BTreeSet<(String, String)>>,
+) -> Option<Applied> {
+    if !capture.copy {
+        return live_since
+            .is_some_and(|live| capture.key >= *live)
+            .then_some(Applied::LiveOverlap);
+    }
+    if live_since.is_some_and(|live| capture.key.time >= live.time - LIVE_SLACK) {
+        return Some(Applied::LiveOverlap);
+    }
+    let actor = capture.event.payload.get("actor").and_then(Value::as_str)?;
+    let pair = (actor.to_owned(), capture.kind.as_str().to_owned());
+    held.is_some_and(|held| held.contains(&pair))
+        .then_some(Applied::Superseded)
 }
 
 /// Apply one delivery inside `tx`: the key is read first, and a held key answers
 /// [`Applied::Duplicate`] (same digest) or [`Applied::Collision`] (another) and writes nothing.
-/// A capture at or after `live_since`, its session's first live event, is
-/// [`Applied::LiveOverlap`] and writes nothing either.
+/// Then a capture `answer`ed by [`yields`] writes nothing and answers that.
 fn apply_one(
     tx: &Transaction<'_>,
     registry: &UpcasterRegistry,
     embed_dim: usize,
     key: &ReceiptKey<'_>,
     write: &DeliveryWrite,
-    live_since: Option<&OrderKey>,
+    answer: Option<Applied>,
 ) -> Result<Applied> {
     let held: Option<Vec<u8>> = tx
         .query_row(
@@ -164,10 +221,9 @@ fn apply_one(
             insert_receipt(tx, key, None, None, Some(&record.to_string()))?;
             Ok(Applied::Quarantined)
         }
-        DeliveryWrite::Capture(capture) if live_since.is_some_and(|live| capture.key >= *live) => {
-            Ok(Applied::LiveOverlap)
+        DeliveryWrite::Capture(capture) => {
+            answer.map_or_else(|| capture_event(tx, registry, embed_dim, key, capture), Ok)
         }
-        DeliveryWrite::Capture(capture) => capture_event(tx, registry, embed_dim, key, capture),
         DeliveryWrite::Memory(memory) => memory_event(tx, registry, embed_dim, key, memory),
     }
 }
@@ -180,6 +236,41 @@ const LIVE_EVENTS: &str = "SELECT timestamp,
        FROM events
       WHERE session_id = ?1 AND source = 'lifecycle'
         AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.machine') END = ?2";
+
+/// The `source` of live capture's events.
+const LIVE: &str = "lifecycle";
+
+/// The other imports' events of one session and machine: their sources, and the actor and
+/// kind each holds, read only when they are text. `session_id` is the key of
+/// `idx_events_session`.
+const OTHER_IMPORTS: &str = "SELECT DISTINCT source,
+            CASE WHEN json_valid(payload) AND json_type(payload, '$.actor') = 'text'
+                 THEN json_extract(payload, '$.actor') END,
+            CASE WHEN json_valid(payload) AND json_type(payload, '$.kind') = 'text'
+                 THEN json_extract(payload, '$.kind') END
+       FROM events
+      WHERE session_id = ?1 AND source NOT IN (?3, 'lifecycle')
+        AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.machine') END = ?2";
+
+/// An event's `source`, and its actor and kind when it has them.
+type Holder = (String, Option<String>, Option<String>);
+
+/// The holders of `session` and `machine` that neither live capture nor `own_source` wrote,
+/// once each: an event with no actor or kind names its source alone.
+fn other_imports(
+    tx: &Transaction<'_>,
+    machine: &str,
+    session: &str,
+    own_source: &str,
+) -> Result<Vec<Holder>> {
+    let mut stmt = tx.prepare_cached(OTHER_IMPORTS).map_err(classify)?;
+    let rows = stmt
+        .query_map(params![session, machine, own_source], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .map_err(classify)?;
+    Ok(rows.collect::<rusqlite::Result<_>>().map_err(classify)?)
+}
 
 /// The order key of the first event of `session` that `machine` delivered live, if any.
 fn first_live_event(
@@ -718,6 +809,7 @@ mod tests {
                 activity: None,
                 fact: None,
                 call: None,
+                copy: false,
             };
             tweak(&mut capture);
             let receipt = ReceiptKey {
@@ -1029,6 +1121,7 @@ mod tests {
                     )),
                     fact: Some(vectorless("made")),
                     call: None,
+                    copy: false,
                 })),
             },
             Keyed {
@@ -1101,6 +1194,7 @@ mod tests {
             activity: None,
             fact: None,
             call: None,
+            copy: false,
         }
     }
 
@@ -1111,6 +1205,22 @@ mod tests {
             .prepare(&format!("EXPLAIN QUERY PLAN {LIVE_EVENTS}"))
             .unwrap()
             .query_map(["s", "laptop"], |r| r.get(3))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter().any(|step| step.contains("idx_events_session")),
+            "{plan:?}"
+        );
+    }
+
+    #[test]
+    fn the_origin_lookup_reads_the_session_index() {
+        let conn = crate::test_util::setup_memory_db();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {OTHER_IMPORTS}"))
+            .unwrap()
+            .query_map(["s", "laptop", "claude-mem"], |r| r.get(3))
             .unwrap()
             .map(std::result::Result::unwrap)
             .collect();

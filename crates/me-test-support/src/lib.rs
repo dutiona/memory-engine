@@ -160,6 +160,9 @@ macro_rules! all_behaviors_into {
             a_write_commits_only_on_its_preview => lifecycle::a_write_commits_only_on_its_preview,
             a_key_written_earlier_in_the_batch_is_a_duplicate => lifecycle::a_key_written_earlier_in_the_batch_is_a_duplicate,
             a_live_event_drops_the_items_at_or_after_it => lifecycle::a_live_event_drops_the_items_at_or_after_it,
+            a_copy_yields_to_live_capture_by_time => lifecycle::a_copy_yields_to_live_capture_by_time,
+            a_copy_yields_its_session_kind_to_every_other_import => lifecycle::a_copy_yields_its_session_kind_to_every_other_import,
+            a_copy_keeps_its_own_rows_and_a_harness_import_never_yields_to_one => lifecycle::a_copy_keeps_its_own_rows_and_a_harness_import_never_yields_to_one,
             a_tombstone_blocks_even_with_an_active_twin => lifecycle::a_tombstone_blocks_even_with_an_active_twin,
             an_imported_memory_reinforces_or_queues => lifecycle::an_imported_memory_reinforces_or_queues,
         );

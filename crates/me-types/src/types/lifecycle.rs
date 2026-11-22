@@ -3,7 +3,7 @@
 //! A harness adapter turns one hook body into one [`NeutralRecord`](crate::types::lifecycle::NeutralRecord);
 //! the engine applies it. Nothing here names a tool or a harness field (ADR-0020 §1).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
@@ -399,6 +399,10 @@ pub struct Batch {
     /// The order key of the first live event of each session of the batch that has one, read
     /// inside the transaction: the items at or after it are [`Applied::LiveOverlap`].
     pub live_since: BTreeMap<String, OrderKey>,
+    /// The other origins holding events of each session of the batch's captures on its machine,
+    /// read inside the transaction: the `source`s of the other imports, and `lifecycle` when the
+    /// session was captured live (#1117).
+    pub held_by: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// The preview of a batch (#1026): what a reviewer approves and a write must reproduce.
@@ -431,6 +435,7 @@ pub fn preview_digest(context: &[u8; 32], items: &[Keyed], applied: &[Applied]) 
                 Applied::Collision => ("collision", "none"),
                 Applied::Quarantined => ("quarantined", "none"),
                 Applied::LiveOverlap => ("live_overlap", "none"),
+                Applied::Superseded => ("superseded", "none"),
                 Applied::Stored {
                     fact: Some(_),
                     reinforced,
@@ -459,6 +464,10 @@ pub fn preview_digest(context: &[u8; 32], items: &[Keyed], applied: &[Applied]) 
 /// the event, the activity and the fact by the leaf of `home`, and the fact's `source_event_id`
 /// by the event's row.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is one independent rule the store applies"
+)]
 pub struct CaptureWrite {
     /// The scope path the event is filed under; created when missing.
     pub home: String,
@@ -483,6 +492,10 @@ pub struct CaptureWrite {
     pub fact: Option<NewFact>,
     /// The call ID the event's result names: linked to the call record of the same machine.
     pub call: Option<String>,
+    /// Whether it is a plugin store's copy of the session (#1117): it yields to live capture
+    /// from a minute before the session's first live event, and to any other import holding
+    /// its actor and kind in the session.
+    pub copy: bool,
 }
 
 /// What the store did with a delivery.
@@ -510,6 +523,9 @@ pub enum Applied {
     /// A batch's capture at or after the first live event of its session and machine: the
     /// session was captured live from there, so nothing was written (#1026).
     LiveOverlap,
+    /// A copy's capture whose actor and kind another import already holds in its session and
+    /// machine, so nothing was written (#1117).
+    Superseded,
 }
 
 /// One upload to the backfill route (#1026): what the route knows of it before the engine

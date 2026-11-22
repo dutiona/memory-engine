@@ -43,6 +43,7 @@ pub fn prompt(session: &str, key: OrderKey) -> CaptureWrite {
         activity: None,
         fact: None,
         call: None,
+        copy: false,
     }
 }
 
@@ -813,5 +814,305 @@ pub async fn an_imported_memory_reinforces_or_queues<F: ConformanceBackend>(f: &
     assert!(
         matches!(elsewhere[0], Applied::Stored { fact: Some(id), reinforced: false, .. } if id != made),
         "[{name}] another home is another memory"
+    );
+}
+
+// ── A plugin store's copy (#1117) ───────────────────────────────────────────────
+
+/// A capture of `session` labelled `source` as the engine labels an import, its payload naming
+/// the machine, actor and kind the store reads; `copy` marks a plugin store's copy.
+fn labelled(
+    source: &str,
+    copy: bool,
+    session: &str,
+    actor: &str,
+    kind: Kind,
+    secs: i64,
+    id: &str,
+) -> CaptureWrite {
+    let mut write = prompt(session, key(secs, 1, id));
+    source.clone_into(&mut write.event.source);
+    "backfill".clone_into(&mut write.event.origin_node_id);
+    write.event.payload = serde_json::json!({
+        "machine": "laptop", "event_id": id, "seq": 1, "actor": actor, "kind": kind.as_str(),
+    });
+    write.kind = kind;
+    write.main_turn = actor == "main" && matches!(kind, Kind::Prompt | Kind::Stop);
+    write.copy = copy;
+    write
+}
+
+/// A capture of `session` that the plugin store `store` holds a copy of.
+pub fn copied(
+    store: &str,
+    session: &str,
+    actor: &str,
+    kind: Kind,
+    secs: i64,
+    id: &str,
+) -> CaptureWrite {
+    labelled(store, true, session, actor, kind, secs, id)
+}
+
+fn item(id: &str, write: CaptureWrite) -> Keyed {
+    keyed(id, 1, DeliveryWrite::Capture(Box::new(write)))
+}
+
+/// A dry run, then the write it previewed.
+async fn dry_then_write(be: &Arc<dyn StorageBackend>, items: Vec<Keyed>) -> Batch {
+    let dry = batch(be, items.clone(), BatchMode::DryRun).await;
+    let write = batch(
+        be,
+        items,
+        BatchMode::Write {
+            preview: dry.preview,
+        },
+    )
+    .await;
+    assert!(write.committed, "{:?}", write.applied);
+    write
+}
+
+fn sources(names: &[&str]) -> std::collections::BTreeSet<String> {
+    names.iter().map(|&n| n.to_owned()).collect()
+}
+
+/// A copy yields to live capture from a minute before the session's first live event of this
+/// machine, whatever its kind; what came before stays. A harness import keeps #1116's strict
+/// rule, and another machine's live events change nothing.
+pub async fn a_copy_yields_to_live_capture_by_time<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    let name = f.name();
+    for (machine, at) in [
+        ("laptop", key(0, 1, "live-1")),
+        ("laptop", key(600, 1, "live-2")),
+        ("desktop", key(-3 * 3600, 1, "elsewhere")),
+    ] {
+        deliver(&be, machine, &at.event_id, 1, live(machine, "s", &at))
+            .await
+            .unwrap();
+    }
+    let items = vec![
+        item(
+            "early",
+            copied("claude-mem", "s", "main", Kind::Prompt, -2 * 3600, "early"),
+        ),
+        item(
+            "slack",
+            copied("claude-mem", "s", "main", Kind::Prompt, -30, "slack"),
+        ),
+        item(
+            "after",
+            copied("claude-mem", "s", "main", Kind::Prompt, 300, "after"),
+        ),
+        item(
+            "stop",
+            copied("claude-mem", "s", "main", Kind::Stop, 360, "stop"),
+        ),
+    ];
+
+    let dry = batch(&be, items.clone(), BatchMode::DryRun).await;
+
+    assert_eq!(
+        outcomes(&dry.applied),
+        [
+            "stored fact=false reinforced=false",
+            "LiveOverlap",
+            "LiveOverlap",
+            "LiveOverlap",
+        ],
+        "[{name}]"
+    );
+    assert_eq!(
+        dry.live_since.get("s"),
+        Some(&key(0, 1, "live-1")),
+        "[{name}]"
+    );
+    assert_eq!(
+        dry.held_by.get("s"),
+        Some(&sources(&["lifecycle"])),
+        "[{name}]"
+    );
+    let harness = batch(
+        &be,
+        vec![item(
+            "strict",
+            labelled("backfill", false, "s", "main", Kind::Prompt, -30, "strict"),
+        )],
+        BatchMode::DryRun,
+    )
+    .await;
+    assert_eq!(
+        outcomes(&harness.applied),
+        ["stored fact=false reinforced=false"],
+        "[{name}] no slack for a harness import"
+    );
+    let before = events(&be).await;
+    dry_then_write(&be, items).await;
+    assert_eq!(
+        events(&be).await,
+        before + 1,
+        "[{name}] the overlap wrote nothing"
+    );
+}
+
+/// A copy yields, per actor and kind, to every other import holding its session on this
+/// machine, and keeps what no other import holds; a record with no actor or kind names its
+/// source and holds no kind. A capture landing between the dry run and its write changes the
+/// preview, so the write rolls back.
+pub async fn a_copy_yields_its_session_kind_to_every_other_import<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    let name = f.name();
+    for (id, write) in [
+        (
+            "t-p",
+            labelled("backfill", false, "t", "main", Kind::Prompt, 0, "t-p"),
+        ),
+        (
+            "t-s",
+            labelled("backfill", false, "t", "main", Kind::Stop, 10, "t-s"),
+        ),
+        (
+            "u-p",
+            copied("claude-memory", "u", "main", Kind::Prompt, 0, "u-p"),
+        ),
+        (
+            "w-p",
+            labelled("backfill", false, "w", "subagent", Kind::Prompt, 0, "w-p"),
+        ),
+    ] {
+        deliver(
+            &be,
+            "laptop",
+            id,
+            1,
+            DeliveryWrite::Capture(Box::new(write)),
+        )
+        .await
+        .unwrap();
+    }
+    let mut call = new_event("x");
+    "mcp".clone_into(&mut call.source);
+    call.payload = serde_json::json!({ "machine": "laptop", "call": "c1", "tool": "recall" });
+    be.insert_event(&call).await.unwrap();
+    let mut items: Vec<Keyed> = ["t", "u", "v", "w", "x"]
+        .iter()
+        .map(|s| {
+            let id = format!("m-{s}");
+            item(&id, copied("claude-mem", s, "main", Kind::Prompt, 100, &id))
+        })
+        .collect();
+    items.push(item(
+        "m-u-s",
+        copied("claude-mem", "u", "main", Kind::Stop, 110, "m-u-s"),
+    ));
+
+    let dry = batch(&be, items.clone(), BatchMode::DryRun).await;
+
+    let stored = "stored fact=false reinforced=false";
+    assert_eq!(
+        outcomes(&dry.applied),
+        ["Superseded", "Superseded", stored, stored, stored, stored],
+        "[{name}]"
+    );
+    for (session, held) in [
+        ("t", &["backfill"][..]),
+        ("u", &["claude-memory"]),
+        ("w", &["backfill"]),
+        ("x", &["mcp"]),
+    ] {
+        assert_eq!(
+            dry.held_by.get(session),
+            Some(&sources(held)),
+            "[{name}] {session}"
+        );
+    }
+    assert_eq!(dry.held_by.get("v"), None, "[{name}]");
+    deliver(
+        &be,
+        "laptop",
+        "v-live",
+        1,
+        live("laptop", "v", &key(120, 1, "v-live")),
+    )
+    .await
+    .unwrap();
+    let before = events(&be).await;
+    let write = batch(
+        &be,
+        items,
+        BatchMode::Write {
+            preview: dry.preview,
+        },
+    )
+    .await;
+    assert!(
+        !write.committed,
+        "[{name}] a live capture since the dry run"
+    );
+    assert_eq!(events(&be).await, before, "[{name}]");
+}
+
+/// A copy never yields to its own earlier rows, and a harness import never yields to a copy:
+/// it is stored whole and names the copy among the session's holders.
+pub async fn a_copy_keeps_its_own_rows_and_a_harness_import_never_yields_to_one<
+    F: ConformanceBackend,
+>(
+    f: &F,
+) {
+    let be = f.make().await;
+    let name = f.name();
+    let first = || {
+        item(
+            "c-1",
+            copied("claude-mem", "t", "main", Kind::Prompt, 0, "c-1"),
+        )
+    };
+    dry_then_write(&be, vec![first()]).await;
+    let grown = dry_then_write(
+        &be,
+        vec![
+            first(),
+            item(
+                "c-2",
+                copied("claude-mem", "t", "main", Kind::Prompt, 10, "c-2"),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(
+        outcomes(&grown.applied),
+        ["Duplicate", "stored fact=false reinforced=false"],
+        "[{name}]"
+    );
+    assert_eq!(
+        grown.held_by.get("t"),
+        None,
+        "[{name}] its own rows hold nothing"
+    );
+
+    let harness = dry_then_write(
+        &be,
+        vec![
+            item(
+                "b-1",
+                labelled("backfill", false, "t", "main", Kind::Prompt, 5, "b-1"),
+            ),
+            item(
+                "b-2",
+                labelled("backfill", false, "t", "main", Kind::Stop, 6, "b-2"),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(
+        outcomes(&harness.applied),
+        ["stored fact=false reinforced=false"; 2],
+        "[{name}]"
+    );
+    assert_eq!(
+        harness.held_by.get("t"),
+        Some(&sources(&["claude-mem"])),
+        "[{name}]"
     );
 }

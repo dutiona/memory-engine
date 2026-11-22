@@ -187,8 +187,8 @@ impl MemoryEngine {
             (Applied::Absent, None) => Err(MemoryError::Internal(
                 "the store found no key for a write it was asked to make".into(),
             )),
-            (Applied::LiveOverlap, _) => Err(MemoryError::Internal(
-                "the store answered a live delivery as a live overlap".into(),
+            (Applied::LiveOverlap | Applied::Superseded, _) => Err(MemoryError::Internal(
+                "the store answered a live delivery as a batch's overlap".into(),
             )),
         }
     }
@@ -562,6 +562,7 @@ pub(super) fn prepare(
         activity: extras.activity,
         fact,
         call: extras.call,
+        copy: false,
     };
     Ok(Plan::Write {
         write: DeliveryWrite::Capture(Box::new(write)),
