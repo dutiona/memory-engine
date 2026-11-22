@@ -222,6 +222,13 @@ impl HttpEmbeddingProvider {
         })
     }
 
+    /// The serving backend assumed when an operator declares none, by both binaries (#1064).
+    ///
+    /// It feeds the [`EmbeddingFingerprint`](memory_engine::EmbeddingFingerprint) a store
+    /// records, so changing it changes the identity every store configured without a
+    /// provider expects: keep it `"ollama"`, the historical hardcoded backend.
+    pub const DEFAULT_PROVIDER: &'static str = "ollama";
+
     /// ME's pinned query instruction (ADR 0015 §6), the default of every provider.
     ///
     /// It is prepended to **queries only**; documents are embedded prefix-free, so document

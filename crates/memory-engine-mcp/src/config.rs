@@ -45,11 +45,13 @@ pub struct EmbeddingSection {
     /// API key (optional — for authenticated endpoints).
     pub api_key: Option<String>,
 
-    /// Operator-declared serving backend (e.g. `"llama.cpp"`, `"ollama"`, `"tei"`, `"openai"`). Cannot
+    /// Operator-declared serving backend (e.g. `llama.cpp`, `ollama`, `tei`, `openai`). Cannot
     /// be sniffed from the endpoint (Ollama and TEI both speak `/v1/embeddings`); it feeds
     /// the [`EmbeddingFingerprint`](memory_engine::EmbeddingFingerprint) identity, so it
     /// must reflect the real backend. Free-form (like `model`); unrecognized values warn
-    /// at startup but are accepted. Defaults to `"ollama"` for back-compat.
+    /// at startup but are accepted. Defaults to
+    /// [`HttpEmbeddingProvider::DEFAULT_PROVIDER`](memory_engine_embed::HttpEmbeddingProvider::DEFAULT_PROVIDER)
+    /// for back-compat.
     #[serde(default = "default_provider")]
     pub provider: String,
 
@@ -315,7 +317,7 @@ impl std::fmt::Debug for EmbeddingSection {
 }
 
 fn default_provider() -> String {
-    "ollama".to_string()
+    memory_engine_embed::HttpEmbeddingProvider::DEFAULT_PROVIDER.to_owned()
 }
 
 const fn default_timeout() -> u64 {

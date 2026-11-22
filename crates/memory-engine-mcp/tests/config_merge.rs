@@ -89,6 +89,25 @@ dimensions = 384
     assert_eq!(emb.mrl_dim, None);
 }
 
+/// #1064: the TOML section and the flag-only resolver take one shared default.
+#[test]
+fn the_section_and_the_resolver_default_to_the_shared_provider() {
+    use memory_engine_embed::HttpEmbeddingProvider;
+    assert_eq!(
+        section("").provider,
+        HttpEmbeddingProvider::DEFAULT_PROVIDER
+    );
+    let overrides = EmbeddingOverrides {
+        url: Some("http://cli-host:8080/embed".into()),
+        model: Some("cli-model".into()),
+        ..EmbeddingOverrides::default()
+    };
+    assert_eq!(
+        resolve(&overrides, None).provider,
+        HttpEmbeddingProvider::DEFAULT_PROVIDER
+    );
+}
+
 #[test]
 fn embedding_asymmetric_tei_qwen_config_parses() {
     // Full asymmetric TEI/Qwen config: explicit provider, query_instruction, mrl_dim. (#618)

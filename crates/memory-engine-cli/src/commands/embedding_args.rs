@@ -3,7 +3,7 @@
 //! Every command that builds an [`HttpEmbeddingProvider`] (query, batch-ingest,
 //! bootstrap, consolidate) flattens [`EmbeddingArgs`] so the identity/asymmetry config
 //! keys match the MCP server's `[embedding]` section: `provider` (feeds the
-//! [`EmbeddingFingerprint`] that #614 enforces — replaces the old hardcoded `"ollama"`),
+//! [`EmbeddingFingerprint`] that #614 enforces — replaces the old hardcoded provider),
 //! `query_instruction` (asymmetric query prefix), `mrl_dim` (Matryoshka truncation), and
 //! the four served-artifact keys (`artifact_sha256`, `pooling`, `normalization`,
 //! `max_input_tokens`; ADR 0015 §1). Centralizing construction here keeps the
@@ -32,8 +32,13 @@ pub struct EmbeddingArgs {
     pub embed_model: Option<String>,
 
     /// Serving backend — operator-declared, feeds the embedding fingerprint (#614).
-    /// e.g. `llama.cpp`, `ollama`, `tei`, `openai`. Defaults to `ollama` for back-compat.
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_PROVIDER", default_value = "ollama")]
+    /// e.g. `llama.cpp`, `ollama`, `tei`, `openai`. Defaults to
+    /// [`HttpEmbeddingProvider::DEFAULT_PROVIDER`] for back-compat.
+    #[arg(
+        long,
+        env = "MEMORY_ENGINE_EMBED_PROVIDER",
+        default_value = HttpEmbeddingProvider::DEFAULT_PROVIDER
+    )]
     pub embed_provider: String,
 
     /// Bearer API key for the embedding endpoint.
@@ -273,6 +278,18 @@ mod tests {
     }
 
     const URL: &str = "http://127.0.0.1:0/v1/embeddings";
+
+    /// #1064: the clap default is the provider the MCP server defaults to.
+    #[test]
+    fn embed_provider_defaults_to_the_shared_provider() {
+        use clap::{Args, FromArgMatches};
+        let cmd = EmbeddingArgs::augment_args(clap::Command::new("t"));
+        let parsed = EmbeddingArgs::from_arg_matches(&cmd.get_matches_from(["t"])).unwrap();
+        assert_eq!(
+            parsed.embed_provider,
+            HttpEmbeddingProvider::DEFAULT_PROVIDER
+        );
+    }
 
     #[test]
     fn build_optional_none_when_both_absent() {

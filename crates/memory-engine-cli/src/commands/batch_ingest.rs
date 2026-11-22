@@ -947,7 +947,7 @@ not valid json
             embed: EmbeddingArgs {
                 embed_url: Some("http://127.0.0.1:0/v1/embeddings".into()),
                 embed_model: None, // partial config → build_required errors
-                embed_provider: "ollama".into(),
+                embed_provider: memory_engine_embed::HttpEmbeddingProvider::DEFAULT_PROVIDER.into(),
                 embed_api_key: None,
                 native_dim: None,
                 query_instruction: None,
