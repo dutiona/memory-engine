@@ -121,6 +121,9 @@ pub struct EngineConfig {
     pub(crate) read_only: bool,
     /// Which storage backend to open (default: [`BackendKind::Sqlite`]).
     pub(crate) backend: BackendKind,
+    /// The identity the caller declares; a store recording another one is refused before it
+    /// migrates (#1065). Set through `MemoryEngineBuilder::declared_identity`.
+    pub(crate) declared_identity: Option<EmbeddingFingerprint>,
 }
 
 impl EngineConfig {
@@ -136,6 +139,7 @@ impl EngineConfig {
             upcaster_registry: UpcasterRegistry::new(),
             read_only: false,
             backend: BackendKind::Sqlite,
+            declared_identity: None,
         }
     }
 
@@ -270,9 +274,21 @@ impl MemoryEngine {
         // Read what an existing store records before the pool opens it: the writable pool
         // migrates, so a check made after it would already have changed the file (#1065), and
         // the identity of a store older than v15 is only readable this way (#1049).
+        if let Some(declared) = &config.declared_identity
+            && declared.dim != config.embed_dim
+        {
+            return Err(MemoryError::EmbeddingDimension {
+                expected: config.embed_dim,
+                actual: declared.dim,
+            });
+        }
         if config.path.is_file() {
             let recorded = read_recorded_embedding(&config.path)?;
             Self::validate_embed_dim(&recorded, config.embed_dim)?;
+            if let (Some(stored), Some(declared)) = (recorded.identity(), &config.declared_identity)
+            {
+                stored.ensure_matches(declared)?;
+            }
         }
         let pool = if config.read_only {
             ConnectionPool::open_read_only(&config.path, config.embed_dim, config.read_pool_size)?

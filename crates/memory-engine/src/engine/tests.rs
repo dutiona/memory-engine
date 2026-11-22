@@ -6535,3 +6535,73 @@ async fn an_all_waiting_store_refuses_another_dimension() {
         "the refused open changed the store"
     );
 }
+
+/// #1065: a declared identity is checked read-only before the store migrates, in WAL and in
+/// rollback-journal mode; a matching one opens and migrates.
+#[tokio::test]
+async fn declared_identity_refusal_never_migrates_an_older_store() {
+    let a = EmbeddingFingerprint::new("m", "p", DIM);
+    let b = EmbeddingFingerprint::new("other", "p", DIM);
+    for journal in ["WAL", "DELETE"] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = older_store(dir.path(), &a).await;
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .pragma_update(None, "journal_mode", journal)
+            .unwrap();
+        let before = store_state(&db);
+        let err = MemoryEngine::builder(DIM)
+            .path(&db)
+            .declared_identity(b.clone())
+            .build()
+            .expect_err("another identity");
+        assert!(
+            matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+            "{journal}: {err:?}"
+        );
+        assert_eq!(
+            store_state(&db),
+            before,
+            "{journal}: the refused open changed the store"
+        );
+        let mut engine = MemoryEngine::builder(DIM)
+            .path(&db)
+            .declared_identity(a.clone())
+            .build()
+            .unwrap();
+        engine.close().await.unwrap();
+        assert_eq!(
+            store_state(&db).2,
+            crate::CURRENT_SCHEMA_VERSION.to_string(),
+            "{journal}: the matching open migrates"
+        );
+    }
+}
+
+#[tokio::test]
+async fn declared_identity_accepts_a_blank_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("blank.db");
+    let fp = EmbeddingFingerprint::new("m", "p", DIM);
+    let mut engine = MemoryEngine::builder(DIM)
+        .path(&db)
+        .declared_identity(fp.clone())
+        .build()
+        .unwrap();
+    engine.close().await.unwrap();
+    let mut engine = MemoryEngine::builder(DIM)
+        .path(&db)
+        .declared_identity(fp)
+        .build()
+        .unwrap();
+    engine.close().await.unwrap();
+    let err = MemoryEngine::builder(DIM)
+        .path(&db)
+        .declared_identity(EmbeddingFingerprint::new("m", "p", DIM + 1))
+        .build()
+        .expect_err("a declared dimension other than the engine's");
+    assert!(
+        matches!(err, MemoryError::EmbeddingDimension { .. }),
+        "{err:?}"
+    );
+}
