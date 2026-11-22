@@ -242,6 +242,7 @@ impl DreamCycle for DefaultDreamCycle {
                 method_version: METHOD_VERSION.to_owned(),
                 processed_ids,
             },
+            embedding_fingerprint: None,
         })
     }
 }

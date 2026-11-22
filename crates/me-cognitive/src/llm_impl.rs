@@ -41,6 +41,10 @@ const METHOD_VERSION: &str = "llm-proposer-v1";
 /// `spawn_blocking` — keeping the executor unblocked and a `reqwest::blocking`
 /// provider nested-runtime-safe. See the module docs for the safety rails.
 ///
+/// Its report declares the embedder's identity in `CycleReport::embedding_fingerprint`:
+/// the apply refuses its summary vectors unless that identity is the store's
+/// (ADR-0015 §3).
+///
 /// # Injecting the backend
 ///
 /// The proposer and embedder are consumer-supplied; the engine never embeds or calls
@@ -200,6 +204,7 @@ impl DreamCycle for LlmDreamCycle {
                 method_version: METHOD_VERSION.to_owned(),
                 processed_ids,
             },
+            embedding_fingerprint: Some(Box::new(self.embedder.fingerprint())),
         })
     }
 }
@@ -285,6 +290,25 @@ mod tests {
             "processed_ids = the whole window"
         );
         assert_eq!(report.metadata.method_version, METHOD_VERSION);
+    }
+
+    #[tokio::test]
+    async fn the_report_declares_the_embedders_identity() {
+        let engine = engine().await;
+        let s1 = add(&engine, "fact one").await;
+        let s2 = add(&engine, "fact two").await;
+        let embedder = MockEmbedder::constant(DIM, 0.1);
+        let declared = embedder.fingerprint();
+        let llm = LlmDreamCycle::new(
+            Arc::new(FakeProposer {
+                merges: vec![merge(vec![s1, s2], "merged")],
+            }) as Arc<dyn DeltaProposer>,
+            Arc::new(embedder) as Arc<dyn EmbeddingProvider>,
+        );
+
+        let report = run_dream_cycle(engine.ctx(), &engine, &llm).await.unwrap();
+
+        assert_eq!(report.embedding_fingerprint, Some(Box::new(declared)));
     }
 
     /// End-to-end: the produced report applies cleanly, creating the supersedes edges +

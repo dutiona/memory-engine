@@ -204,6 +204,19 @@ impl ConsolidationStore for SqliteBackend {
             .block_write(move |conn| {
                 // --- Validation pass (read-only, on the held connection) ---
                 // Every delta is validated before any is applied.
+                let declared =
+                    if report.deltas.iter().any(|d| {
+                        matches!(d, CycleDelta::AddFact(_) | CycleDelta::Synthesize { .. })
+                    }) {
+                        Some(
+                            report
+                                .embedding_fingerprint
+                                .as_deref()
+                                .ok_or(MemoryError::Cycle(CycleError::UndeclaredEmbedding))?,
+                        )
+                    } else {
+                        None
+                    };
                 {
                     fn ensure_active(
                         f: &me_types::types::Fact,
@@ -344,14 +357,12 @@ impl ConsolidationStore for SqliteBackend {
                     .map_err(StorageError::backend)?;
 
                 // #613 guard: AddFact / Synthesize carry pre-computed embeddings with no
-                // live provider — reject against an un-stamped store. Called inside the
+                // live provider — reject against an un-stamped store (a cycle never stamps),
+                // then against a store of another identity (#1062). Called inside the
                 // transaction (on `&tx`), so the check and the writes see one state.
-                if report
-                    .deltas
-                    .iter()
-                    .any(|d| matches!(d, CycleDelta::AddFact(_) | CycleDelta::Synthesize { .. }))
-                {
+                if let Some(declared) = declared {
                     crate::store::embedding_meta::require_present(&tx)?;
+                    crate::store::embedding_meta::check_compatible(&tx, declared)?;
                 }
 
                 let mut result = ApplyResult::default();
@@ -1123,6 +1134,7 @@ mod tests {
                 method_version: "rollback-test".into(),
                 processed_ids: vec![fact_id],
             },
+            embedding_fingerprint: None,
         };
 
         let registry = crate::store::upcaster::UpcasterRegistry::new();
@@ -1180,21 +1192,20 @@ mod tests {
         }
     }
 
+    /// The identity [`forgotten_twin_store`] stamps.
+    fn stamped() -> me_types::types::EmbeddingFingerprint {
+        me_types::types::EmbeddingFingerprint::new("test-model", "tei", DIM)
+    }
+
     /// A stamped store holding active `twin` and `other`, with `twin`'s content blocked by
     /// a tombstone; returns the backend, the pool and both ids.
     #[allow(clippy::significant_drop_tightening)]
     fn forgotten_twin_store() -> (SqliteBackend, Arc<ConnectionPool>, i64, i64) {
-        use me_types::types::EmbeddingFingerprint;
         let pool = Arc::new(ConnectionPool::open_memory(DIM).unwrap());
         let (twin, other) = {
             let conn = pool.write();
             let tx = conn.unchecked_transaction().unwrap();
-            crate::store::embedding_meta::record_if_absent(
-                &tx,
-                &EmbeddingFingerprint::new("test-model", "tei", DIM),
-                DIM,
-            )
-            .unwrap();
+            crate::store::embedding_meta::record_if_absent(&tx, &stamped(), DIM).unwrap();
             let store = FactStore::new(&tx, DIM);
             let ids = (
                 store.insert(&semantic("twin")).unwrap(),
@@ -1233,6 +1244,7 @@ mod tests {
                 method_version: "forgotten-test".into(),
                 processed_ids: Vec::new(),
             },
+            embedding_fingerprint: Some(Box::new(stamped())),
         }
     }
 

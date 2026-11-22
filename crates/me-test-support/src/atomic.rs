@@ -233,6 +233,7 @@ pub async fn apply_cycle_deltas_atomic_rollback<F: ConformanceBackend>(f: &F) {
             method_version: "conformance".into(),
             processed_ids: vec![fact_id, promotable],
         },
+        embedding_fingerprint: None,
     };
     let registry = me_storage::UpcasterRegistry::new();
     let err = be

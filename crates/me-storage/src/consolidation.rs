@@ -87,6 +87,14 @@ pub trait ConsolidationStore: Send + Sync {
     /// push-down uses `scope_id = 1` for all promotions, matching the current
     /// behavior exactly.
     ///
+    /// ## Embedding identity (ADR-0015 §3, #1062)
+    ///
+    /// A report whose `AddFact` or `Synthesize` deltas carry vectors must declare their
+    /// identity in `report.embedding_fingerprint`: `None` is refused with
+    /// `CycleError::UndeclaredEmbedding` before the transaction, and inside it a blank
+    /// store is refused (#613) and a declaration that differs from the store's identity is
+    /// refused with `MemoryError::EmbeddingModelMismatch`, before any delta writes.
+    ///
     /// ## Contract
     ///
     /// `Ok ⟹ all sub-ops committed; Err ⟹ store byte-identical (tx rolled back)`.

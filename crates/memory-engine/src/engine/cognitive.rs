@@ -282,7 +282,12 @@ impl MemoryEngine {
     /// # Errors
     ///
     /// - [`MemoryError::ReadOnly`] if the engine is read-only.
-    /// - [`MemoryError::Cycle`] if any delta fails validation.
+    /// - [`MemoryError::Cycle`] if any delta fails validation, including
+    ///   [`CycleError::UndeclaredEmbedding`](crate::error::CycleError::UndeclaredEmbedding)
+    ///   when an `AddFact`/`Synthesize` vector comes in a report whose
+    ///   `embedding_fingerprint` is `None`.
+    /// - [`MemoryError::EmbeddingModelMismatch`] if the report declares another
+    ///   embedding identity than the store's.
     /// - [`MemoryError::EmbeddingDimension`] if an
     ///   `AddFact`/`Promote`/`Synthesize` embedding does not match the engine dimension.
     /// - [`MemoryError::Storage`] on a backend failure.
@@ -328,6 +333,7 @@ impl MemoryEngine {
             deltas,
             identity: report.identity.clone(),
             metadata,
+            embedding_fingerprint: report.embedding_fingerprint.clone(),
         };
         let mut result = crate::cognitive::apply_cycle_report(
             self.mem_ctx(),
@@ -621,6 +627,7 @@ mod tests {
                     method_version: "noop".into(),
                     processed_ids: vec![],
                 },
+                embedding_fingerprint: None,
             })
         }
     }
@@ -672,6 +679,7 @@ mod tests {
                     method_version: "capability-probe".into(),
                     processed_ids: vec![],
                 },
+                embedding_fingerprint: None,
             })
         }
     }
@@ -818,6 +826,7 @@ mod tests {
                     method_version: "bad".into(),
                     processed_ids: vec![], // ...but marks nothing → contract violation
                 },
+                embedding_fingerprint: None,
             })
         }
     }
@@ -1170,6 +1179,7 @@ mod tests {
                 method_version: "test".into(),
                 processed_ids: vec![id],
             },
+            embedding_fingerprint: None,
         };
         engine.apply_cycle_report(&report).await.unwrap();
         let explanation = engine.explain_fact(id).await.unwrap();
