@@ -101,7 +101,7 @@ pub(crate) fn record_deliveries(
         }
         let holders = held_by.entry(session.to_owned()).or_default();
         if live_since.contains_key(session) {
-            holders.insert(LIVE.to_owned());
+            holders.insert("lifecycle".to_owned());
         }
         let mut kinds = BTreeSet::new();
         for (other, actor, kind) in other_imports(&tx, machine, session, source)? {
@@ -236,9 +236,6 @@ const LIVE_EVENTS: &str = "SELECT timestamp,
        FROM events
       WHERE session_id = ?1 AND source = 'lifecycle'
         AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.machine') END = ?2";
-
-/// The `source` of live capture's events.
-const LIVE: &str = "lifecycle";
 
 /// The other imports' events of one session and machine: their sources, and the actor and
 /// kind each holds, read only when they are text. `session_id` is the key of
