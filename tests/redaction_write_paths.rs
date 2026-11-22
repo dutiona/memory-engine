@@ -1676,6 +1676,8 @@ async fn an_import_redacts_with_the_denylist() {
         received_at: chrono::Utc::now(),
         home: "user:u/project:p".into(),
         provenance: json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+        body_sha256: [7; 32],
+        census: json!({}),
     };
     let event = |n: u8, content: Content| {
         ImportItem::Event(ImportEvent {

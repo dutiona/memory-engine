@@ -533,6 +533,12 @@ pub struct Upload {
     pub home: String,
     /// The project facts as decoded, with the resolved key and the rules version.
     pub provenance: Value,
+    /// The SHA-256 of the uploaded body: the preview binds the whole file, what no item reads
+    /// included.
+    pub body_sha256: [u8; 32],
+    /// What the reader counted and did not import, as the report shows it; bound into the
+    /// preview too.
+    pub census: Value,
 }
 
 /// One item a harness reader made of an upload.

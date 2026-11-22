@@ -430,7 +430,14 @@ async fn a_write_needs_the_preview_of_its_dry_run() {
         .clone()
         .header("ME-Project-Origin-Url", "https://example.com/example/q.git")
         .write(&preview);
-    for stale in [changed_body, other_fact] {
+    // An edit no item reads, in a skipped `progress` entry, is still another body.
+    let text = String::from_utf8(transcript()).unwrap();
+    assert!(text.contains(r#""hookName":"Stop""#));
+    let skipped_edit = upload
+        .clone()
+        .body(text.replacen(r#""hookName":"Stop""#, r#""hookName":"Edited""#, 1))
+        .write(&preview);
+    for stale in [changed_body, other_fact, skipped_edit] {
         let answer = send(&server, "laptop", &stale).await;
         assert_eq!(answer.0, 412, "{}", answer.1);
         assert_eq!(rows(&server), [0; 5]);

@@ -372,6 +372,14 @@ impl MemoryMcpServer {
             received_at,
             home,
             provenance,
+            body_sha256: Sha256::digest(body).into(),
+            census: json!({
+                "lines": census.lines,
+                "malformed": census.malformed,
+                "skipped": census.skipped,
+                "pending": census.pending,
+                "incomplete_turns": census.incomplete_turns,
+            }),
         };
         let imported = match self
             .engine
@@ -553,7 +561,7 @@ impl Report<'_> {
             "kind": self.upload.kind,
             "source": imported.source,
             "client_version": self.upload.client_version,
-            "body": { "bytes": self.body.len(), "sha256": hex(&Sha256::digest(self.body)) },
+            "body": { "bytes": self.body.len(), "sha256": hex(&self.upload.body_sha256) },
             "denylist_literals": self.denylist,
             "project": {
                 "home": self.upload.home,

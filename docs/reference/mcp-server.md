@@ -585,7 +585,9 @@ transaction, so a live capture that commits while an upload is being prepared st
 **One transaction.** The engine redacts and maps the whole upload outside any lock, then applies it in one
 `BEGIN IMMEDIATE`, in order-key order. The **preview** is a SHA-256 over every effect the upload would write (the
 items' keys, digests, Homes, event columns but the receipt time, payloads and facts, the kind, the redacted source, the
-provenance and the denylist's digest) and over the store's outcome for each item, never a row id. A dry run returns it;
+provenance and the denylist's digest), over what the report shows beside them (the body's SHA-256, the reader's census,
+the refused items), and over the store's outcome for each item, never a row id. An edit to a line no item reads still
+changes it. A dry run returns it;
 a write commits only when no item collided and its own preview equals `ME-Backfill-Preview`. A change of the file, of a
 header such as `ME-Backfill-Mtime` or a project fact, of the denylist, or of the store's outcomes (a live capture of the
 session, a forget) since the dry run gives a 412 and writes nothing. Nothing is embedded: every memory is queued for the

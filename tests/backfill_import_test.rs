@@ -43,6 +43,8 @@ fn upload(home: &str) -> Upload {
         received_at: received(),
         home: home.into(),
         provenance: provenance("/work/p"),
+        body_sha256: digest("the uploaded body"),
+        census: json!({ "skipped": { "progress": 1 } }),
     }
 }
 
@@ -811,6 +813,28 @@ async fn the_preview_changes_with_every_effect_bearing_input() {
         preview(later, transcript(), vec![]).await,
         base,
         "receipt time"
+    );
+    // A body that differs only in what no item reads (a skipped entry) is another body.
+    let mut edited = upload(HOME);
+    edited.body_sha256 = digest("another body");
+    assert_ne!(
+        preview(edited, transcript(), vec![]).await,
+        base,
+        "the body's digest"
+    );
+    let mut recounted = upload(HOME);
+    recounted.census = json!({ "skipped": { "progress": 2 } });
+    assert_ne!(
+        preview(recounted, transcript(), vec![]).await,
+        base,
+        "the census"
+    );
+    let mut refused = transcript();
+    refused.push(main_item("bf.9.c", 30, compact("")));
+    assert_ne!(
+        preview(upload(HOME), refused, vec![]).await,
+        base,
+        "a refused item"
     );
 
     let mut body = transcript();

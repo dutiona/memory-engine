@@ -104,6 +104,8 @@ impl MemoryEngine {
     ///     received_at: Utc::now(),
     ///     home: "user:alice/project:demo".into(),
     ///     provenance: serde_json::json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+    ///     body_sha256: [9; 32],
+    ///     census: serde_json::json!({ "lines": 1 }),
     /// };
     /// let stop = ImportItem::Event(ImportEvent {
     ///     event_id: "bf.4f6c.s".into(),
@@ -517,8 +519,10 @@ fn time(at: DateTime<Utc>) -> String {
 }
 
 /// The SHA-256 of the canonical JSON (`serde_json` sorts object keys) of every effect the upload
-/// would write, the stored items' and the upload's own, but never a receipt time: a dry run and
-/// its write agree when nothing changed, and any change of an effect-bearing input changes it.
+/// would write, the stored items' and the upload's own, and of everything its report shows
+/// beside them (the body's digest, the reader's census, the refused items), but never a receipt
+/// time: a dry run and its write agree when nothing changed, and any change of the body or of an
+/// effect-bearing input changes it.
 fn context_digest(
     upload: &Upload,
     source: &str,
@@ -532,12 +536,24 @@ fn context_digest(
         .filter_map(|p| p.write.as_ref().ok())
         .map(effects)
         .collect::<Result<Vec<_>>>()?;
+    let refused: Vec<Value> = prepared
+        .iter()
+        .filter_map(|p| {
+            p.write
+                .as_ref()
+                .err()
+                .map(|r| json!([p.summary.event_id, r]))
+        })
+        .collect();
     let context = json!({
         "kind": upload.kind,
         "source": source,
         "provenance": upload.provenance,
         "denylist": hex(&Sha256::digest(json!(literals).to_string().as_bytes())),
+        "body": hex(&upload.body_sha256),
+        "census": upload.census,
         "items": items,
+        "refused": refused,
     });
     Ok(Sha256::digest(context.to_string().as_bytes()).into())
 }
