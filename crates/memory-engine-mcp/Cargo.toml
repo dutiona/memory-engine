@@ -10,6 +10,8 @@ repository = "https://github.com/dutiona/memory-engine"
 # (being private) lets its version-less intra-workspace path deps pass cargo-deny's
 # wildcard check — `allow-wildcard-paths` applies only to private crates.
 publish = false
+# `cargo run -p memory-engine-mcp` stays the server, beside the plugin-store exporter.
+default-run = "memory-engine-mcp"
 
 [lib]
 name = "memory_engine_mcp"
@@ -18,6 +20,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "memory-engine-mcp"
 path = "src/main.rs"
+
+[[bin]]
+name = "memory-engine-plugin-export"
+path = "src/bin/plugin_export.rs"
 
 [dependencies]
 memory-engine = { path = "../memory-engine" }
