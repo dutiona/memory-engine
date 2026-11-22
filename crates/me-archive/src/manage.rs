@@ -254,10 +254,9 @@ pub async fn search_archives_fallback(
 
 /// Build the `.pak` payload.
 ///
-/// `pub` (not private): the facade's `pak_write_stamp_matches_read_gate` regression
-/// test (`engine/archive.rs`) calls this directly across the crate boundary to pin the
-/// write side of the `.pak` schema-version symmetry guard (Wave 2 #816 / S4, sub-PR 3b
-/// — see the module docs' "structural prize").
+/// `pak_write_stamp_matches_read_gate` (below) calls this to pin the write side of the
+/// `.pak` schema-version symmetry guard (Wave 2 #816 / S4, sub-PR 3b — see the module
+/// docs' "structural prize").
 #[must_use]
 pub(crate) fn build_pak(embed_dim: usize, facts: &[Fact], edges: &[Edge]) -> ArchivePak {
     ArchivePak {

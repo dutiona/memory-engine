@@ -125,7 +125,7 @@ pub(crate) fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String
 /// It is deliberately **not** a backend's schema version. A `.pak` is a portable blob of
 /// `me-types` DTOs, so "can I read this pak?" is a question about DTO shape, not about
 /// any backend's migration history — and the backends' counters are not comparable
-/// (`SQLite` is at 14, Postgres independently at 1). Sourcing the check from a concrete
+/// (each backend numbers its migrations independently). Sourcing the check from a concrete
 /// backend would also put an L3→backend edge on the archive primitive — impossible here
 /// by construction, since this crate (`me-archive`) has no dependency on any
 /// `me-backend-*` crate (Wave 2 #816 / S4, sub-PR 3b).
