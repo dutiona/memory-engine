@@ -159,7 +159,7 @@ fn scrub_json_redacts_keys_and_keeps_every_member() {
         ("input".to_owned(), object(vec![(other, json!("x"))])),
         ("machine".to_owned(), json!("laptop")),
     ]);
-    assert_eq!(scrub_payload(&mut payload, &[]).unwrap(), 1);
+    assert_eq!(scrub_payload(&mut payload).unwrap(), 1);
     assert_eq!(
         payload,
         json!({ "input": { "[REDACTED:aws-access-key]": "x" }, "machine": "laptop" })
@@ -192,7 +192,7 @@ fn genuine_provenance_keeps_its_paths_and_loses_machine_tokens() {
     let mut payload =
         json!({ PROVENANCE_KEY: provenance(uuid_root, &json!(null)), "error": uuid_root });
     assert_eq!(
-        scrub_payload(&mut payload, &[]).unwrap(),
+        scrub_payload(&mut payload).unwrap(),
         1,
         "only the error is redacted"
     );
@@ -200,7 +200,7 @@ fn genuine_provenance_keeps_its_paths_and_loses_machine_tokens() {
     assert_eq!(payload["error"], "[REDACTED:high-entropy]");
 
     let mut forged = json!({ PROVENANCE_KEY: provenance("/dev/sk-learn-tutorial-2024", &json!(machine_token())) });
-    assert_eq!(scrub_payload(&mut forged, &[]).unwrap(), 1);
+    assert_eq!(scrub_payload(&mut forged).unwrap(), 1);
     assert_eq!(
         forged[PROVENANCE_KEY]["facts"]["root"],
         "/dev/sk-learn-tutorial-2024"
@@ -211,12 +211,12 @@ fn genuine_provenance_keeps_its_paths_and_loses_machine_tokens() {
 #[test]
 fn content_cannot_hide_under_the_provenance_key() {
     let mut payload = json!({ PROVENANCE_KEY: { "note": ghp() } });
-    assert_eq!(scrub_payload(&mut payload, &[]).unwrap(), 1);
+    assert_eq!(scrub_payload(&mut payload).unwrap(), 1);
     assert_eq!(payload[PROVENANCE_KEY]["note"], "[REDACTED:github-pat]");
     let mut long_key =
         json!({ PROVENANCE_KEY: provenance("/r", &json!("k".repeat(MAX_KEY_BYTES + 1))) });
     assert!(!is_provenance(&long_key[PROVENANCE_KEY]));
-    assert_eq!(scrub_payload(&mut long_key, &[]).unwrap(), 0);
+    assert_eq!(scrub_payload(&mut long_key).unwrap(), 0);
 }
 
 // ── The author denylist on the capture path (#1026) ─────────────────────────
@@ -235,7 +235,7 @@ fn the_capture_path_takes_the_denylist() {
         "prompt": format!("deploy to {host} now"),
         PROVENANCE_KEY: provenance(&format!("/srv/{host}/p"), &json!(null)),
     });
-    assert_eq!(scrub_payload(&mut payload, &denylist).unwrap(), 1);
+    assert_eq!(scrub_capture_payload(&mut payload, &denylist).unwrap(), 1);
     assert_eq!(payload["prompt"], "deploy to [REDACTED:denylist] now");
     for identifier in ["machine", "agent_id"] {
         assert_eq!(payload[identifier], host, "{identifier}");
@@ -281,9 +281,25 @@ fn the_capture_path_takes_the_denylist() {
         json!({ "sensitive_path": "/srv/[REDACTED:denylist]/.env" })
     );
 
+    // An identifier gets the machine-token rule alone: a name that reads as high-entropy, or a
+    // hex run after a key word, is a validated identifier, never redacted.
+    let agent = format!("{}-{}", "api_key", "a3f1b2c4d5e6f7a8".repeat(2));
+    let mut ids = json!({
+        "machine": "q7m2x9k4v8w3z6p1r5t0y8u2",
+        "agent_id": agent,
+        "event_id": format!("bf.{}.p", machine_token()),
+    });
+    assert_eq!(scrub_capture_payload(&mut ids, &denylist).unwrap(), 1);
+    assert_eq!(ids["machine"], "q7m2x9k4v8w3z6p1r5t0y8u2");
+    assert_eq!(ids["agent_id"], agent);
+    assert_eq!(ids["event_id"], "bf.[REDACTED:machine-token].p");
+    // Any other event payload is a caller's: no member of it is a validated identifier.
+    let mut ingested = json!({ "machine": "q7m2x9k4v8w3z6p1r5t0y8u2", "kind": aws() });
+    assert_eq!(scrub_payload(&mut ingested).unwrap(), 2);
+
     let mut live = json!({ "prompt": format!("deploy to {host} now") });
     assert_eq!(
-        scrub_payload(&mut live, &[]).unwrap(),
+        scrub_capture_payload(&mut live, &[]).unwrap(),
         0,
         "live capture passes none"
     );

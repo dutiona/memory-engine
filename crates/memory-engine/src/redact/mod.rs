@@ -899,9 +899,11 @@ fn scrub_provenance_value(value: &mut Value) -> u64 {
     }
 }
 
-/// The members of a captured event's payload that are identifiers, not content. The author's
-/// denylist holds host names, which are machine names: applied here it would hide a row from
-/// `erase --machine` (#1026). Every other rule still applies to them.
+/// The members of a captured event's payload that are identifiers, not content: validated
+/// names and keys, which get the machine-token rule alone, as the provenance block does. Any
+/// other rule could change one (a 20-character machine name reads as high-entropy), and the
+/// author's denylist holds host names, which are machine names: either would hide a row from
+/// `erase --machine` (#1026). An identifier that holds a machine token is refused upstream.
 const IDENTIFIER_MEMBERS: &[&str] = &[
     "machine",
     "event_id",
@@ -917,21 +919,36 @@ const IDENTIFIER_MEMBERS: &[&str] = &[
 ];
 
 /// Scrub an event payload: its genuine capture context (`PROVENANCE_KEY`, in MC-9's exact
-/// shape) gets the machine-token rule only, its identifier members every rule but the
-/// `denylist`, everything else every rule and the `denylist`. Its member names are the payload's
+/// shape) gets the machine-token rule only, everything else every rule. Its member names are
+/// the payload's schema and get every rule too.
+pub(crate) fn scrub_payload(payload: &mut Value) -> Result<u64> {
+    scrub_event_payload(payload, &[], &[])
+}
+
+/// Scrub a captured event's payload, live or imported (#1025, #1026): as [`scrub_payload`], but
+/// its identifier members, validated before they get here, get the machine-token rule only, and
+/// every other member also loses the author's `denylist`. Its member names are the payload's
 /// schema: they get every rule but the `denylist`, which a schema name could equal.
-pub(crate) fn scrub_payload(payload: &mut Value, denylist: &[String]) -> Result<u64> {
+pub(crate) fn scrub_capture_payload(payload: &mut Value, denylist: &[String]) -> Result<u64> {
+    scrub_event_payload(payload, IDENTIFIER_MEMBERS, denylist)
+}
+
+fn scrub_event_payload(
+    payload: &mut Value,
+    identifiers: &[&str],
+    denylist: &[String],
+) -> Result<u64> {
     let Value::Object(map) = payload else {
         return scrub_json(payload, denylist);
     };
     scrub_members(map, &[], |k, v| {
-        Ok(if k == PROVENANCE_KEY && is_provenance(v) {
-            scrub_provenance_value(v)
-        } else if IDENTIFIER_MEMBERS.contains(&k) {
-            scrub_member(k, v, &[])?
-        } else {
-            scrub_member(k, v, denylist)?
-        })
+        Ok(
+            if (k == PROVENANCE_KEY && is_provenance(v)) || identifiers.contains(&k) {
+                scrub_provenance_value(v)
+            } else {
+                scrub_member(k, v, denylist)?
+            },
+        )
     })
 }
 

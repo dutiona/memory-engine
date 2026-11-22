@@ -478,7 +478,7 @@ fn content_members(
 }
 
 /// Redact and bound one record, and build what the store writes for it (decisions 9 to 11 of
-/// #1025): the payload takes [`redact::scrub_payload`], so identifiers are columns as sent and
+/// #1025): the payload takes [`redact::scrub_capture_payload`], so identifiers are kept as sent and
 /// every text is redacted, with no size check beyond the wire's. `capture` says whether it is
 /// live or imported (#1026), which sets its labels, its memory's date and the denylist.
 pub(super) fn prepare(
@@ -515,7 +515,7 @@ pub(super) fn prepare(
     }
     let extras = content_members(delivery, &record, main, capture.denylist, &mut payload)?;
     let mut payload = Value::Object(payload);
-    let found = extras.found + redact::scrub_payload(&mut payload, capture.denylist)?;
+    let found = extras.found + redact::scrub_capture_payload(&mut payload, capture.denylist)?;
 
     let created = match capture.origin {
         Origin::Live => delivery.received_at,

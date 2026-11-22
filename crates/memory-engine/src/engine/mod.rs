@@ -750,7 +750,7 @@ impl MemoryEngine {
         self.ensure_writable()?;
         check_json_size(&event.payload, "event payload")?;
         let mut event = event.clone();
-        let found = redact::scrub_payload(&mut event.payload, &[])?;
+        let found = redact::scrub_payload(&mut event.payload)?;
         check_json_size(&event.payload, "event payload")?;
         Ok((event, found))
     }

@@ -700,6 +700,51 @@ async fn a_tool_input_key_is_redacted_in_the_event_and_the_activity() {
     assert!(stored.contains("[REDACTED:aws-access-key]"), "{stored}");
 }
 
+/// A machine name is a validated identifier, stored as sent: one that reads as high-entropy (a
+/// valid DNS label of 24 random characters) stays whole in the payload and in the memories'
+/// metadata, so erasing the machine still takes every row its upload wrote.
+#[tokio::test]
+async fn a_high_entropy_machine_name_is_kept_and_erasable() {
+    let s = Store::new();
+    let machine = "q7m2x9k4v8w3z6p1r5t0y8u2";
+    assert_ne!(
+        memory_engine::redact::scrub(machine).unwrap(),
+        machine,
+        "as text, the name reads as a secret"
+    );
+    let mut upload = upload(HOME);
+    upload.machine = machine.into();
+    let items = vec![
+        main_item("bf.1.s", 0, stop(StopOutcome::Completed, "a final message")),
+        memory("bf.m.1", "a rule", at(1)),
+    ];
+
+    s.write(&upload, &items, &[]).await;
+
+    let events = s.events().await;
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        assert_eq!(event.payload["machine"], machine, "{}", event.payload);
+    }
+    let facts = s.engine.list_active_facts(None).await.unwrap();
+    assert_eq!(facts.len(), 2);
+    for fact in &facts {
+        assert_eq!(fact.metadata["machine"], machine);
+    }
+    let report = s
+        .engine
+        .erase(&memory_engine::types::EraseTarget::Machine(machine.into()))
+        .await
+        .unwrap();
+    assert_eq!(report.erased_facts.len(), 2, "{report:?}");
+    assert_eq!(s.events().await.len(), 0, "its events");
+    let conn = rusqlite::Connection::open(&s.db).unwrap();
+    let receipts: i64 = conn
+        .query_row("SELECT COUNT(*) FROM lifecycle_receipts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(receipts, 0, "its receipts");
+}
+
 /// The denylist holds host names, which are machine names: a literal equal to the machine and to
 /// the session ID redacts content, never an identifier.
 #[tokio::test]

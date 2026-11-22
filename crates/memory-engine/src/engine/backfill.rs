@@ -419,7 +419,7 @@ fn prepare_memory(
         "client_version": upload.client_version,
         redact::PROVENANCE_KEY: upload.provenance,
     });
-    let payload_found = redact::scrub_payload(&mut payload, denylist)?;
+    let payload_found = redact::scrub_capture_payload(&mut payload, denylist)?;
     let hint = (metadata.get("memory_type").and_then(Value::as_str) == Some("user"))
         .then_some("set_level");
     let fact = NewFact::builder(text, Vec::new(), item.fact_type)
