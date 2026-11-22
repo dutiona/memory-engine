@@ -30,6 +30,8 @@ chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 memory-engine-embed = { path = "../memory-engine-embed" }
+# The plugin-store readers open SQLite store copies.
+rusqlite = { version = "0.43", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
@@ -39,8 +41,6 @@ subtle = "2"
 getrandom = "0.3"
 
 [dev-dependencies]
-# The tests read and roll back store files directly.
-rusqlite = { version = "0.43", features = ["bundled"] }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 wiremock = "0.6"
 tempfile = "3"

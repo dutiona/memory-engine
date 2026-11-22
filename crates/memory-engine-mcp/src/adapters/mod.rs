@@ -5,12 +5,13 @@
 //! A harness's backfill readers (#1026) live in its adapter too, one per `ME-Backfill-Kind`,
 //! chosen by a `match` as well.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use chrono::{DateTime, Timelike, Utc};
 use memory_engine::bootstrap::read_json_lines;
 use memory_engine::types::lifecycle::{ImportEvent, ImportItem, NeutralRecord};
-use serde_json::Value;
+use rusqlite::types::ValueRef;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 pub mod claude_code;
@@ -107,4 +108,351 @@ pub(crate) fn keyed(
         }));
     }
     items
+}
+/// One project's rows of a plugin store (#1117): one upload's body, one JSON object per line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slice {
+    /// The project its rows belong to; `None` for rows of no project.
+    pub project: Option<String>,
+    /// Its distinct sessions.
+    pub sessions: usize,
+    /// Its lines.
+    pub rows: usize,
+    /// The JSON Lines body.
+    pub body: Vec<u8>,
+}
+
+/// Why a plugin store could not be exported (#1117).
+#[derive(Debug, thiserror::Error)]
+pub enum ExportError {
+    /// A query failed; SQLite's message names a missing table or column.
+    #[error("the store could not be read: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    /// A value is a BLOB, which no line can carry.
+    #[error("{table}.{column} holds a BLOB")]
+    Blob {
+        /// The table read.
+        table: &'static str,
+        /// The column or member name.
+        column: String,
+    },
+    /// A project holds a tab or a line break, which `index.tsv` cannot carry.
+    #[error("a project holds a tab or a line break")]
+    ControlInProject,
+    /// A project's rows are over the upload bound: never split, so refused whole.
+    #[error("a project's rows are over the 256 MiB upload bound")]
+    OverTheBound,
+}
+
+/// A member that is a string or `null`, as text: `null` is the empty string, and a member
+/// missing or of another type is `None`.
+pub(crate) fn nullable<'a>(object: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
+    match object.get(name)? {
+        Value::Null => Some(""),
+        Value::String(s) => Some(s),
+        _ => None,
+    }
+}
+
+/// A row of a plugin store: its project, its session, and its line.
+pub(crate) type Row = (Option<String>, String, Map<String, Value>);
+
+/// The rows `sql` selects from `table`: its first column is the row's project, every other one
+/// a member named as its column, `session` the member naming its session, and `table` the
+/// line's tag. TEXT is a string (invalid UTF-8 replaced), INTEGER and REAL numbers, NULL
+/// `null`.
+pub(crate) fn query(
+    store: &rusqlite::Connection,
+    table: &'static str,
+    session: &str,
+    sql: &str,
+) -> Result<Vec<Row>, ExportError> {
+    let mut stmt = store.prepare(sql)?;
+    let names: Vec<String> = stmt.column_names().map(str::to_owned).collect();
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let mut line = Map::new();
+        line.insert("table".to_owned(), Value::from(table));
+        let mut project = None;
+        for (i, name) in names.iter().enumerate() {
+            let value = match row.get_ref(i)? {
+                ValueRef::Null => Value::Null,
+                ValueRef::Integer(n) => Value::from(n),
+                ValueRef::Real(x) => Value::from(x),
+                ValueRef::Text(t) => Value::from(String::from_utf8_lossy(t).into_owned()),
+                ValueRef::Blob(_) => {
+                    return Err(ExportError::Blob {
+                        table,
+                        column: name.clone(),
+                    });
+                }
+            };
+            if i == 0 {
+                project = value.as_str().map(str::to_owned);
+            } else {
+                line.insert(name.clone(), value);
+            }
+        }
+        let session = line
+            .get(session)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        out.push((project, session, line));
+    }
+    Ok(out)
+}
+
+/// Group `rows` by project, in their order, into one slice each, by project.
+///
+/// # Errors
+///
+/// [`ExportError::ControlInProject`] for a project holding a tab or a line break,
+/// [`ExportError::OverTheBound`] for a slice over [`memory_engine::BACKFILL_BODY_BYTES`].
+pub(crate) fn slices(rows: Vec<Row>) -> Result<Vec<Slice>, ExportError> {
+    let mut by_project: BTreeMap<Option<String>, (BTreeSet<String>, Slice)> = BTreeMap::new();
+    for (project, session, line) in rows {
+        if project
+            .as_deref()
+            .is_some_and(|p| p.contains(['\t', '\n', '\r']))
+        {
+            return Err(ExportError::ControlInProject);
+        }
+        let (sessions, slice) = by_project.entry(project.clone()).or_insert_with(|| {
+            (
+                BTreeSet::new(),
+                Slice {
+                    project,
+                    sessions: 0,
+                    rows: 0,
+                    body: Vec::new(),
+                },
+            )
+        });
+        if !session.is_empty() {
+            sessions.insert(session);
+        }
+        slice.rows += 1;
+        slice
+            .body
+            .extend(Value::Object(line).to_string().into_bytes());
+        slice.body.push(b'\n');
+        if slice.body.len() as u64 > memory_engine::BACKFILL_BODY_BYTES as u64 {
+            return Err(ExportError::OverTheBound);
+        }
+    }
+    Ok(by_project
+        .into_values()
+        .map(|(sessions, mut slice)| {
+            slice.sessions = sessions.len();
+            slice
+        })
+        .collect())
+}
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::claude_code::{claude_mem, claude_memory};
+    use super::*;
+
+    const CLAUDE_MEM: &str = include_str!("../../tests/fixtures/plugin-stores/claude-mem.sql");
+    const CLAUDE_MEMORY: &str =
+        include_str!("../../tests/fixtures/plugin-stores/claude-memory.sql");
+
+    fn store(sql: &str) -> rusqlite::Connection {
+        let store = rusqlite::Connection::open_in_memory().unwrap();
+        store.execute_batch(sql).unwrap();
+        store
+    }
+
+    type Export = fn(&rusqlite::Connection) -> Result<Vec<Slice>, ExportError>;
+    type Read = fn(&[u8]) -> Result<Mapped, &'static str>;
+
+    const STORES: [(&str, Export, Read); 2] = [
+        (CLAUDE_MEM, claude_mem::export, claude_mem::read),
+        (CLAUDE_MEMORY, claude_memory::export, claude_memory::read),
+    ];
+
+    /// Every item's key, as a later upload meets it: an event's ID, order key and digest, a
+    /// memory's ID and digest.
+    fn keys(store: &rusqlite::Connection, export: Export, read: Read) -> BTreeSet<String> {
+        export(store)
+            .unwrap()
+            .iter()
+            .flat_map(|s| read(&s.body).unwrap().items)
+            .map(|item| match item {
+                ImportItem::Event(e) => {
+                    format!("{} {} {} {:?}", e.event_id, e.time, e.seq, e.body_sha256)
+                }
+                ImportItem::Memory(m) => format!("{} {:?}", m.event_id, m.body_sha256),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_export_holds_only_the_rows_the_reader_reads() {
+        for (sql, export, _) in STORES {
+            let all = store(sql);
+            for slice in export(&all).unwrap() {
+                let body = String::from_utf8(slice.body).unwrap();
+                assert!(!body.contains("NEVER-EXPORTED"), "{body}");
+                assert_eq!(body.lines().count(), slice.rows);
+            }
+        }
+    }
+
+    #[test]
+    fn a_session_stays_in_its_projects_slice() {
+        let memory = claude_memory::export(&store(CLAUDE_MEMORY)).unwrap();
+        let sessions = |slice: &Slice| -> BTreeSet<String> {
+            String::from_utf8_lossy(&slice.body)
+                .lines()
+                .map(|l| serde_json::from_str::<Value>(l).unwrap()["session"].to_string())
+                .collect()
+        };
+        let alpha = memory
+            .iter()
+            .find(|s| s.project.as_deref() == Some("/work/fixture/alpha"))
+            .unwrap();
+        assert_eq!(
+            sessions(alpha),
+            BTreeSet::from([
+                "\"a5b6c7d\"".to_owned(),
+                "\"eef5665a-2f30-497d-87e7-ef64be1076a7\"".to_owned()
+            ]),
+            "the subagent in its main session's slice"
+        );
+        assert_eq!(alpha.sessions, 2);
+        let none = memory.iter().find(|s| s.project.is_none()).unwrap();
+        assert_eq!(
+            sessions(none),
+            BTreeSet::from(["\"6abf0af7-d5d4-4183-97b4-14142808dffb\"".to_owned()])
+        );
+        let mem = claude_mem::export(&store(CLAUDE_MEM)).unwrap();
+        let orphan = mem.iter().find(|s| s.project.is_none()).unwrap();
+        assert_eq!((orphan.sessions, orphan.rows), (0, 1));
+    }
+
+    #[test]
+    fn store_keys_are_stable_across_a_grown_copy() {
+        let mem = store(CLAUDE_MEM);
+        let before = keys(&mem, claude_mem::export, claude_mem::read);
+        mem.execute_batch(
+            "INSERT INTO user_prompts (content_session_id, prompt_number, prompt_text, created_at,
+               created_at_epoch) VALUES ('eef5665a-2f30-497d-87e7-ef64be1076a7', 3, 'One more.',
+               '2026-03-25T11:00:00.000Z', 1774436400000);
+             INSERT INTO observations (memory_session_id, project, type, title, facts, concepts,
+               created_at, created_at_epoch) VALUES ('mem-fixture-a', 'alpha', 'change', 'More',
+               '[]', '[]', '2026-03-25T11:01:00.000Z', 1774436460000);",
+        )
+        .unwrap();
+        let grown = keys(&mem, claude_mem::export, claude_mem::read);
+        assert!(grown.is_superset(&before));
+        let added: Vec<&String> = grown.difference(&before).collect();
+        assert_eq!(added.len(), 2, "{added:?}");
+
+        let memory = store(CLAUDE_MEMORY);
+        let before = keys(&memory, claude_memory::export, claude_memory::read);
+        memory
+            .execute_batch(
+                "INSERT INTO messages (id, session_id, uuid, timestamp, role, content) VALUES
+                   (50, 2, '0f1e2d3c-4b5a-4697-8877-665544332211', '2026-03-28T14:02:00.000Z',
+                    'user', 'And the lints?'),
+                   (51, 2, '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d', '2026-03-28T14:02:30.000Z',
+                    'assistant', 'They pass too.');",
+            )
+            .unwrap();
+        let grown = keys(&memory, claude_memory::export, claude_memory::read);
+        assert!(grown.is_superset(&before), "a new turn re-sends every key");
+        assert_eq!(grown.difference(&before).count(), 2);
+
+        memory
+            .execute_batch(
+                "INSERT INTO messages (id, session_id, uuid, timestamp, role, content) VALUES
+                   (52, 2, '2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e', '2026-03-28T14:03:00.000Z',
+                    'assistant', 'And so do the docs.');",
+            )
+            .unwrap();
+        let longer = keys(&memory, claude_memory::export, claude_memory::read);
+        let gone: Vec<&String> = grown.difference(&longer).collect();
+        let new: Vec<&String> = longer.difference(&grown).collect();
+        assert!(
+            gone.len() == 1
+                && gone[0].starts_with("bf.claude-memory.1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d.s "),
+            "the old last line is narration now: {gone:?}"
+        );
+        assert!(
+            new.len() == 1
+                && new[0].starts_with("bf.claude-memory.2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e.s "),
+            "its turn's new last line is the stop: {new:?}"
+        );
+
+        let renumbered = store(CLAUDE_MEMORY);
+        renumbered
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 UPDATE messages SET id = id + 100, session_id = session_id + 100;
+                 UPDATE sessions SET id = id + 100, parent_session_id = parent_session_id + 100;
+                 UPDATE projects SET id = id + 100;
+                 UPDATE sessions SET project_id = project_id + 100;",
+            )
+            .unwrap();
+        assert_eq!(
+            keys(&renumbered, claude_memory::export, claude_memory::read),
+            keys(
+                &store(CLAUDE_MEMORY),
+                claude_memory::export,
+                claude_memory::read
+            ),
+            "row ids are not keys"
+        );
+    }
+
+    #[test]
+    fn store_ids_follow_the_grammar_and_survive_the_scrub() {
+        for (sql, export, read) in STORES {
+            for slice in export(&store(sql)).unwrap() {
+                for item in read(&slice.body).unwrap().items {
+                    let (id, session) = match &item {
+                        ImportItem::Event(e) => (e.event_id.clone(), e.record.session_id.clone()),
+                        ImportItem::Memory(m) => (
+                            m.event_id.clone(),
+                            m.item.metadata["session_id"].as_str().unwrap().to_owned(),
+                        ),
+                    };
+                    assert!(is_event_id(&id), "{id}");
+                    assert!(
+                        id.starts_with("bf.claude-mem.") || id.starts_with("bf.claude-memory."),
+                        "disjoint from bf.<uuid>.<tag> and bf.m.: {id}"
+                    );
+                    for identifier in [&id, &session] {
+                        assert_eq!(
+                            &memory_engine::redact::scrub(identifier).unwrap(),
+                            identifier
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_body_without_a_store_row_is_refused() {
+        let mem = claude_mem::export(&store(CLAUDE_MEM)).unwrap();
+        let memory = claude_memory::export(&store(CLAUDE_MEMORY)).unwrap();
+        assert_eq!(
+            claude_mem::read(&memory[0].body).unwrap_err(),
+            "no claude-mem row"
+        );
+        assert_eq!(
+            claude_memory::read(&mem[1].body).unwrap_err(),
+            "no claude-memory row"
+        );
+        for read in [claude_mem::read, claude_memory::read] {
+            assert!(read(b"").is_err());
+            assert!(read(b"[1]\n{\"table\":\"pending_messages\"}\n").is_err());
+        }
+    }
 }

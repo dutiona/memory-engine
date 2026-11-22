@@ -3,13 +3,16 @@
 //! Field names are the ones Claude Code's hooks carry, checked in as fixtures. The adapter also
 //! owns what ADR-0020 §11 leaves to it: the activity filter (the ignore list and the 300 s
 //! duplicate window), the paths a tool call touches, and the ME call line of a result. Its
-//! backfill readers (#1026), [`transcript`] and [`memory`], share those rules.
+//! backfill readers (#1026), [`transcript`] and [`memory`], share those rules, and so do the
+//! plugin stores' (#1117), [`claude_mem`] and [`claude_memory`].
 
 use memory_engine::types::lifecycle::{
     Actor, BodyFault, Content, NeutralRecord, ParseClass, ParseFailure, StopOutcome, ToolOutcome,
 };
 use serde_json::{Map, Value};
 
+pub mod claude_mem;
+pub mod claude_memory;
 pub mod memory;
 pub mod transcript;
 
