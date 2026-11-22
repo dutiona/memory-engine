@@ -22,11 +22,11 @@ use chrono::Utc;
 use parking_lot::RwLock;
 
 use me_index::MemoryGraph;
-use me_storage::{ColdStorage, MemoryCtx};
+use me_storage::{ArchiveCandidates, ColdStorage, MemoryCtx};
 use me_types::error::{ArchiveError, Result};
 use me_types::types::archive::ARCHIVE_SCHEMA_VERSION;
 use me_types::types::search::MemoryQuery;
-use me_types::types::{Edge, Fact};
+use me_types::types::{Edge, EmbeddingFingerprint, Fact};
 
 use crate::pak::{hash_file, write_pak_and_hash};
 use crate::search::{ArchiveSearchResult, is_within_archive_dir, search_archives};
@@ -95,7 +95,11 @@ pub async fn archive(
     // before the wasted read; a deliberate, benign behavior change.
     ctx.ensure_writable()?;
 
-    let (candidate_facts, candidate_edges) = ctx
+    let ArchiveCandidates {
+        facts: candidate_facts,
+        edges: candidate_edges,
+        embedding_identity,
+    } = ctx
         .storage
         .select_archive_candidates(policy.expired_before)
         .await?;
@@ -106,7 +110,12 @@ pub async fn archive(
 
     let fact_ids: Vec<i64> = candidate_facts.iter().map(|f| f.id).collect();
 
-    let pak = build_pak(ctx.embed_dim, &candidate_facts, &candidate_edges);
+    let pak = build_pak(
+        ctx.embed_dim,
+        embedding_identity,
+        &candidate_facts,
+        &candidate_edges,
+    );
     let (pak_path, pak_size_bytes, blake3_hash) = write_pak_to_disk(archive_dir, &pak)?;
     let pak_filename = pak_path
         .file_name()
@@ -227,6 +236,9 @@ pub fn verify_archives(
 
 /// Search all archived `.pak` files for facts matching `query`.
 ///
+/// `active` is the store's active embedding identity: only paks that record the same one
+/// have their vectors compared with the query's embedding (#1061).
+///
 /// Returns `Ok(None)` when there are no manifest entries — not an error, just
 /// nothing to search. The facade's caller additionally treats a failure to resolve
 /// `archive_dir` (an in-memory engine) as `Ok(None)` before ever calling this —
@@ -241,12 +253,13 @@ pub async fn search_archives_fallback(
     archive_dir: &Path,
     query: &MemoryQuery,
     limit: usize,
+    active: Option<&EmbeddingFingerprint>,
 ) -> Result<Option<ArchiveSearchResult>> {
     let entries = cold.list_archive_manifest().await?;
     if entries.is_empty() {
         return Ok(None);
     }
-    let result = search_archives(archive_dir, &entries, query, limit)?;
+    let result = search_archives(archive_dir, &entries, query, limit, active)?;
     Ok(Some(result))
 }
 
@@ -254,16 +267,21 @@ pub async fn search_archives_fallback(
 
 /// Build the `.pak` payload.
 ///
-/// `pub` (not private): the facade's `pak_write_stamp_matches_read_gate` regression
-/// test (`engine/archive.rs`) calls this directly across the crate boundary to pin the
-/// write side of the `.pak` schema-version symmetry guard (Wave 2 #816 / S4, sub-PR 3b
-/// — see the module docs' "structural prize").
+/// `pak_write_stamp_matches_read_gate` (below) calls this to pin the write side of the
+/// `.pak` schema-version symmetry guard (Wave 2 #816 / S4, sub-PR 3b — see the module
+/// docs' "structural prize").
 #[must_use]
-pub(crate) fn build_pak(embed_dim: usize, facts: &[Fact], edges: &[Edge]) -> ArchivePak {
+pub(crate) fn build_pak(
+    embed_dim: usize,
+    embedding_identity: Option<EmbeddingFingerprint>,
+    facts: &[Fact],
+    edges: &[Edge],
+) -> ArchivePak {
     ArchivePak {
         pak_version: CURRENT_PAK_VERSION,
         engine_schema_version: ARCHIVE_SCHEMA_VERSION,
         embed_dim,
+        embedding_identity,
         created_at: Utc::now(),
         facts: facts.to_vec(),
         edges: edges.to_vec(),
@@ -406,7 +424,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         // The WRITE side: whatever `build_pak` stamps.
-        let pak = build_pak(8, &[], &[]);
+        let pak = build_pak(8, None, &[], &[]);
         assert_eq!(
             pak.engine_schema_version, ARCHIVE_SCHEMA_VERSION,
             "build_pak must stamp the backend-independent ARCHIVE_SCHEMA_VERSION, not a \

@@ -108,6 +108,11 @@ config value into one `active` row, then drops the legacy key. For these:
   the CLI/MCP dim probes, and test seeders. Those were all updated in the same change. When a
   migration moves data between tables/keys, audit _all_ raw readers/writers of the old
   location, not just the facade.
+- **The pre-migration reader learns every layout.** `embedding_meta::load_recorded` reads the
+  identity read-only at any schema version, before anything migrates (restore and the open-time
+  checks use it, #1049, #1065). A migration that moves the identity, or changes the columns it is
+  read from, adds its version to that reader's dispatch and a fixture to
+  `load_recorded_equals_the_migrated_identity`.
 
 ### Purely Additive DDL Migrations (DDL delta, no data move)
 

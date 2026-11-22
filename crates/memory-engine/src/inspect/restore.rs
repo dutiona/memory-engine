@@ -25,9 +25,9 @@ use super::types::EngineSnapshot;
 /// the registry (see the embedding-space restore step). The store's dimension
 /// ([`STORE_DIM`](crate::store::embedding_meta::STORE_DIM)) is recorded from the validated
 /// header instead, when restored facts wait for their vectors. A restore never imports
-/// dedup's watermark or generation (#1080), because it resets each id sequence to the
-/// highest surviving id, so an erased id can be reused; the next consolidation compares
-/// every fact.
+/// dedup's watermark or generation (#1080): a snapshot taken before #1131 has no id marks,
+/// so its restore resets each id sequence to the highest surviving id and an erased id can
+/// be reused; the next consolidation compares every fact.
 const MANAGED_CONFIG_KEYS: &[&str] = &[
     "schema_version",
     "storage_epoch",
@@ -797,41 +797,48 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
     // 8e. Restore the lifecycle receipts and segments (#1025) — after events and facts.
     restore_lifecycle(&tx, snapshot)?;
 
-    // 9. Reset autoincrement sequences so new inserts don't collide.
+    // 9. Reset autoincrement sequences so new inserts don't collide, and so no id an erase or
+    //    an archival freed is given again: each table starts above the exported high-water mark
+    //    when the snapshot carries one (#1131), else above its highest restored row.
+    let mark = |table: &str, highest: Option<i64>| {
+        let highest = highest.unwrap_or(0);
+        snapshot
+            .sequences
+            .get(table)
+            .map_or(highest, |&seq| seq.max(highest))
+    };
     reset_autoincrement(
         &tx,
         "scopes",
-        snapshot.scopes.iter().map(|s| s.id).max().unwrap_or(0),
+        mark("scopes", snapshot.scopes.iter().map(|s| s.id).max()),
     )?;
     reset_autoincrement(
         &tx,
         "events",
-        snapshot.events.iter().map(|e| e.id).max().unwrap_or(0),
+        mark("events", snapshot.events.iter().map(|e| e.id).max()),
     )?;
     reset_autoincrement(
         &tx,
         "facts",
-        snapshot.facts.iter().map(|f| f.id).max().unwrap_or(0),
+        mark("facts", snapshot.facts.iter().map(|f| f.id).max()),
     )?;
     reset_autoincrement(
         &tx,
         "edges",
-        snapshot.edges.iter().map(|e| e.id).max().unwrap_or(0),
+        mark("edges", snapshot.edges.iter().map(|e| e.id).max()),
     )?;
     reset_autoincrement(
         &tx,
         "summaries",
-        snapshot.summaries.iter().map(|s| s.id).max().unwrap_or(0),
+        mark("summaries", snapshot.summaries.iter().map(|s| s.id).max()),
     )?;
     reset_autoincrement(
         &tx,
         "lineage",
-        snapshot
-            .lineage
-            .iter()
-            .map(|l| l.lineage_id)
-            .max()
-            .unwrap_or(0),
+        mark(
+            "lineage",
+            snapshot.lineage.iter().map(|l| l.lineage_id).max(),
+        ),
     )?;
 
     // 10. Commit.
@@ -906,6 +913,7 @@ mod tests {
     #[test]
     fn validate_rejects_future_schema() {
         let snapshot = EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: 99,
             storage_epoch: STORAGE_EPOCH,
             embed_dim: 4,
@@ -929,6 +937,7 @@ mod tests {
     #[test]
     fn validate_rejects_future_epoch() {
         let snapshot = EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: CURRENT_SCHEMA_VERSION,
             storage_epoch: 99,
             embed_dim: 4,
@@ -952,6 +961,7 @@ mod tests {
     #[test]
     fn validate_rejects_zero_embed_dim() {
         let snapshot = EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: CURRENT_SCHEMA_VERSION,
             storage_epoch: STORAGE_EPOCH,
             embed_dim: 0,
@@ -976,6 +986,7 @@ mod tests {
     fn validate_rejects_missing_root_scope() {
         use crate::types::ScopeNode;
         let snapshot = EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: CURRENT_SCHEMA_VERSION,
             storage_epoch: STORAGE_EPOCH,
             embed_dim: 4,
@@ -1004,6 +1015,7 @@ mod tests {
     #[test]
     fn validate_accepts_empty_snapshot() {
         let snapshot = EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: CURRENT_SCHEMA_VERSION,
             storage_epoch: STORAGE_EPOCH,
             embed_dim: 4,
@@ -1185,6 +1197,7 @@ mod tests {
             serde_json::to_string(&fp).unwrap(),
         );
         let snapshot = EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: CURRENT_SCHEMA_VERSION,
             storage_epoch: STORAGE_EPOCH,
             embed_dim: 4,
@@ -1537,6 +1550,7 @@ mod tests {
         fact_vectors: Vec<crate::inspect::types::FactVectorSnapshot>,
     ) -> EngineSnapshot {
         EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: CURRENT_SCHEMA_VERSION,
             storage_epoch: STORAGE_EPOCH,
             embed_dim: 4,
@@ -1719,6 +1733,53 @@ mod tests {
             matches!(err, MemoryError::Internal(ref m) if m.contains("unknown embedding space")),
             "expected unknown-space Internal error, got {err:?}"
         );
+    }
+
+    /// #1131: each of the six restored tables starts above the exported mark or its highest
+    /// row, whichever is higher; a mark for a table restore does not write is ignored.
+    #[test]
+    fn restore_takes_each_exported_mark_or_the_highest_row() {
+        const TABLES: [&str; 6] = ["scopes", "events", "facts", "edges", "summaries", "lineage"];
+        let sequences_after = |marks: &[(&str, i64)]| {
+            let mut snapshot =
+                snapshot_with(vec![fact_with_embedding(1, vec![])], vec![], vec![], vec![]);
+            snapshot.sequences = marks.iter().map(|&(t, s)| (t.to_owned(), s)).collect();
+            let conn = open_memory().unwrap();
+            init_schema(&conn).unwrap();
+            migrate(&conn, None).unwrap();
+            restore_snapshot_into(&conn, &snapshot).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT name, seq FROM sqlite_sequence")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<BTreeMap<String, i64>>>()
+                .unwrap()
+        };
+
+        let above: Vec<(&str, i64)> = TABLES
+            .iter()
+            .map(|&t| (t, if t == "facts" { 11 } else { 10 }))
+            .chain([("activities", 99)])
+            .collect();
+        let restored = sequences_after(&above);
+        for &(table, mark) in &above[..6] {
+            assert_eq!(restored.get(table), Some(&mark), "{table}");
+        }
+        assert_ne!(
+            restored.get("activities"),
+            Some(&99),
+            "restore writes no activities mark"
+        );
+
+        let below: Vec<(&str, i64)> = TABLES.iter().map(|&t| (t, -5)).collect();
+        let restored = sequences_after(&below);
+        assert_eq!(
+            restored.get("facts"),
+            Some(&1),
+            "the highest restored row wins"
+        );
+        assert_eq!(restored.get("events"), Some(&0));
     }
 
     /// A restore whose facts all wait has no identity: the store records the validated
@@ -1967,6 +2028,7 @@ mod tests {
             scope_id: 1,
         };
         let snapshot = EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: CURRENT_SCHEMA_VERSION,
             storage_epoch: STORAGE_EPOCH,
             embed_dim: DIM,
@@ -2204,6 +2266,7 @@ mod tests {
         config.insert("custom_key".to_string(), "imported-value".to_string());
 
         let snapshot = EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: CURRENT_SCHEMA_VERSION,
             storage_epoch: STORAGE_EPOCH,
             embed_dim: 4,
@@ -2328,6 +2391,7 @@ mod tests {
         };
 
         let snapshot = EngineSnapshot {
+            sequences: BTreeMap::new(),
             schema_version: CURRENT_SCHEMA_VERSION,
             storage_epoch: STORAGE_EPOCH,
             embed_dim: 4,
@@ -2771,6 +2835,7 @@ mod tests {
                     let mut config = BTreeMap::new();
                     config.insert("custom".to_string(), "value".to_string());
                     EngineSnapshot {
+                        sequences: BTreeMap::new(),
                         schema_version: CURRENT_SCHEMA_VERSION,
                         storage_epoch: STORAGE_EPOCH,
                         embed_dim: PDIM,

@@ -96,11 +96,14 @@ async fn run() -> Result<(), BoxError> {
     // 1. Load config (TOML file, with CLI overrides)
     let mcp_config = load_config(&cli)?;
 
-    // 2. Resolve embed_dim: explicit config > DB probe
+    // 2. Resolve embed_dim: explicit config > what the store records, read at its own schema
+    //    version without migrating it
     let embed_dim = match mcp_config.engine.embed_dim {
         Some(dim) => dim,
-        None => config::probe_embed_dim(&mcp_config.engine.db_path)
-            .map_err(|e| format!("cannot determine embed_dim: {e}"))?,
+        None => memory_engine::read_recorded_embedding(&mcp_config.engine.db_path)
+            .map_err(|e| format!("cannot determine embed_dim: {e}"))?
+            .dim()
+            .ok_or("cannot determine embed_dim: the database records no dimension yet (nothing has been stored)")?,
     };
 
     // 3. Resolve the embedder configuration and build the provider before the store opens,
@@ -124,9 +127,18 @@ async fn run() -> Result<(), BoxError> {
         }
         builder = builder.backup_dir(dir.clone());
     }
+    // 5. The embedding-identity check (#614, #1065). The query path embeds at this layer and
+    //    hands the engine a pre-computed vector, so the engine can't fingerprint-check per
+    //    query: the open refuses a store whose recorded identity differs from the configured
+    //    provider's, rather than serve wrong-vector-space results. It reads the store
+    //    read-only before anything migrates it, so a refused start leaves the file as it was.
+    if let Some(provider) = embedder.as_deref() {
+        builder =
+            builder.declared_identity(memory_engine::EmbeddingProvider::fingerprint(provider));
+    }
     // The store lock (ADR-0020 §8), held until `run` returns: no maintenance command and no
     // second server writes beside this one. Taken after every configuration check and before
-    // the open, which migrates, so a refusal still writes nothing.
+    // the open, so the identity is read under it and a refusal still writes nothing.
     let _store_lock =
         memory_engine::StoreLock::acquire(&mcp_config.engine.db_path).map_err(|e| match e {
             memory_engine::StoreLockError::Held { .. } => {
@@ -134,22 +146,14 @@ async fn run() -> Result<(), BoxError> {
             }
             memory_engine::StoreLockError::Io { .. } => e.to_string(),
         })?;
-    let engine = builder
-        .build()
-        .map_err(|e| format!("failed to open engine: {e}"))?;
+    let engine = builder.build().map_err(|e| match e {
+        memory_engine::MemoryError::EmbeddingModelMismatch { .. }
+        | memory_engine::MemoryError::EmbeddingDimension { .. } => {
+            format!("embedding identity check failed: {e}")
+        }
+        e => format!("failed to open engine: {e}"),
+    })?;
     let engine = Arc::new(engine);
-
-    // 5. Eager embedding-identity check (#614, §Design.2). The query path embeds at
-    // this layer and hands the engine a pre-computed vector, so the engine can't
-    // fingerprint-check per query — verify once at startup that the configured provider
-    // matches the store's recorded identity, and refuse to serve on a mismatch rather
-    // than silently returning wrong-vector-space query results.
-    if let Some(provider) = embedder.as_deref() {
-        engine
-            .verify_embedding_identity(provider)
-            .await
-            .map_err(|e| format!("embedding identity check failed: {e}"))?;
-    }
 
     // 6. Construct and serve. The author denylist is read once: the backfill route requires
     //    it, live capture does not use it, so the server starts without it and the route

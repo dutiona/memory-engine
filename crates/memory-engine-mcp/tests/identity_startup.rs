@@ -185,6 +185,54 @@ fn assert_serves(server: &mut ServerProcess, case: &str) {
     );
 }
 
+/// The SHA-256 of `dir/memory.db` and of its `-wal` (absent read as empty), and its
+/// `schema_version`: what a refused start must leave unchanged (#1065).
+fn store_state(dir: &Path) -> (String, String, String) {
+    use sha2::Digest as _;
+    let digest = |path: std::path::PathBuf| {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .fold(String::new(), |mut out, b| {
+                use std::fmt::Write as _;
+                let _ = write!(out, "{b:02x}");
+                out
+            })
+    };
+    let version = rusqlite::Connection::open_with_flags(
+        dir.join("memory.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT value FROM config WHERE key = 'schema_version'",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap();
+    (
+        digest(dir.join("memory.db")),
+        digest(dir.join("memory.db-wal")),
+        version,
+    )
+}
+
+/// Roll `dir/memory.db` back to schema v14 (no served-artifact columns), as a binary from
+/// before #1017 left it.
+fn roll_back_to_v14(dir: &Path) {
+    rusqlite::Connection::open(dir.join("memory.db"))
+        .unwrap()
+        .execute_batch(
+            "ALTER TABLE embedding_spaces DROP COLUMN artifact_sha256;
+             ALTER TABLE embedding_spaces DROP COLUMN pooling;
+             ALTER TABLE embedding_spaces DROP COLUMN normalization;
+             ALTER TABLE embedding_spaces DROP COLUMN max_input_tokens;
+             UPDATE config SET value = '14' WHERE key = 'schema_version';
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+}
+
 /// A store stamped with `stamped`, served under a configuration declaring `configured`.
 fn refuses(
     case: &str,
@@ -195,6 +243,7 @@ fn refuses(
     let dir = tempfile::tempdir().unwrap();
     stamp_store(dir.path(), stamped);
     let before = recorded(dir.path());
+    let bytes = store_state(dir.path());
     write_config(dir.path(), configured);
     let mut server = spawn(dir.path(), &[]);
     assert_refused(&mut server, case, marker);
@@ -202,6 +251,68 @@ fn refuses(
         recorded(dir.path()),
         before,
         "{case}: the store's record is unchanged"
+    );
+    assert_eq!(
+        store_state(dir.path()),
+        bytes,
+        "{case}: the refused start changed the store's bytes"
+    );
+}
+
+/// #1065: a store from before v15, recorded without a served artifact, refused by a served
+/// configuration, is left byte-identical and at its own schema version; a start of another
+/// dimension without an embedder is refused before migrating too.
+#[test]
+fn a_refused_start_leaves_an_older_store_byte_identical() {
+    let unserved = EmbeddingFingerprint::new("Qwen/Qwen3-Embedding-0.6B", "llama.cpp", DIM);
+    let dir = tempfile::tempdir().unwrap();
+    stamp_store(dir.path(), &unserved);
+    roll_back_to_v14(dir.path());
+    let before = store_state(dir.path());
+    write_config(dir.path(), &base());
+    let mut server = spawn(dir.path(), &[]);
+    assert_refused(
+        &mut server,
+        "older store",
+        "embedding identity check failed",
+    );
+    assert_eq!(
+        store_state(dir.path()),
+        before,
+        "the refused start changed the store"
+    );
+
+    common::write_config(dir.path(), "");
+    let file = dir.path().join("config.toml");
+    let fts_only = std::fs::read_to_string(&file)
+        .unwrap()
+        .replace(&format!("embed_dim = {}", common::DIM), "embed_dim = 512");
+    std::fs::write(&file, fts_only).unwrap();
+    let mut server = spawn(dir.path(), &[]);
+    assert_refused(
+        &mut server,
+        "older store, FTS only",
+        "failed to open engine",
+    );
+    assert_eq!(
+        store_state(dir.path()),
+        before,
+        "the refused start changed the store"
+    );
+}
+
+#[test]
+fn an_older_store_under_its_own_identity_serves_and_migrates() {
+    let unserved = EmbeddingFingerprint::new("Qwen/Qwen3-Embedding-0.6B", "llama.cpp", DIM);
+    let dir = tempfile::tempdir().unwrap();
+    stamp_store(dir.path(), &unserved);
+    roll_back_to_v14(dir.path());
+    write_config(dir.path(), &unserved);
+    let mut server = spawn(dir.path(), &[]);
+    assert_serves(&mut server, "older store, its own identity");
+    assert_eq!(
+        store_state(dir.path()).2,
+        memory_engine::CURRENT_SCHEMA_VERSION.to_string()
     );
 }
 
@@ -426,4 +537,23 @@ fn refuses_embedder_fields_without_an_embedder() {
             ("MEMORY_MCP_EMBED_MAX_INPUT_TOKENS", "2048"),
         ],
     );
+}
+
+/// With no `embed_dim` configured the server takes the store's recorded dimension, read at
+/// the store's own schema version (here v14), before anything migrates it.
+#[test]
+fn serves_an_older_store_without_a_configured_dimension() {
+    let unserved = EmbeddingFingerprint::new("Qwen/Qwen3-Embedding-0.6B", "llama.cpp", DIM);
+    let dir = tempfile::tempdir().unwrap();
+    stamp_store(dir.path(), &unserved);
+    roll_back_to_v14(dir.path());
+    write_config(dir.path(), &unserved);
+    let file = dir.path().join("config.toml");
+    let without_dim = std::fs::read_to_string(&file)
+        .unwrap()
+        .replace(&format!("embed_dim = {DIM}\n"), "");
+    assert!(!without_dim.contains("embed_dim"), "{without_dim}");
+    std::fs::write(&file, without_dim).unwrap();
+    let mut server = spawn(dir.path(), &[]);
+    assert_serves(&mut server, "older store, probed dimension");
 }

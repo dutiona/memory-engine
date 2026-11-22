@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// It was previously taken from `me-backend-sqlite`'s `CURRENT_SCHEMA_VERSION`. That is a
 /// *`SQLite` migration counter*, and it is **not comparable across backends** — Postgres
-/// keeps its own, independently-numbered `CURRENT_PG_SCHEMA_VERSION` (= 1, while `SQLite`
-/// is at 14; see `me-backend-postgres`'s migration docs, which explicitly forbid "syncing"
-/// the two numbers). Binding a portable archive format to one backend's counter is a
+/// keeps its own, independently-numbered `CURRENT_PG_SCHEMA_VERSION` (see
+/// `me-backend-postgres`'s migration docs, which explicitly forbid "syncing" the two
+/// numbers). Binding a portable archive format to one backend's counter is a
 /// category error: it only appeared to work while `SQLite` was the sole backend. Sourcing
 /// both the write stamp and the read check from a single L0 constant keeps them symmetric
 /// **by construction**, and keeps `.pak` files portable across backends (the point of

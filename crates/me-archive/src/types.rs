@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use me_types::types::{Edge, Fact};
+use me_types::types::{Edge, EmbeddingFingerprint, Fact};
 
 /// Current on-disk format version written into every new `.pak` file.
 ///
@@ -16,7 +16,11 @@ use me_types::types::{Edge, Fact};
 /// "missing field" error rather than silently defaulting. The bump also gives a
 /// clean forward-rejection: an older library reading a v2 archive fails the
 /// `pak_version > CURRENT_PAK_VERSION` check instead of mis-parsing it.
-pub const CURRENT_PAK_VERSION: u32 = 2;
+///
+/// v3 (#1061): `ArchivePak` records [`ArchivePak::embedding_identity`]. An older library
+/// refuses a v3 pak rather than comparing its vectors with a query embedded under another
+/// identity; a v2 pak still reads, with no identity.
+pub const CURRENT_PAK_VERSION: u32 = 3;
 
 /// Contents of a `.pak` archive file — zstd-compressed JSON.
 ///
@@ -39,6 +43,13 @@ pub struct ArchivePak {
     /// Embedding dimension of the facts stored in this pak. Must match the engine's
     /// configured `embed_dim` before any vectors are compared.
     pub embed_dim: usize,
+    /// The embedding identity the store recorded when this pak was written, so the
+    /// identity its facts' vectors were made under (#1061). Archive search compares those
+    /// vectors with a query only when this equals the store's active identity. `None` in
+    /// a v2 pak and in a pak of a store that recorded no identity: such a pak is matched by
+    /// text only.
+    #[serde(default)]
+    pub embedding_identity: Option<EmbeddingFingerprint>,
     /// System timestamp when this pak was written (wall-clock, UTC).
     pub created_at: DateTime<Utc>,
     /// Archived facts; ordering is by `id` ascending (insertion order).
@@ -135,6 +146,7 @@ mod tests {
             pak_version: CURRENT_PAK_VERSION,
             engine_schema_version: 7,
             embed_dim: 3,
+            embedding_identity: Some(EmbeddingFingerprint::new("m", "p", 3)),
             created_at: now,
             facts: vec![Fact {
                 id: 1,
@@ -213,6 +225,7 @@ mod tests {
                 "created_at",
                 "edges",
                 "embed_dim",
+                "embedding_identity",
                 "engine_schema_version",
                 "facts",
                 "pak_version",
@@ -270,6 +283,7 @@ mod tests {
             pak_version: CURRENT_PAK_VERSION,
             engine_schema_version: 7,
             embed_dim: 3,
+            embedding_identity: None,
             created_at: Utc::now(),
             facts: vec![],
             edges: vec![],
@@ -350,6 +364,7 @@ mod tests {
             pak_version: CURRENT_PAK_VERSION,
             engine_schema_version: 7,
             embed_dim: 4,
+            embedding_identity: None,
             created_at: Utc::now(),
             facts: vec![fact_a, fact_b],
             edges: vec![edge],
@@ -505,6 +520,7 @@ mod tests {
                     pak_version,
                     engine_schema_version,
                     embed_dim,
+                    embedding_identity: None,
                     created_at: ts_from_secs(created_at_s),
                     facts,
                     edges,

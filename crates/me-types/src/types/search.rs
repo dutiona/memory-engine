@@ -214,6 +214,11 @@ pub struct QueryDiagnostics {
     /// Total milliseconds spent decompressing and searching archives.
     #[cfg(feature = "archive")]
     pub archive_search_ms: u64,
+    /// Number of scanned `.pak` files whose vectors were not compared with the query's
+    /// embedding because the pak records another embedding identity than the store's, or
+    /// none (#1061). Their facts still match by text. `0` when the query has no embedding.
+    #[cfg(feature = "archive")]
+    pub archive_paks_unscored: usize,
 }
 
 /// Complete query response including results and diagnostic metadata.

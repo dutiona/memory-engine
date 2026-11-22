@@ -4,14 +4,12 @@ use memory_engine::{MemoryEngine, StoreLock, StoreLockError};
 
 /// Peek the embedding dimension from an existing `SQLite` database.
 ///
-/// Reads the persisted identity's `dim` from the `embedding_spaces` registry's active
-/// row (#622, the v13+ home of the identity). Falls back to the legacy `embedding_meta`
-/// config row (#613) for an un-migrated v12 database, then to the bare `embed_dim` key: the
-/// dimension of a store whose facts all wait for their vectors (#1021), as pre-#613
-/// databases carried it. Errors if none is present — a database that was created but never
-/// had a fact written has no recorded dimension; write commands that know the
-/// dimension from their input (e.g. `add-fact`'s `--embedding`) should use
-/// [`open_engine_writable_with_dim`] instead of peeking.
+/// What the store records, read at its own schema version without migrating it
+/// ([`read_recorded_embedding`](memory_engine::read_recorded_embedding)): the identity's `dim`,
+/// or the bare `embed_dim` of a store whose facts all wait for their vectors (#1021). Errors if
+/// neither is present — a database that was created but never had a fact written has no
+/// recorded dimension; write commands that know the dimension from their input (e.g.
+/// `add-fact`'s `--embedding`) should use [`open_engine_writable_with_dim`] instead of peeking.
 ///
 /// Distinct from the import path's snapshot-header reader (see
 /// `peek_embed_dim_from_snapshot` in `commands::import`).
@@ -20,82 +18,14 @@ use memory_engine::{MemoryEngine, StoreLock, StoreLockError};
 /// the database's embedding dimension. (`db` is a private module, so this is not part
 /// of any public API.)
 pub fn peek_embed_dim_from_db(path: &Path) -> anyhow::Result<usize> {
-    use rusqlite::OptionalExtension;
-
-    anyhow::ensure!(
-        path.is_file(),
-        "database not found (or is a directory): {}",
-        path.display()
-    );
-
-    let conn = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-
-    // Preferred (v13+): the embedding_spaces registry's active row records `dim` (#622).
-    // Guard on the table existing so an un-migrated v12 DB (no such table) falls through
-    // to the legacy config paths below rather than erroring.
-    let has_registry: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedding_spaces'",
-            [],
-            |_| Ok(true),
-        )
-        .optional()?
-        .unwrap_or(false);
-    if has_registry {
-        let dim: Option<i64> = conn
-            .query_row(
-                "SELECT dim FROM embedding_spaces WHERE status = 'active'",
-                [],
-                |row| row.get::<_, i64>(0),
+    memory_engine::read_recorded_embedding(path)?
+        .dim()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "database has no embedding identity yet (nothing has been embedded) — \
+             add a fact first, or is this a memory-engine database?"
             )
-            .optional()?;
-        if let Some(dim) = dim {
-            return usize::try_from(dim)
-                .map_err(|_| anyhow::anyhow!("embedding_spaces 'dim' out of range"));
-        }
-    }
-
-    // Legacy fallback: the pre-#622 embedding_meta config row records `dim` (#613).
-    let meta_raw: Option<String> = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'embedding_meta'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    if let Some(raw) = meta_raw {
-        let meta: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("corrupt embedding_meta in config table: {e}"))?;
-        let dim = meta
-            .get("dim")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| anyhow::anyhow!("embedding_meta is missing a numeric 'dim' field"))?;
-        return usize::try_from(dim)
-            .map_err(|_| anyhow::anyhow!("embedding_meta 'dim' out of range"));
-    }
-
-    // No identity before the first vector: a store whose facts all wait records its
-    // dimension in the bare `embed_dim` key (#1021), as a pre-#613 database did.
-    let legacy: Option<String> = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'embed_dim'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    if let Some(raw) = legacy {
-        return raw
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid embed_dim value in config table"));
-    }
-
-    anyhow::bail!(
-        "database has no embedding identity yet (nothing has been embedded) — \
-         add a fact first, or is this a memory-engine database?"
-    )
+        })
 }
 
 /// Peek the live `schema_version` from an existing database's `config` table.
@@ -202,7 +132,7 @@ pub fn open_engine_writable(path: &Path) -> anyhow::Result<Writable> {
     ensure_store_exists(path)?;
     let lock = lock_store(path)?;
     let embed_dim = peek_embed_dim_from_db(path)?;
-    build_writable(path, embed_dim, lock)
+    build_writable(path, embed_dim, None, lock)
 }
 
 /// Open a `MemoryEngine` with **write** capability using an explicitly known
@@ -212,11 +142,19 @@ pub fn open_engine_writable(path: &Path) -> anyhow::Result<Writable> {
 /// `add-fact` derives it from the `--embedding` length), so they work against a
 /// freshly-created, never-embedded database that has no recorded dimension yet.
 /// If the database *was* previously embedded at a different dimension, the
-/// engine's open path rejects the mismatch against the stored `embedding_meta`.
-pub fn open_engine_writable_with_dim(path: &Path, embed_dim: usize) -> anyhow::Result<Writable> {
+/// engine's open path rejects the mismatch against the recorded one.
+///
+/// A `declared` identity (`add-fact`'s pre-computed vector, #1060) must equal the one the
+/// store records, checked read-only before anything migrates (#1065); a blank store accepts
+/// any.
+pub fn open_engine_writable_with_dim(
+    path: &Path,
+    embed_dim: usize,
+    declared: Option<memory_engine::EmbeddingFingerprint>,
+) -> anyhow::Result<Writable> {
     ensure_store_exists(path)?;
     let lock = lock_store(path)?;
-    build_writable(path, embed_dim, lock)
+    build_writable(path, embed_dim, declared, lock)
 }
 
 /// Create a new store at `path` (the `--create` paths of `batch-ingest` and `bootstrap`),
@@ -245,11 +183,19 @@ pub fn ensure_store_absent(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_writable(path: &Path, embed_dim: usize, lock: StoreLock) -> anyhow::Result<Writable> {
+fn build_writable(
+    path: &Path,
+    embed_dim: usize,
+    declared: Option<memory_engine::EmbeddingFingerprint>,
+    lock: StoreLock,
+) -> anyhow::Result<Writable> {
     let backup_dir = path.parent().map(Path::to_path_buf);
     let mut builder = MemoryEngine::builder(embed_dim).path(path.to_path_buf());
     if let Some(dir) = backup_dir {
         builder = builder.backup_dir(dir);
+    }
+    if let Some(identity) = declared {
+        builder = builder.declared_identity(identity);
     }
     Ok(Writable {
         engine: builder.build()?,
@@ -295,7 +241,7 @@ mod tests {
 
     #[test]
     fn peek_embed_dim_from_db_fresh_engine_no_embedding_returns_error() {
-        // A freshly created engine with no facts yet has no embedding_meta.
+        // A freshly created engine with no facts yet records no dimension.
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("fresh.db");
         let engine = memory_engine::MemoryEngine::builder(4)
@@ -392,7 +338,9 @@ mod tests {
         let _a = StoreLock::acquire(&existing).unwrap();
         let _b = StoreLock::acquire(&fresh).unwrap();
         for err in [
-            open_engine_writable_with_dim(&existing, 4).err().unwrap(),
+            open_engine_writable_with_dim(&existing, 4, None)
+                .err()
+                .unwrap(),
             create_engine(&fresh, 4).err().unwrap(),
         ] {
             assert!(
@@ -419,27 +367,29 @@ mod tests {
         assert!(err.to_string().contains("already exists"), "{err}");
     }
 
-    // --- #622: identity in the embedding_spaces registry ---
+    // --- #622: the dimension of a recorded identity ---
 
     #[test]
-    fn peek_reads_dim_from_embedding_spaces_registry() {
-        // A v13 store records the identity (incl. dim) in the embedding_spaces table,
-        // not the config row. The peek must read it from there.
+    fn peek_reads_dim_from_a_recorded_identity() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("peek.db");
-        // Build creates the v13 schema (empty registry); the temporary engine drops here.
-        memory_engine::MemoryEngine::builder(8)
+        let engine = memory_engine::MemoryEngine::builder(8)
             .path(path.clone())
             .build()
             .unwrap();
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute(
-            "INSERT INTO embedding_spaces (name, model, provider, dim, status)
-             VALUES ('default', 'm', 'tei', 8, 'active')",
-            [],
-        )
-        .unwrap();
-        drop(conn);
+        let request = memory_engine::AddFactRequest {
+            content: "recorded".into(),
+            fact_type: memory_engine::FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        };
+        let identity = memory_engine::EmbeddingFingerprint::new("m", "tei", 8);
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(engine.add_fact_precomputed(&request, vec![0.5; 8], &identity, None))
+            .unwrap();
+        drop(engine);
         assert_eq!(peek_embed_dim_from_db(&path).unwrap(), 8);
     }
 }

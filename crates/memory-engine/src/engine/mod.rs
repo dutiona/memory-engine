@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use rusqlite::Connection;
 
 use crate::error::{MemoryError, MigrationError, Result};
 use crate::graph::MemoryGraph;
@@ -50,6 +49,7 @@ mod outcome;
 mod pruning;
 mod query;
 mod reconstruct;
+mod recorded;
 pub(crate) mod redaction_counts;
 mod restore;
 mod resume;
@@ -59,6 +59,7 @@ mod scheduling;
 // `snapshot::*` reference below (and `crate::engine::snapshot::*` elsewhere) keeps
 // resolving unchanged.
 pub(crate) use me_backend_sqlite::snapshot;
+pub use recorded::read_recorded_embedding;
 
 #[cfg(feature = "archive")]
 mod archive;
@@ -120,6 +121,9 @@ pub struct EngineConfig {
     pub(crate) read_only: bool,
     /// Which storage backend to open (default: [`BackendKind::Sqlite`]).
     pub(crate) backend: BackendKind,
+    /// The identity the caller declares; a store recording another one is refused before it
+    /// migrates (#1065). Set through `MemoryEngineBuilder::declared_identity`.
+    pub(crate) declared_identity: Option<EmbeddingFingerprint>,
 }
 
 impl EngineConfig {
@@ -135,6 +139,7 @@ impl EngineConfig {
             upcaster_registry: UpcasterRegistry::new(),
             read_only: false,
             backend: BackendKind::Sqlite,
+            declared_identity: None,
         }
     }
 
@@ -266,6 +271,25 @@ impl MemoryEngine {
         config: &EngineConfig,
         reranker: Option<Arc<dyn Reranker>>,
     ) -> Result<Self> {
+        // Read what an existing store records before the pool opens it: the writable pool
+        // migrates, so a check made after it would already have changed the file (#1065), and
+        // the identity of a store older than v15 is only readable this way (#1049).
+        if let Some(declared) = &config.declared_identity
+            && declared.dim != config.embed_dim
+        {
+            return Err(MemoryError::EmbeddingDimension {
+                expected: config.embed_dim,
+                actual: declared.dim,
+            });
+        }
+        if config.path.is_file() {
+            let recorded = read_recorded_embedding(&config.path)?;
+            Self::validate_embed_dim(&recorded, config.embed_dim)?;
+            if let (Some(stored), Some(declared)) = (recorded.identity(), &config.declared_identity)
+            {
+                stored.ensure_matches(declared)?;
+            }
+        }
         let pool = if config.read_only {
             ConnectionPool::open_read_only(&config.path, config.embed_dim, config.read_pool_size)?
         } else {
@@ -308,10 +332,16 @@ impl MemoryEngine {
         // 1. Validate embed_dim (must happen first — ensures schema is ready).
         if pool.is_read_only() {
             let conn = pool.read()?;
-            Self::validate_embed_dim_against_meta(&conn, embed_dim)?;
+            Self::validate_embed_dim(
+                &crate::store::embedding_meta::load_recorded(&conn)?,
+                embed_dim,
+            )?;
         } else {
             let conn = pool.write();
-            Self::validate_embed_dim_against_meta(&conn, embed_dim)?;
+            Self::validate_embed_dim(
+                &crate::store::embedding_meta::load_recorded(&conn)?,
+                embed_dim,
+            )?;
         }
 
         let is_file_backed = pool.is_file_backed();
@@ -452,23 +482,23 @@ impl MemoryEngine {
         self.reranker.as_ref().map(|r| r.name())
     }
 
-    /// Validate the configured `embed_dim` against the persisted embedding identity
-    /// — read-only, never writes. Shared by the read-write and read-only open paths.
+    /// Validate the configured `embed_dim` against what the store records — read-only, never
+    /// writes. Shared by every open path, before the pool (file stores) and after it.
     ///
-    /// If an `embedding_meta` tuple is recorded (#613), its `dim` MUST equal the
-    /// runtime `embed_dim` from `EngineConfig`. If none is recorded yet (a fresh
-    /// store, or one that has only ingested events and never embedded a fact), this
-    /// is a no-op: the identity is established lazily on the first embedding write
-    /// (ADR 0015 §2), not at open — open holds no `EmbeddingProvider` and so cannot
-    /// write it. A read-only open of an un-embedded store is therefore `Ok`: an
-    /// empty store has no identity to disagree with, and the runtime dimension always
-    /// comes from `EngineConfig`.
-    fn validate_embed_dim_against_meta(conn: &Connection, embed_dim: usize) -> Result<()> {
-        if let Some(fp) = crate::store::embedding_meta::load(conn)?
-            && fp.dim != embed_dim
+    /// A recorded dimension (#613: the identity's; #1021: the bare `embed_dim` of a store whose
+    /// facts all wait, as a pre-v12 store also carried) MUST equal the runtime `embed_dim`. A
+    /// store that records none (fresh, or one that has only ingested events) has nothing to
+    /// disagree with: the identity is established lazily on the first embedding write (ADR 0015
+    /// §2).
+    fn validate_embed_dim(
+        recorded: &crate::types::RecordedEmbedding,
+        embed_dim: usize,
+    ) -> Result<()> {
+        if let Some(stored) = recorded.dim()
+            && stored != embed_dim
         {
             return Err(MigrationError::EmbedDimMismatch {
-                stored: fp.dim,
+                stored,
                 requested: embed_dim,
             }
             .into());

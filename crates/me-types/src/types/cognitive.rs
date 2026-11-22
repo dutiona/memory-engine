@@ -140,9 +140,13 @@ pub struct PromotionResult {
 /// it is #689.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromoteOutcome {
-    /// Facts whose active vector was copy-swapped to the new space (the homogeneous
-    /// active space covers every fact, so this is the total fact count).
+    /// Facts that took the new space's vector in the copy-swap.
     pub promoted: usize,
+    /// Facts left without a vector by the promote, by id (#1081): a fact that had none
+    /// (waiting or failed in the deferred-embedding queue, #1021) and that the new space's
+    /// provider rejected, or one stored without a vector after the backfill's last pass.
+    /// Each keeps its queue row, so the drain embeds it, or `status` shows it failed.
+    pub without_vector: Vec<i64>,
     /// The previously-active space, now `deprecated` and retained in `fact_vectors`
     /// for an instant rollback (the inverse copy-swap, #689).
     pub deprecated_space: String,
@@ -247,6 +251,34 @@ impl EmbeddingFingerprint {
         self
     }
 
+    /// Reject a `candidate` that differs from this recorded identity (ADR 0015 §3, #614).
+    ///
+    /// Equality is field by field over the whole tuple, the served artifact included; an
+    /// absent artifact equals only another absent one. `self` is the store's recorded identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::EmbeddingModelMismatch`] when any field differs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_types::types::EmbeddingFingerprint;
+    ///
+    /// let stored = EmbeddingFingerprint::new("m", "p", 8);
+    /// assert!(stored.ensure_matches(&stored.clone()).is_ok());
+    /// assert!(stored.ensure_matches(&EmbeddingFingerprint::new("m", "p", 4)).is_err());
+    /// ```
+    pub fn ensure_matches(&self, candidate: &Self) -> Result<()> {
+        if self == candidate {
+            return Ok(());
+        }
+        Err(MemoryError::EmbeddingModelMismatch {
+            expected: Box::new(self.clone()),
+            actual: Box::new(candidate.clone()),
+        })
+    }
+
     /// Construct a fingerprint for a Matryoshka-truncated `float32` embedding space,
     /// recording the native `base_dim` the model emits before truncation to `dim`.
     #[must_use]
@@ -259,6 +291,58 @@ impl EmbeddingFingerprint {
         Self {
             matryoshka_base_dim: Some(base_dim),
             ..Self::new(model, provider, dim)
+        }
+    }
+}
+
+/// What a store records of its embedding, read at any schema version (#1049, #1065).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedEmbedding {
+    /// The recorded identity (schema v12 and later); its `dim` is the store's dimension.
+    Identity(EmbeddingFingerprint),
+    /// A dimension and no identity: a store whose facts all wait for their first vector
+    /// (#1021), or a store from before schema v12.
+    Dimension(usize),
+    /// Nothing recorded: a store that never stored a fact, or a file with no `config` table.
+    Nothing,
+}
+
+impl RecordedEmbedding {
+    /// The recorded dimension: the identity's, or the bare one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_types::types::{EmbeddingFingerprint, RecordedEmbedding};
+    ///
+    /// let fp = EmbeddingFingerprint::new("m", "p", 8);
+    /// assert_eq!(RecordedEmbedding::Identity(fp).dim(), Some(8));
+    /// assert_eq!(RecordedEmbedding::Dimension(4).dim(), Some(4));
+    /// assert_eq!(RecordedEmbedding::Nothing.dim(), None);
+    /// ```
+    #[must_use]
+    pub const fn dim(&self) -> Option<usize> {
+        match self {
+            Self::Identity(fp) => Some(fp.dim),
+            Self::Dimension(dim) => Some(*dim),
+            Self::Nothing => None,
+        }
+    }
+
+    /// The recorded identity, if any.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_types::types::RecordedEmbedding;
+    ///
+    /// assert!(RecordedEmbedding::Dimension(4).identity().is_none());
+    /// ```
+    #[must_use]
+    pub const fn identity(&self) -> Option<&EmbeddingFingerprint> {
+        match self {
+            Self::Identity(fp) => Some(fp),
+            Self::Dimension(_) | Self::Nothing => None,
         }
     }
 }
@@ -779,5 +863,39 @@ mod tests {
             Some(2048),
         );
         assert!(empty.is_err(), "empty pooling");
+    }
+
+    #[test]
+    fn ensure_matches_is_field_by_field() {
+        let stored = EmbeddingFingerprint::new("m", "p", 8);
+        stored
+            .ensure_matches(&stored.clone())
+            .expect("equal identities match");
+        let served = ServedArtifact::from_parts(
+            Some("a".repeat(64)),
+            Some("last".into()),
+            Some("l2".into()),
+            Some(2048),
+        )
+        .unwrap()
+        .unwrap();
+        let mut element = stored.clone();
+        element.element_type = "int8".into();
+        for candidate in [
+            EmbeddingFingerprint::new("other", "p", 8),
+            EmbeddingFingerprint::new("m", "other", 8),
+            EmbeddingFingerprint::new("m", "p", 4),
+            EmbeddingFingerprint::with_matryoshka("m", "p", 8, 16),
+            element,
+            stored.clone().with_served(served),
+        ] {
+            match stored.ensure_matches(&candidate) {
+                Err(MemoryError::EmbeddingModelMismatch { expected, actual }) => {
+                    assert_eq!(*expected, stored);
+                    assert_eq!(*actual, candidate);
+                }
+                other => panic!("{candidate:?} must mismatch, got {other:?}"),
+            }
+        }
     }
 }

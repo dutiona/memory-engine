@@ -98,7 +98,7 @@ memory-engine-cli query "how does auth work" \
   --embed-model nomic-embed-text --embed-provider ollama --query-instruction ''
 ```
 
-FTS5 text search by default. **When `--embed-url` + `--embed-model` are supplied (#619), the query text is embedded via `embed_query`** (prefixed with ME's pinned instruction unless `--query-instruction` replaces it; `''` means no prefix) for hybrid FTS + vector retrieval; with no embedder it stays FTS-only. The embedder flags are shared with `batch-ingest` / `bootstrap` / `consolidate` (`--embed-provider`, `--embed-api-key`, `--query-instruction`, `--mrl-dim`, `--native-dim`, `--embed-timeout`, and the served-artifact flags `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`, `--embed-max-input-tokens`, all four or none, with `MEMORY_ENGINE_EMBED_*` variables). Before embedding, `query` checks the declared identity against the store's recorded one and fails with `embedding identity check failed` on a mismatch (#614, #1017). The text it embeds is redacted first, so no embedder receives a known token format; its FTS5 expression stays as typed, since it is neither stored nor sent (#1024, [redaction](redaction.md)). Filters: `--scope`, `--limit`, `--fact-type` (episodic/semantic/procedural), `--min-importance`, `--pinned-only`.
+FTS5 text search by default. **When `--embed-url` + `--embed-model` are supplied (#619), the query text is embedded via `embed_query`** (prefixed with ME's pinned instruction unless `--query-instruction` replaces it; `''` means no prefix) for hybrid FTS + vector retrieval; with no embedder it stays FTS-only. The embedder flags are shared with `batch-ingest` / `bootstrap` / `consolidate` (`--embed-provider`, `--embed-api-key` or `--embed-api-key-file` (a file holding the key alone, one trailing newline allowed; never both, and a bad key setting is refused even on an FTS-only `query`), `--query-instruction`, `--mrl-dim`, `--native-dim`, `--embed-timeout`, and the served-artifact flags `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`, `--embed-max-input-tokens`, all four or none, with `MEMORY_ENGINE_EMBED_*` variables). Before embedding, `query` checks the declared identity against the store's recorded one and fails with `embedding identity check failed` on a mismatch (#614, #1017). The text it embeds is redacted first, so no embedder receives a known token format; its FTS5 expression stays as typed, since it is neither stored nor sent (#1024, [redaction](redaction.md)). Filters: `--scope`, `--limit`, `--fact-type` (episodic/semantic/procedural), `--min-importance`, `--pinned-only`.
 
 #### `status` — Embedding Queue and Redaction
 
@@ -172,6 +172,30 @@ or a call record the snapshot lacks, holds both an event and a quarantine record
 fact it lacks, and a target holding only receipts or segments counts as not empty. A snapshot from before schema v18 has
 no such sections and loads as it did. The `activities` table is outside the snapshot, as before.
 
+A JSON export also keeps the store's id high-water marks (`sequences`, #1131), and `import` starts each restored table's
+ids above them, so a memory erased or archived before the export never has its id given to a new one, and a call
+record never ends up naming another memory than its own. That holds for an export taken by this version or later,
+imported by this version or later. An older export has no marks, and an older binary ignores them: either restores the
+marks from the surviving rows, as before, and can give again an id erased before the export.
+
+#### `add-fact` — Store One Fact with a Pre-computed Vector
+
+```bash
+memory-engine-cli --db memory.db add-fact --content "The sky is blue" --fact-type semantic \
+  --embedding "[0.1, 0.2, 0.3, 0.4]" \
+  --embed-model Qwen/Qwen3-Embedding-0.6B --embed-provider llama.cpp
+```
+
+The vector was computed outside the engine, so it declares the identity of the model that made it, with the
+identity flags the embedder commands use (#1060): `--embed-model` (required), `--embed-provider` (default `ollama`),
+and the served-artifact flags `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`,
+`--embed-max-input-tokens` (all four or none), each with its `MEMORY_ENGINE_EMBED_*` variable. The store must record
+exactly that identity (ADR-0015 §3): a mismatch fails with `embedding model mismatch`, checked read-only before anything is
+written or migrated, so nothing is stored. A blank store records the declared identity with its first fact. There is
+no `--mrl-dim`: a store recorded under Matryoshka truncation refuses vectors from `add-fact`. Other flags:
+`--t-valid`, `--t-invalid`, `--base-importance`, `--scope`, `--metadata` (a JSON object), `--pinned`,
+`--source-event-id`. A content that redaction would change is refused, since the vector was computed from it (#1024).
+
 #### `batch-ingest` — Bulk Fact Loading from JSONL
 
 ```bash
@@ -213,6 +237,7 @@ Bulk-ingests facts from a JSONL file (or stdin with `--file -`). Each line is a 
 | `--embed-url`     | required / env `MEMORY_ENGINE_EMBED_URL`   | OpenAI-compatible embedding endpoint |
 | `--embed-model`   | required / env `MEMORY_ENGINE_EMBED_MODEL` | Embedding model name                 |
 | `--embed-api-key` | env `MEMORY_ENGINE_EMBED_API_KEY`          | Bearer API key                       |
+| `--embed-api-key-file` | env `MEMORY_ENGINE_EMBED_API_KEY_FILE` | A file holding the bearer API key; never beside `--embed-api-key` |
 | `--batch-size`    | 100                                        | Facts per transaction batch          |
 | `--embed-timeout` | 30                                         | HTTP timeout (seconds)               |
 | `--create`        | false                                      | Create new database                  |

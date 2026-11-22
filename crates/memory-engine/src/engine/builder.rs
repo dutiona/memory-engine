@@ -63,6 +63,7 @@ use crate::pool::ConnectionPool;
 use crate::search::strategy::SearchConfig;
 use crate::store::upcaster::UpcasterRegistry;
 use crate::traits::Reranker;
+use crate::types::EmbeddingFingerprint;
 
 use super::{EngineConfig, MemoryEngine};
 
@@ -86,6 +87,7 @@ pub struct File {
     read_only: bool,
     backup_dir: Option<PathBuf>,
     read_pool_size: usize,
+    declared_identity: Option<EmbeddingFingerprint>,
 }
 impl sealed::Backing for File {}
 
@@ -160,6 +162,7 @@ impl MemoryEngineBuilder<InMemory> {
                 read_only: false,
                 backup_dir: None,
                 read_pool_size: 4,
+                declared_identity: None,
             },
         }
     }
@@ -210,6 +213,30 @@ impl MemoryEngineBuilder<File> {
         self
     }
 
+    /// Open only a store whose recorded embedding identity equals `identity` (ADR 0015 §3,
+    /// #1065): the check reads the store read-only, before anything migrates it, so a refused
+    /// open leaves the file as it was. A store that records no identity accepts any (nothing is
+    /// recorded at open: the first embedding write records it, ADR 0015 §2).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use memory_engine::{EmbeddingFingerprint, MemoryEngine, MemoryError};
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let db = dir.path().join("memory.db");
+    /// let engine = MemoryEngine::builder(4)
+    ///     .path(&db)
+    ///     .declared_identity(EmbeddingFingerprint::new("model", "provider", 4))
+    ///     .build()?;
+    /// # drop(engine);
+    /// # Ok::<(), MemoryError>(())
+    /// ```
+    pub fn declared_identity(mut self, identity: EmbeddingFingerprint) -> Self {
+        self.backing.declared_identity = Some(identity);
+        self
+    }
+
     /// Assemble the [`EngineConfig`] this builder describes, *without* opening.
     ///
     /// Note: the reranker is **not** part of `EngineConfig` (it is not `Clone`),
@@ -231,6 +258,7 @@ impl MemoryEngineBuilder<File> {
             upcaster_registry: self.upcaster_registry.clone(),
             read_only: self.backing.read_only,
             backend: super::BackendKind::Sqlite,
+            declared_identity: self.backing.declared_identity.clone(),
         }
     }
 
@@ -238,7 +266,10 @@ impl MemoryEngineBuilder<File> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match.
+    /// Returns `MemoryError::Migration` if the stored `embed_dim` doesn't match,
+    /// `MemoryError::EmbeddingDimension` if a [declared identity](Self::declared_identity) has
+    /// another dimension than the engine's, or `MemoryError::EmbeddingModelMismatch` if it
+    /// differs from the store's recorded one; each refusal comes before any migration.
     pub fn build(self) -> Result<MemoryEngine> {
         let config = self.to_config();
         MemoryEngine::open_from_config(&config, self.reranker.map(Arc::from))

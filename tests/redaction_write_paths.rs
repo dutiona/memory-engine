@@ -203,6 +203,11 @@ const EXEMPT: &[(&str, &str)] = &[
     ("read_embed_queue_status", "read"),
     ("read_redaction_counts", "read"),
     ("read_quarantined", "read"),
+    ("read_recorded_embedding", "read"),
+    (
+        "declared_identity",
+        "construction: an identity is an identifier, compared, never stored",
+    ),
     ("end_idle_segments", "ends segments by time; stores no text"),
     ("open_status_connection", "read"),
     ("load_graph_from_db", "read"),

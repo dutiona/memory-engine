@@ -125,7 +125,7 @@ pub(crate) fn write_pak_and_hash(pak: &ArchivePak, path: &Path) -> Result<String
 /// It is deliberately **not** a backend's schema version. A `.pak` is a portable blob of
 /// `me-types` DTOs, so "can I read this pak?" is a question about DTO shape, not about
 /// any backend's migration history — and the backends' counters are not comparable
-/// (`SQLite` is at 14, Postgres independently at 1). Sourcing the check from a concrete
+/// (each backend numbers its migrations independently). Sourcing the check from a concrete
 /// backend would also put an L3→backend edge on the archive primitive — impossible here
 /// by construction, since this crate (`me-archive`) has no dependency on any
 /// `me-backend-*` crate (Wave 2 #816 / S4, sub-PR 3b).
@@ -242,6 +242,7 @@ mod tests {
             pak_version: CURRENT_PAK_VERSION,
             engine_schema_version: 7,
             embed_dim: 3,
+            embedding_identity: None,
             created_at: Utc::now(),
             facts: vec![],
             edges: vec![],
@@ -376,6 +377,37 @@ mod tests {
             read_pak(&older_path).is_ok(),
             "older versions must still read (backward-compat)"
         );
+    }
+
+    /// #1061: a pak keeps the embedding identity its vectors were made under.
+    #[test]
+    fn a_pak_records_its_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("identity.pak");
+        let identity = me_types::types::EmbeddingFingerprint::new("model", "provider", 3);
+        let mut pak = empty_pak();
+        pak.embedding_identity = Some(identity.clone());
+        write_pak(&pak, &path).unwrap();
+        assert_eq!(read_pak(&path).unwrap().embedding_identity, Some(identity));
+    }
+
+    /// #1061: a v2 pak, written before the identity was recorded, still reads, with none.
+    #[test]
+    fn a_v2_pak_reads_without_an_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v2.pak");
+        let mut value = serde_json::to_value(empty_pak()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("embedding_identity").unwrap();
+        object.insert("pak_version".into(), 2.into());
+        let file = std::fs::File::create(&path).unwrap();
+        let mut enc = zstd::Encoder::new(file, 3).unwrap();
+        enc.write_all(&serde_json::to_vec(&value).unwrap()).unwrap();
+        enc.finish().unwrap();
+
+        let pak = read_pak(&path).unwrap();
+        assert_eq!(pak.pak_version, 2);
+        assert_eq!(pak.embedding_identity, None);
     }
 
     // --- read_pak error paths (#299) ---

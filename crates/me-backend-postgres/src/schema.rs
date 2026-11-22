@@ -94,7 +94,7 @@ impl SchemaManager for PgBackend {
             // absent-branch. A concurrent first-write race is bounded structurally by the
             // single-active partial unique index (a losing INSERT errors, never corrupts).
             if let Some(stored) = load_fingerprint(&client).await? {
-                ensure_match(&stored, &candidate)?;
+                stored.ensure_matches(&candidate)?;
                 return Ok(stored);
             }
             if candidate.dim != expected_dim {
@@ -130,7 +130,7 @@ impl SchemaManager for PgBackend {
         self.with_client(|client| async move {
             load_fingerprint(&client)
                 .await?
-                .map_or_else(|| Ok(()), |stored| ensure_match(&stored, &candidate))
+                .map_or_else(|| Ok(()), |stored| stored.ensure_matches(&candidate))
         })
         .await
     }
@@ -335,18 +335,6 @@ fn ensure_no_served(fp: &EmbeddingFingerprint) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-/// Reject a candidate that differs from the stored identity (#614) — field-by-field
-/// equality, identical to `store::embedding_meta::ensure_match`.
-fn ensure_match(stored: &EmbeddingFingerprint, candidate: &EmbeddingFingerprint) -> Result<()> {
-    if stored == candidate {
-        return Ok(());
-    }
-    Err(MemoryError::EmbeddingModelMismatch {
-        expected: Box::new(stored.clone()),
-        actual: Box::new(candidate.clone()),
-    })
 }
 
 #[cfg(test)]

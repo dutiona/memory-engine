@@ -27,8 +27,9 @@
 use rusqlite::{Connection, Transaction};
 
 use crate::store::classify;
-use me_types::error::{MemoryError, Result, StorageError};
-use me_types::types::EmbeddingFingerprint;
+use crate::store::schema::{CURRENT_SCHEMA_VERSION, decode_v12_identity, get_config};
+use me_types::error::{MemoryError, MigrationError, Result, StorageError};
+use me_types::types::{EmbeddingFingerprint, RecordedEmbedding};
 
 /// The `config` key holding the store's dimension while it has no identity.
 ///
@@ -49,6 +50,65 @@ pub const STORE_DIM: &str = "embed_dim";
 /// `dim` drives vector deserialization).
 pub fn load(conn: &Connection) -> Result<Option<EmbeddingFingerprint>> {
     Ok(super::embedding_spaces::find_active(conn)?.map(|s| s.fingerprint))
+}
+
+/// What the store records of its embedding, read at any schema version without migrating
+/// (#1049, #1065): the identity where its layout of that version keeps it, else the bare
+/// [`STORE_DIM`], else nothing.
+///
+/// Dispatches on `schema_version` (absent reads as 1): 15 and later read the registry with its
+/// served columns, 13 and 14 the registry without them (`NULL`, as `migrate_v14_to_v15` sets
+/// them), 12 the `embedding_meta` config value through the migration's own decoder, 11 and
+/// earlier no identity. A connection with no `config` table records [`Nothing`]. The result
+/// equals what [`load`] reads once the store is migrated (`schema::tests` pins it), so a check
+/// made on it before migrating is the check made after.
+///
+/// [`Nothing`]: RecordedEmbedding::Nothing
+///
+/// # Errors
+///
+/// `MemoryError::Migration` for a store newer than this build
+/// (`SchemaVersionUnsupported`), an unreadable `schema_version` or a corrupt v12 value
+/// (`Incompatible`); `MemoryError::Storage` on a query failure; `MemoryError::Internal` for a
+/// corrupt registry row.
+pub fn load_recorded(conn: &Connection) -> Result<RecordedEmbedding> {
+    let has_config: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'config'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StorageError::backend)?;
+    if !has_config {
+        return Ok(RecordedEmbedding::Nothing);
+    }
+    let raw = get_config(conn, "schema_version")?.unwrap_or_else(|| "1".into());
+    let version: u32 = raw
+        .parse()
+        .map_err(|_| MigrationError::Incompatible(format!("invalid schema_version: {raw}")))?;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(MigrationError::SchemaVersionUnsupported {
+            found: version,
+            supported: CURRENT_SCHEMA_VERSION,
+        }
+        .into());
+    }
+    let identity = match version {
+        15.. => super::embedding_spaces::find_active(conn)?.map(|s| s.fingerprint),
+        13 | 14 => super::embedding_spaces::find_active_before_v15(conn)?.map(|s| s.fingerprint),
+        12 => get_config(conn, "embedding_meta")?
+            .map(|raw| decode_v12_identity(&raw))
+            .transpose()?,
+        _ => None,
+    };
+    if let Some(fp) = identity {
+        return Ok(RecordedEmbedding::Identity(fp));
+    }
+    get_config(conn, STORE_DIM)?.map_or(Ok(RecordedEmbedding::Nothing), |raw| {
+        raw.parse().map(RecordedEmbedding::Dimension).map_err(|_| {
+            MigrationError::Incompatible(format!("invalid {STORE_DIM} value: {raw}")).into()
+        })
+    })
 }
 
 /// Unconditionally persist the identity tuple, overwriting any existing value, and drop the
@@ -122,7 +182,7 @@ pub fn record_if_absent(
     // (harmless) so both branches share one gate. `load` reads through the `Transaction`
     // deref to `Connection`.
     if let Some(stored) = load(tx)? {
-        ensure_match(&stored, candidate)?;
+        stored.ensure_matches(candidate)?;
         return Ok(stored);
     }
     if candidate.dim != expected_dim {
@@ -151,24 +211,7 @@ pub fn record_if_absent(
 /// Returns [`MemoryError::EmbeddingModelMismatch`] if an identity is recorded and
 /// `candidate` differs from it, or any [`load`] error.
 pub fn check_compatible(conn: &Connection, candidate: &EmbeddingFingerprint) -> Result<()> {
-    load(conn)?.map_or_else(|| Ok(()), |stored| ensure_match(&stored, candidate))
-}
-
-/// Reject a `candidate` that differs from the `stored` identity (#614).
-///
-/// Equality is field-by-field over the whole tuple (`EmbeddingFingerprint: Eq`), so a
-/// difference in *any* identity field — `model`, `provider`, `dim`,
-/// `matryoshka_base_dim`, `element_type`, or the served artifact (`artifact_sha256`,
-/// `pooling`, `normalization`, `max_input_tokens`; absent equals only absent) — is a
-/// mismatch.
-fn ensure_match(stored: &EmbeddingFingerprint, candidate: &EmbeddingFingerprint) -> Result<()> {
-    if stored == candidate {
-        return Ok(());
-    }
-    Err(MemoryError::EmbeddingModelMismatch {
-        expected: Box::new(stored.clone()),
-        actual: Box::new(candidate.clone()),
-    })
+    load(conn)?.map_or_else(|| Ok(()), |stored| stored.ensure_matches(candidate))
 }
 
 /// Require that a store has a recorded embedding identity before a **pre-computed-embedding** write.

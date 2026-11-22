@@ -493,3 +493,63 @@ async fn archive_leaves_a_forgotten_fact_in_place() {
     engine.unforget_fact(ids[0]).await.unwrap();
     assert!(engine.get_fact(ids[0]).await.unwrap().t_expired.is_none());
 }
+
+/// The same vectors as [`TestEmbedder`], reported under another identity: what a
+/// reconstruction to a new model leaves the store recording.
+struct OtherEmbedder;
+
+impl EmbeddingProvider for OtherEmbedder {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        TestEmbedder.embed(text)
+    }
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("other", "test", DIM)
+    }
+}
+
+/// #1061: a pak archived under one identity is not vector-scored once the store has been
+/// reconstructed under another, and its facts stay findable by text.
+#[tokio::test]
+async fn an_old_pak_is_not_vector_scored_after_a_reconstruction() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = open_file_engine(dir.path());
+    add_facts(&engine, 5).await;
+    let prune_policy = PrunePolicy {
+        half_life_days: 0.0001,
+        min_importance: 1.0,
+        ..PrunePolicy::default()
+    };
+    engine.prune(&prune_policy).await.unwrap();
+    let archive_policy = ArchivePolicy {
+        expired_before: Utc::now() + Duration::hours(1),
+        min_facts: 1,
+    };
+    engine.archive(&archive_policy).await.unwrap().unwrap();
+
+    let target = "archival test fact number 3";
+    let by_vector = MemoryQuery::new()
+        .embedding(TestEmbedder.embed(target).unwrap())
+        .include_archives();
+    let response = engine.execute_query(&by_vector).await.unwrap();
+    assert_eq!(response.results[0].fact.content, target);
+    assert_eq!(response.diagnostics.archive_paks_unscored, 0);
+
+    let other: std::sync::Arc<dyn EmbeddingProvider> = std::sync::Arc::new(OtherEmbedder);
+    engine
+        .reconstruct(&OtherEmbedder.fingerprint(), &other)
+        .await
+        .unwrap();
+
+    let response = engine.execute_query(&by_vector).await.unwrap();
+    assert!(
+        response.results.is_empty(),
+        "a vector made under another identity is never compared: {:?}",
+        response.results
+    );
+    assert_eq!(response.diagnostics.archive_paks_scanned, 1);
+    assert_eq!(response.diagnostics.archive_paks_unscored, 1);
+
+    let by_text = MemoryQuery::new().text("number 3").include_archives();
+    let response = engine.execute_query(&by_text).await.unwrap();
+    assert_eq!(response.results[0].fact.content, target);
+}

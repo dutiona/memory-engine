@@ -4,10 +4,8 @@
 //! - TOML provides defaults
 //! - CLI flags override individual TOML fields
 //! - Missing TOML sections handled gracefully
-//! - `embed_dim` probing from DB fallback
 //! - `deny_unknown_fields` rejects extra config
 
-use memory_engine::MemoryEngine;
 use memory_engine_mcp::config::{
     EmbeddingOverrides, EmbeddingSection, McpConfig, ResolvedEmbedding, resolve_embedding,
 };
@@ -89,6 +87,25 @@ dimensions = 384
     assert_eq!(emb.provider, "ollama");
     assert_eq!(emb.query_instruction, None);
     assert_eq!(emb.mrl_dim, None);
+}
+
+/// #1064: the TOML section and the flag-only resolver take one shared default.
+#[test]
+fn the_section_and_the_resolver_default_to_the_shared_provider() {
+    use memory_engine_embed::HttpEmbeddingProvider;
+    assert_eq!(
+        section("").provider,
+        HttpEmbeddingProvider::DEFAULT_PROVIDER
+    );
+    let overrides = EmbeddingOverrides {
+        url: Some("http://cli-host:8080/embed".into()),
+        model: Some("cli-model".into()),
+        ..EmbeddingOverrides::default()
+    };
+    assert_eq!(
+        resolve(&overrides, None).provider,
+        HttpEmbeddingProvider::DEFAULT_PROVIDER
+    );
 }
 
 #[test]
@@ -183,6 +200,7 @@ fn every_override_wins_over_toml_field_by_field() {
         url: Some("http://cli-host:8080/embed".into()),
         model: Some("cli-model".into()),
         api_key: Some("cli-key".into()),
+        api_key_file: None,
         provider: Some("llama.cpp".into()),
         query_instruction: Some(String::new()),
         artifact_sha256: Some("0".repeat(64)),
@@ -276,69 +294,6 @@ fn the_dimension_checks_run_in_the_resolver() {
 }
 
 // ---------------------------------------------------------------------------
-// embed_dim probing
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn probe_embed_dim_from_existing_db() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("test.db");
-
-    // Create a real database with a known dimension. Under #613 the dimension is
-    // recorded on the first embedding write, so seed the identity directly.
-    let engine = MemoryEngine::builder(384)
-        .path(db_path.clone())
-        .build()
-        .unwrap();
-    engine
-        .set_config(
-            "embedding_meta",
-            &serde_json::to_string(&memory_engine::EmbeddingFingerprint::new(
-                "test", "test", 384,
-            ))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    drop(engine);
-
-    let probed = memory_engine_mcp::config::probe_embed_dim(&db_path).unwrap();
-    assert_eq!(probed, 384);
-}
-
-#[test]
-fn probe_embed_dim_nonexistent_db() {
-    let result =
-        memory_engine_mcp::config::probe_embed_dim(std::path::Path::new("/tmp/no_such_db.sqlite"));
-    assert!(result.is_err());
-}
-
-#[tokio::test]
-async fn probe_embed_dim_different_dimensions() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("test.db");
-
-    let engine = MemoryEngine::builder(768)
-        .path(db_path.clone())
-        .build()
-        .unwrap();
-    engine
-        .set_config(
-            "embedding_meta",
-            &serde_json::to_string(&memory_engine::EmbeddingFingerprint::new(
-                "test", "test", 768,
-            ))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    drop(engine);
-
-    let probed = memory_engine_mcp::config::probe_embed_dim(&db_path).unwrap();
-    assert_eq!(probed, 768);
-}
-
-// ---------------------------------------------------------------------------
 // Config from TOML file (round-trip)
 // ---------------------------------------------------------------------------
 
@@ -421,4 +376,79 @@ api_key = "embed-key-sentinel"
     let debug = format!("{config:?}");
     assert!(debug.contains("api_key"), "{debug}");
     assert!(!debug.contains("embed-key-sentinel"), "{debug}");
+}
+
+// --- #1101: the embedder key from a file ---
+
+/// A key built at run time, written to a fresh file; the caller keeps the directory.
+fn key_file() -> (TempDir, std::path::PathBuf, String) {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("embed-key");
+    let key = format!("file-key-{}", std::process::id());
+    std::fs::write(&path, format!("{key}\n")).unwrap();
+    (dir, path, key)
+}
+
+fn file_overrides(path: &std::path::Path) -> EmbeddingOverrides {
+    EmbeddingOverrides {
+        url: Some("http://cli-host:8080/embed".into()),
+        model: Some("cli-model".into()),
+        api_key_file: Some(path.to_path_buf()),
+        ..EmbeddingOverrides::default()
+    }
+}
+
+#[test]
+fn the_key_file_supplies_the_api_key() {
+    let (_dir, path, key) = key_file();
+    let r = resolve(&file_overrides(&path), None);
+    assert_eq!(r.api_key.as_deref(), Some(key.as_str()));
+}
+
+#[test]
+fn a_key_file_beside_another_key_is_refused_naming_both_settings() {
+    let (_dir, path, key) = key_file();
+    let flag = format!("flag-key-{}", std::process::id());
+    let beside_flag = EmbeddingOverrides {
+        api_key: Some(flag.clone()),
+        ..file_overrides(&path)
+    };
+    let toml_key = format!("toml-key-{}", std::process::id());
+    let beside_toml = section(&format!("api_key = \"{toml_key}\"\n"));
+    for (overrides, base, other) in [
+        (
+            &beside_flag,
+            None,
+            "--embed-api-key / MEMORY_MCP_EMBED_API_KEY",
+        ),
+        (
+            &file_overrides(&path),
+            Some(&beside_toml),
+            "api_key in [embedding]",
+        ),
+    ] {
+        let err = resolve_embedding(overrides, base, 8)
+            .err()
+            .expect("two key sources are refused")
+            .to_string();
+        assert!(
+            err.contains("--embed-api-key-file / MEMORY_MCP_EMBED_API_KEY_FILE"),
+            "{err}"
+        );
+        assert!(err.contains(other), "{err}");
+        for secret in [&key, &flag, &toml_key] {
+            assert!(!err.contains(secret.as_str()), "{err}");
+        }
+    }
+}
+
+#[test]
+fn a_lone_key_file_is_refused_by_the_url_and_model_rule() {
+    let (_dir, path, _) = key_file();
+    let lone = EmbeddingOverrides {
+        api_key_file: Some(path),
+        ..EmbeddingOverrides::default()
+    };
+    let err = resolve_embedding(&lone, None, 8).err().unwrap().to_string();
+    assert!(err.contains("needs both a url"), "{err}");
 }

@@ -242,6 +242,32 @@ async fn restore_sqlite_probe_failure_leaves_no_sidecars() {
     }
 }
 
+/// A backup that passes every pre-open check but fails to migrate on open leaves no target
+/// and no sidecar either, like every earlier refusal.
+#[tokio::test]
+async fn restore_sqlite_open_failure_leaves_no_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let backup_path = dir.path().join("hollow-v10.db");
+    rusqlite::Connection::open(&backup_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO config VALUES ('schema_version', '10');",
+        )
+        .unwrap();
+
+    let config = EngineConfig::new(dir.path().join("restored.db"), DIM);
+    let err = MemoryEngine::restore_sqlite(&backup_path, &config).unwrap_err();
+    assert!(
+        err.to_string().contains("no such table"),
+        "refused by the migration on open: {err}"
+    );
+    for suffix in ["", "-wal", "-shm"] {
+        let leftover = dir.path().join(format!("restored.db{suffix}"));
+        assert!(!leftover.exists(), "left behind: {}", leftover.display());
+    }
+}
+
 #[tokio::test]
 async fn restore_json_fails_if_target_exists() {
     let engine = make_engine().await;
@@ -504,4 +530,254 @@ async fn a_snapshot_with_a_dangling_tombstone_is_refused() {
         );
         assert!(!target.exists(), "nothing written for {stone}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// #1049: a backup from before schema v15 restores and migrates
+// ---------------------------------------------------------------------------
+
+/// A `dump_state(Sqlite)` backup of a store stamped `mock/test/4`, rolled back by raw SQL to
+/// `version` (18 keeps the current layout): 14 (no served columns), 13 (also no `fact_vectors`), 12 (the registry folded
+/// back into the `embedding_meta` config value). `waiting` makes a store whose one fact waits
+/// for its vector instead (no identity, only `embed_dim`).
+async fn older_backup(dir: &std::path::Path, version: u32, waiting: bool) -> std::path::PathBuf {
+    let source = dir.join(format!("source-{version}-{waiting}.db"));
+    let mut engine = MemoryEngine::builder(DIM).path(&source).build().unwrap();
+    let request = AddFactRequest {
+        content: "an older fact".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: None,
+    };
+    if waiting {
+        engine.add_fact_deferred(&request).await.unwrap();
+    } else {
+        engine
+            .add_fact(
+                &request,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    engine.close().await.unwrap();
+    let mut engine = MemoryEngine::builder(DIM).path(&source).build().unwrap();
+    let backup = dir.join(format!("backup-{version}-{waiting}.db"));
+    engine
+        .dump_state(&DumpFormat::Sqlite(backup.clone()))
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let conn = rusqlite::Connection::open(&backup).unwrap();
+    if version <= 14 {
+        conn.execute_batch(
+            "ALTER TABLE embedding_spaces DROP COLUMN artifact_sha256;
+             ALTER TABLE embedding_spaces DROP COLUMN pooling;
+             ALTER TABLE embedding_spaces DROP COLUMN normalization;
+             ALTER TABLE embedding_spaces DROP COLUMN max_input_tokens;",
+        )
+        .unwrap();
+    }
+    if version <= 13 {
+        conn.execute_batch("DROP TABLE fact_vectors;").unwrap();
+    }
+    if version == 12 {
+        let meta: Option<String> = conn
+            .query_row(
+                "SELECT json_object('model', model, 'provider', provider, 'dim', dim,
+                        'matryoshka_base_dim', matryoshka_base_dim, 'element_type', element_type)
+                   FROM embedding_spaces WHERE status = 'active'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(meta) = meta {
+            conn.execute(
+                "INSERT INTO config (key, value) VALUES ('embedding_meta', ?1)",
+                [meta],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("DROP TABLE embedding_spaces;").unwrap();
+    }
+    conn.execute(
+        "UPDATE config SET value = ?1 WHERE key = 'schema_version'",
+        [version.to_string()],
+    )
+    .unwrap();
+    drop(conn);
+    backup
+}
+
+#[tokio::test]
+async fn restore_sqlite_migrates_an_older_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    for version in [14, 13, 12] {
+        let backup = older_backup(dir.path(), version, false).await;
+        let target = dir.path().join(format!("restored-{version}.db"));
+        let mut restored =
+            MemoryEngine::restore_sqlite(&backup, &EngineConfig::new(target.clone(), DIM))
+                .unwrap_or_else(|e| panic!("v{version}: {e}"));
+        assert_eq!(
+            restored.statistics().await.unwrap().facts.total,
+            1,
+            "v{version}"
+        );
+        restored.close().await.unwrap();
+        assert_eq!(
+            memory_engine::read_recorded_embedding(&target).unwrap(),
+            memory_engine::RecordedEmbedding::Identity(EmbeddingFingerprint::new(
+                "mock", "test", 4
+            )),
+            "v{version}"
+        );
+        let version_now: String = rusqlite::Connection::open(&target)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM config WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            version_now,
+            memory_engine::CURRENT_SCHEMA_VERSION.to_string(),
+            "v{version}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn restore_sqlite_refuses_an_older_backup_of_another_dimension() {
+    let dir = tempfile::tempdir().unwrap();
+    for (version, waiting) in [(14, false), (12, false), (18, true)] {
+        let backup = older_backup(dir.path(), version, waiting).await;
+        let target = dir.path().join(format!("restored-{version}-{waiting}.db"));
+        let err = MemoryEngine::restore_sqlite(&backup, &EngineConfig::new(target.clone(), 8))
+            .expect_err("another dimension");
+        assert!(
+            matches!(
+                err,
+                memory_engine::MemoryError::EmbeddingDimension {
+                    expected: 8,
+                    actual: 4
+                }
+            ),
+            "v{version} waiting={waiting}: {err:?}"
+        );
+        for suffix in ["", "-wal", "-shm"] {
+            let mut leftover = target.as_os_str().to_owned();
+            leftover.push(suffix);
+            assert!(
+                !std::path::Path::new(&leftover).exists(),
+                "left behind: {leftover:?}"
+            );
+        }
+    }
+}
+
+/// One memory written as the MCP `remember` writes it: its call record first, then the fact
+/// pointing at that record. Returns `(record, fact)`.
+async fn remember(engine: &MemoryEngine, content: &str) -> (i64, i64) {
+    let record = engine.ingest(&forget_record()).await.unwrap();
+    let fact = engine
+        .add_fact(
+            &AddFactRequest {
+                content: content.into(),
+                fact_type: FactType::Semantic,
+                source_event_id: Some(record),
+                scope: None,
+                opts: None,
+            },
+            std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+            None,
+        )
+        .await
+        .unwrap();
+    (record, fact)
+}
+
+/// #1131: an erase leaves a gap at the top of the ids; an export carries the high-water marks,
+/// so the store it is imported into gives none of the erased ids again and every call record
+/// still names its own fact. ("export, erase, restore, import": the erase comes first, or the
+/// export would carry the erased fact and test nothing; the import is the write after restore.)
+#[tokio::test]
+async fn an_import_after_erase_reuses_no_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = MemoryEngine::builder(DIM)
+        .path(dir.path().join("memory.db"))
+        .build()
+        .unwrap();
+    let (_, first) = remember(&engine, "alpha fact").await;
+    let (second_record, second) = remember(&engine, "beta fact").await;
+    let (_, third) = remember(&engine, "gamma fact").await;
+    assert_eq!([first, second, third], [1, 2, 3]);
+    engine
+        .erase(&memory_engine::types::EraseTarget::Fact(third))
+        .await
+        .unwrap();
+    let json_path = dir.path().join("dump.json");
+    engine
+        .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
+        .unwrap();
+
+    let config = EngineConfig::new(dir.path().join("restored.db"), DIM);
+    let restored = MemoryEngine::restore_json(&json_path, &config).unwrap();
+    let (_, fourth) = remember(&restored, "delta fact").await;
+
+    assert_eq!(fourth, 4, "the erased fact's id is never given again");
+    assert!(
+        restored.get_fact(third).await.is_err(),
+        "fact 3 stays erased"
+    );
+    assert_eq!(
+        restored.get_fact(second).await.unwrap().source_event_id,
+        Some(second_record),
+        "fact 2 still points at its own call record"
+    );
+}
+
+/// #1131: a snapshot taken before the marks were exported restores from its rows, as before.
+#[tokio::test]
+async fn a_snapshot_without_sequences_restores_from_its_rows() {
+    let engine = make_engine().await;
+    let dir = tempfile::tempdir().unwrap();
+    let json_path = dir.path().join("dump.json");
+    engine
+        .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    assert!(value.as_object_mut().unwrap().remove("sequences").is_some());
+    std::fs::write(&json_path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    let restored = MemoryEngine::restore_json_memory(&json_path).unwrap();
+    let (_, next) = remember(&restored, "gamma fact").await;
+    assert_eq!(next, 3, "the id after the highest restored row");
+}
+
+/// #1131: an older binary reads a snapshot carrying `sequences` because the snapshot type
+/// ignores a key it does not know.
+#[tokio::test]
+async fn an_export_with_sequences_reads_as_a_snapshot_with_an_unknown_field() {
+    let engine = make_engine().await;
+    let dir = tempfile::tempdir().unwrap();
+    let json_path = dir.path().join("dump.json");
+    engine
+        .dump_state(&DumpFormat::Json(json_path.clone()))
+        .await
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    value.as_object_mut().unwrap().insert(
+        "a_field_from_the_future".into(),
+        serde_json::json!({"x": 1}),
+    );
+    let snapshot: memory_engine::inspect_types::EngineSnapshot =
+        serde_json::from_value(value).unwrap();
+    assert_eq!(snapshot.facts.len(), 2);
 }

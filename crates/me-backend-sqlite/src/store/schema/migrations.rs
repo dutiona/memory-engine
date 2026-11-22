@@ -401,6 +401,37 @@ struct V12Fingerprint {
     element_type: String,
 }
 
+/// Decode a v12 `embedding_meta` config value into the identity it records (no served
+/// artifact: that arrived with v15).
+///
+/// The one decoder of the frozen v12 layout: `migrate_v12_to_v13` folds the value with it, and
+/// `embedding_meta::load_recorded` reads an un-migrated v12 store with it, so the two agree.
+///
+/// # Errors
+///
+/// `MigrationError::Incompatible` for a corrupt value, or a dimension that overflows `usize`.
+pub fn decode_v12_identity(raw: &str) -> Result<me_types::types::EmbeddingFingerprint> {
+    let fp: V12Fingerprint = serde_json::from_str(raw).map_err(|e| {
+        MigrationError::Incompatible(format!("corrupt embedding_meta during v12->v13: {e}"))
+    })?;
+    let size = |v: u64, what: &str| {
+        usize::try_from(v).map_err(|_| {
+            MigrationError::Incompatible(format!("embedding_meta.{what} exceeds usize"))
+        })
+    };
+    Ok(me_types::types::EmbeddingFingerprint {
+        model: fp.model,
+        provider: fp.provider,
+        dim: size(fp.dim, "dim")?,
+        matryoshka_base_dim: fp
+            .matryoshka_base_dim
+            .map(|d| size(d, "matryoshka_base_dim"))
+            .transpose()?,
+        element_type: fp.element_type,
+        served: None,
+    })
+}
+
 /// Generalize the single `embedding_meta` config value into the `embedding_spaces`
 /// registry table (issue #622, ADR 0015 §1 — the degenerate single-space case).
 ///
@@ -438,29 +469,24 @@ pub(super) fn migrate_v12_to_v13(tx: &Transaction) -> Result<()> {
     // created empty in this same step, so a plain INSERT cannot conflict (the version
     // gate makes the step run-once) — no ON CONFLICT needed.
     if let Some(raw) = super::get_config(tx, "embedding_meta")? {
-        let fp: V12Fingerprint = serde_json::from_str(&raw).map_err(|e| {
-            MigrationError::Incompatible(format!("corrupt embedding_meta during v12->v13: {e}"))
-        })?;
+        let fp = decode_v12_identity(&raw)?;
+        let dim = i64::try_from(fp.dim)
+            .map_err(|_| MigrationError::Incompatible("embedding_meta.dim exceeds i64".into()))?;
+        let base = fp
+            .matryoshka_base_dim
+            .map(|d| {
+                i64::try_from(d).map_err(|_| {
+                    MigrationError::Incompatible(
+                        "embedding_meta.matryoshka_base_dim exceeds i64".into(),
+                    )
+                })
+            })
+            .transpose()?;
         tx.execute(
             "INSERT INTO embedding_spaces
                  (name, model, provider, dim, matryoshka_base_dim, element_type, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active')",
-            rusqlite::params![
-                "default",
-                fp.model,
-                fp.provider,
-                i64::try_from(fp.dim).map_err(|_| MigrationError::Incompatible(
-                    "embedding_meta.dim exceeds i64".into()
-                ))?,
-                fp.matryoshka_base_dim
-                    .map(
-                        |d| i64::try_from(d).map_err(|_| MigrationError::Incompatible(
-                            "embedding_meta.matryoshka_base_dim exceeds i64".into()
-                        ))
-                    )
-                    .transpose()?,
-                fp.element_type,
-            ],
+            rusqlite::params!["default", fp.model, fp.provider, dim, base, fp.element_type],
         )
         .map_err(StorageError::backend)?;
         tx.execute_batch("DELETE FROM config WHERE key = 'embedding_meta';")

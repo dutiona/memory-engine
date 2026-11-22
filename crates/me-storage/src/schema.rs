@@ -197,7 +197,7 @@ pub trait SchemaManager: Send + Sync {
     // Pure DB ops. The engine drives the embedding (off the write lock, under
     // `spawn_blocking`) and calls these to open / fill / inspect a `populating`
     // space's `fact_vectors`. The embedder never crosses the port — the backend
-    // does no network/LLM work. The atomic promote + deprecate land in #623 T3.
+    // does no network/LLM work. `promote_space` is the atomic promote (#623 D6).
     // These sit on `SchemaManager` (not a new supertrait) because reconstruction
     // *is* the embedding-identity lifecycle this trait already owns.
     // -------------------------------------------------------------------------
@@ -249,8 +249,10 @@ pub trait SchemaManager: Send + Sync {
     /// `fact_id`).
     async fn write_backfill_batch(&self, space: &str, rows: Vec<(i64, Vec<f32>)>) -> Result<usize>;
 
-    /// Count facts still lacking a vector in `space`. `0` means fully backfilled —
-    /// the promote completeness gate (#623 D6).
+    /// Count facts that hold a vector and still lack one in `space`. `0` means fully
+    /// backfilled — the promote completeness gate (#623 D6). A fact without a vector
+    /// (#1021) is not counted: the promote leaves one the new provider rejected as it is
+    /// (#1081).
     ///
     /// # Errors
     ///
@@ -260,17 +262,18 @@ pub trait SchemaManager: Send + Sync {
 
     /// Atomically promote the `populating` space to active (#623 D6): in one
     /// transaction, retain the old active vectors for rollback, copy-swap the
-    /// populating vectors into `facts.embedding`, and flip the registry status
-    /// (the identity flip), clearing the dedup watermark and bumping the consolidation
-    /// generation (#1080). **Same-dim only** this wave — a different-dim
-    /// populating space is rejected (the engine `embed_dim` is frozen at open;
-    /// different-dim is #742).
+    /// populating vectors into `facts.embedding` for the facts that have one, and flip
+    /// the registry status (the identity flip), clearing the dedup watermark and bumping
+    /// the consolidation generation (#1080). A fact without a vector and without a
+    /// populating one keeps no vector and its deferred-embedding queue row, and is listed
+    /// in [`PromoteOutcome::without_vector`]. Dimension-agnostic since #742: a
+    /// different-dim populating space promotes too, and the engine fences its handle
+    /// until it reopens at the new dimension; the width invariant is the engine-side
+    /// backfill's per-vector check.
     ///
     /// # Errors
     ///
-    /// Returns [`MemoryError::EmbeddingDimension`](me_types::error::MemoryError::EmbeddingDimension)
-    /// for a different-dim populating space,
-    /// [`MemoryError::Internal`](me_types::error::MemoryError::Internal) if there is no
+    /// Returns [`MemoryError::Internal`](me_types::error::MemoryError::Internal) if there is no
     /// active space, the populating space is missing or not `populating`, or the
     /// completeness gate fails, or
     /// [`MemoryError::Storage`](me_types::error::MemoryError::Storage) on a backend

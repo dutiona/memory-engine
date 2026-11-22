@@ -178,6 +178,7 @@ pub use engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, 
 pub use engine::builder::{File, InMemory, MemoryEngineBuilder};
 pub use engine::embed_queue::{Backoff, Settled, read_embed_queue_status};
 pub use engine::lifecycle::read_quarantined;
+pub use engine::read_recorded_embedding;
 pub use engine::redaction_counts::read_redaction_counts;
 pub use engine::{EngineConfig, MemoryEngine};
 pub use me_types::limits::{BACKFILL_BODY_BYTES, LIFECYCLE_BODY_BYTES};
@@ -292,8 +293,8 @@ pub use me_types::types::{
     NewFactBuilder, NewLineageRecord, NewSummary, NextEmbedding, Outcome, OutcomeClass,
     OutcomeCounts, ParseActivityStatusError, PendingEmbedding, ProjectContext, PromoteOutcome,
     PromoteRequest, PromotionProvenance, PromotionResult, RecordActivityRequest,
-    RecordActivityResult, RelationType, ScopeNode, ScopeQuery, ServedArtifact, SessionCheckpoint,
-    SessionFact, Summary,
+    RecordActivityResult, RecordedEmbedding, RelationType, ScopeNode, ScopeQuery, ServedArtifact,
+    SessionCheckpoint, SessionFact, Summary,
 };
 
 // Storage port — tight flat re-export of the umbrella + cross-cutting types only.

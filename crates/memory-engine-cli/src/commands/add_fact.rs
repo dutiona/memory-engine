@@ -3,6 +3,7 @@ use std::path::Path;
 use chrono::{DateTime, Utc};
 use memory_engine::types::{AddFactOptions, AddFactRequest, FactType};
 
+use crate::commands::embedding_args::IdentityArgs;
 use crate::commands::types::CliFactType;
 use crate::db::open_engine_writable_with_dim;
 use crate::output::{self, OutputFormat, parse_datetime};
@@ -49,6 +50,11 @@ pub struct AddFactArgs {
     /// Link to an existing event ID in the database
     #[arg(long)]
     source_event_id: Option<i64>,
+
+    /// The identity of the model that computed `--embedding` (ADR-0015 §3): `--embed-model`
+    /// is required, the provider and served artifact as the embedder commands spell them.
+    #[command(flatten)]
+    identity: IdentityArgs,
 }
 
 pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow::Result<()> {
@@ -95,11 +101,16 @@ pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow:
         None => None,
     };
 
+    // The vector declares the identity it was made under; the open refuses one the store
+    // does not record before anything migrates (#1060, #1065), and a blank store records
+    // it with the fact (ADR-0015 §2).
+    let declared = args.identity.declared(embedding.len())?;
+
     // Derive the engine dimension from the supplied embedding rather than peeking
     // the database: this works on a freshly-created, never-embedded store (which
     // has no recorded dimension under #613). If the store was previously embedded
     // at a different dimension, the engine's open path rejects the mismatch.
-    let mut engine = open_engine_writable_with_dim(db, embedding.len())?;
+    let mut engine = open_engine_writable_with_dim(db, embedding.len(), Some(declared.clone()))?;
     let fact_type: FactType = args.fact_type.into();
 
     let req = AddFactRequest {
@@ -118,10 +129,7 @@ pub async fn run(db: &Path, args: &AddFactArgs, format: OutputFormat) -> anyhow:
     };
 
     // The operator computed `embedding` from `--content`, so the precomputed path refuses a
-    // content that redaction would change (#1024). TODO(#615): a pre-computed embedding has no
-    // declared model identity; the sentinel names the hole #615 will enforce against.
-    let declared =
-        memory_engine::EmbeddingFingerprint::new("precomputed", "passthrough", embedding.len());
+    // content that redaction would change (#1024).
     let fact_id = engine
         .add_fact_precomputed(&req, embedding, &declared, None)
         .await?;

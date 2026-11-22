@@ -123,6 +123,16 @@ fn mint_sqlite_vacuum_tmp(dir: &Path) -> std::io::Result<tempfile::NamedTempFile
         })
 }
 
+/// The `sqlite_sequence` rows, `table → seq` (#1131).
+fn list_sequences(conn: &Connection) -> Result<std::collections::BTreeMap<String, i64>> {
+    let mut stmt = conn
+        .prepare("SELECT name, seq FROM sqlite_sequence")
+        .map_err(|e| MemoryError::from(me_types::error::StorageError::backend(e)))?;
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .and_then(Iterator::collect)
+        .map_err(|e| MemoryError::from(me_types::error::StorageError::backend(e)))
+}
+
 /// Stream engine state as JSON to `writer`, one entity at a time.
 ///
 /// Produces the same JSON format as [`me_types::types::inspect::EngineSnapshot`] but
@@ -158,6 +168,8 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
 
     // Config is always small — materialize directly.
     let config = list_config(conn)?;
+    // So are the id high-water marks (#1131): one row per AUTOINCREMENT table.
+    let sequences = list_sequences(conn)?;
     let tombstones = crate::store::tombstones::list_all(conn)?;
 
     // Serialize the whole snapshot object through serde's `SerializeMap` rather
@@ -277,6 +289,7 @@ fn stream_snapshot<W: Write>(conn: &Connection, embed_dim: usize, writer: &mut W
         )?;
 
         map.serialize_entry("config", &config)?;
+        map.serialize_entry("sequences", &sequences)?;
 
         map.end()
     };
@@ -633,6 +646,8 @@ mod tests {
         assert_ne!(snapshot.scopes, []);
         assert_eq!(snapshot.embed_dim, DIM);
         assert!(snapshot.schema_version > 0);
+        // `sequences` is `#[serde(default)]`: a drifted key would read as empty, so pin it.
+        assert_eq!(snapshot.sequences.get("facts"), Some(&2));
     }
 
     /// Verify empty database produces a valid (empty) snapshot.

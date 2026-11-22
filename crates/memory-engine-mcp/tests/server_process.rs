@@ -208,6 +208,77 @@ fn starts_with_an_embedder() {
     assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
 }
 
+/// #1101: the key and the key file at once refuse to start, before the store opens, naming
+/// both settings and neither secret.
+#[test]
+fn a_key_and_a_key_file_at_once_stop_startup_before_the_store_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let key_file = dir.path().join("embed-key");
+    let file_key = format!("file-key-{}", std::process::id());
+    let env_key = format!("env-key-{}", std::process::id());
+    std::fs::write(&key_file, &file_key).unwrap();
+    let mut server = ServerProcess::spawn(
+        dir.path(),
+        &[],
+        &[
+            ("MEMORY_MCP_EMBED_URL", "http://127.0.0.1:9/v1/embeddings"),
+            ("MEMORY_MCP_EMBED_MODEL", "m"),
+            ("MEMORY_MCP_EMBED_API_KEY", &env_key),
+            ("MEMORY_MCP_EMBED_API_KEY_FILE", key_file.to_str().unwrap()),
+        ],
+    );
+    let status = server.wait_exit(Duration::from_secs(20));
+    let stderr = server.stderr();
+    assert_eq!(status.code(), Some(1), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("MEMORY_MCP_EMBED_API_KEY_FILE"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("MEMORY_MCP_EMBED_API_KEY;"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(&file_key) && !stderr.contains(&env_key),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !dir.path().join("memory.db").exists(),
+        "refused before the store opens"
+    );
+}
+
+/// #1101: a key read from a file is held like a key given directly: never logged.
+#[test]
+fn a_key_file_never_reaches_the_log() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mock = runtime.block_on(wiremock::MockServer::start());
+    let dir = tempfile::tempdir().unwrap();
+    let key_file = dir.path().join("embed-key");
+    let key = format!("file-key-{}", std::process::id());
+    std::fs::write(&key_file, format!("{key}\n")).unwrap();
+    let embed_url = format!("{}/v1/embeddings", mock.uri());
+    let mut server = ServerProcess::spawn(
+        dir.path(),
+        &[
+            "--embed-url",
+            &embed_url,
+            "--embed-model",
+            "m",
+            "--embed-api-key-file",
+            key_file.to_str().unwrap(),
+        ],
+        &[("RUST_LOG", "trace")],
+    );
+    assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
+    assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
+    assert!(
+        !server.stderr().contains(&key),
+        "stderr:\n{}",
+        server.stderr()
+    );
+}
+
 /// The text of a model tool's answer, its call line removed.
 fn answer(response: &Value) -> String {
     let text = response["result"]["content"][0]["text"]

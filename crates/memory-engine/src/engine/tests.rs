@@ -1226,8 +1226,9 @@ async fn dedup_compares_every_fact_after_a_reconstruction() {
     assert_eq!(duplicates_removed(&engine).await, 1);
 }
 
-/// #1080: a restore resets the id sequence to the highest surviving id, so a new fact can
-/// take an erased id at or below a watermark the restore would otherwise have imported.
+/// #1080: a snapshot taken before #1131 carries no id marks, so its restore resets each id
+/// sequence to the highest surviving id and a new fact can take an erased id at or below a
+/// watermark the restore would otherwise have imported.
 #[tokio::test]
 async fn dedup_compares_a_reused_id_after_a_restore() {
     let engine = MemoryEngine::builder(DIM).build().unwrap();
@@ -1245,6 +1246,14 @@ async fn dedup_compares_a_reused_id_after_a_restore() {
         .dump_state(&crate::inspect::DumpFormat::Json(dump.clone()))
         .await
         .unwrap();
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&dump).unwrap()).unwrap();
+    snapshot
+        .as_object_mut()
+        .unwrap()
+        .remove("sequences")
+        .unwrap();
+    std::fs::write(&dump, serde_json::to_vec(&snapshot).unwrap()).unwrap();
 
     let restored = MemoryEngine::restore_json_memory(&dump).unwrap();
     let reused = add_animal(&restored, "cats meow", None).await;
@@ -6383,4 +6392,225 @@ mod scope_writes {
             MemoryError::ReadOnly
         ));
     }
+}
+
+// ---------------------------------------------------------------------------
+// #1049 / #1065: older stores are read where they lie, before anything migrates
+// ---------------------------------------------------------------------------
+
+/// A file store at `dim` whose one fact recorded `fp`, closed and rolled back by raw SQL to
+/// schema v14 (no served-artifact columns), as a pre-#1017 binary left it.
+pub(super) async fn older_store(dir: &std::path::Path, fp: &EmbeddingFingerprint) -> PathBuf {
+    let db = dir.join("older.db");
+    let mut engine = MemoryEngine::builder(fp.dim).path(&db).build().unwrap();
+    engine
+        .add_fact_precomputed(
+            &AddFactRequest {
+                content: "an older fact".into(),
+                fact_type: FactType::Semantic,
+                source_event_id: None,
+                scope: None,
+                opts: None,
+            },
+            vec![0.5; fp.dim],
+            fp,
+            None,
+        )
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE embedding_spaces DROP COLUMN artifact_sha256;
+         ALTER TABLE embedding_spaces DROP COLUMN pooling;
+         ALTER TABLE embedding_spaces DROP COLUMN normalization;
+         ALTER TABLE embedding_spaces DROP COLUMN max_input_tokens;
+         UPDATE config SET value = '14' WHERE key = 'schema_version';
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    )
+    .unwrap();
+    drop(conn);
+    db
+}
+
+/// The SHA-256 of the store's database and of its `-wal` (absent read as empty), and its
+/// `schema_version`: what a refused open must leave unchanged (#1065).
+pub(super) fn store_state(db: &std::path::Path) -> (String, String, String) {
+    use sha2::Digest as _;
+    let hex = |bytes: Vec<u8>| {
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .fold(String::new(), |mut out, b| {
+                use std::fmt::Write as _;
+                let _ = write!(out, "{b:02x}");
+                out
+            })
+    };
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    let version =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM config WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+    (
+        hex(std::fs::read(db).unwrap()),
+        hex(std::fs::read(PathBuf::from(wal)).unwrap_or_default()),
+        version,
+    )
+}
+
+#[tokio::test]
+async fn read_recorded_embedding_never_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let fp = EmbeddingFingerprint::new("m", "p", DIM);
+    let db = older_store(dir.path(), &fp).await;
+    let before = store_state(&db);
+    assert_eq!(
+        crate::read_recorded_embedding(&db).unwrap(),
+        crate::types::RecordedEmbedding::Identity(fp)
+    );
+    assert_eq!(store_state(&db), before, "the read changed the store");
+    assert!(matches!(
+        crate::read_recorded_embedding(&dir.path().join("missing.db")),
+        Err(MemoryError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn an_open_at_another_dimension_never_migrates_an_older_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = older_store(dir.path(), &EmbeddingFingerprint::new("m", "p", DIM)).await;
+    let before = store_state(&db);
+    let err = MemoryEngine::builder(8)
+        .path(&db)
+        .build()
+        .expect_err("another dimension");
+    assert!(
+        matches!(
+            err,
+            MemoryError::Migration(MigrationError::EmbedDimMismatch {
+                stored: DIM,
+                requested: 8
+            })
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        store_state(&db),
+        before,
+        "the refused open changed the store"
+    );
+}
+
+#[tokio::test]
+async fn an_all_waiting_store_refuses_another_dimension() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("waiting.db");
+    let mut engine = MemoryEngine::builder(DIM).path(&db).build().unwrap();
+    engine
+        .add_fact_deferred(&AddFactRequest {
+            content: "waits for its vector".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        })
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let before = store_state(&db);
+    let err = MemoryEngine::builder(8)
+        .path(&db)
+        .build()
+        .expect_err("another dimension");
+    assert!(
+        matches!(
+            err,
+            MemoryError::Migration(MigrationError::EmbedDimMismatch {
+                stored: DIM,
+                requested: 8
+            })
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        store_state(&db),
+        before,
+        "the refused open changed the store"
+    );
+}
+
+/// #1065: a declared identity is checked read-only before the store migrates, in WAL and in
+/// rollback-journal mode; a matching one opens and migrates.
+#[tokio::test]
+async fn declared_identity_refusal_never_migrates_an_older_store() {
+    let a = EmbeddingFingerprint::new("m", "p", DIM);
+    let b = EmbeddingFingerprint::new("other", "p", DIM);
+    for journal in ["WAL", "DELETE"] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = older_store(dir.path(), &a).await;
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .pragma_update(None, "journal_mode", journal)
+            .unwrap();
+        let before = store_state(&db);
+        let err = MemoryEngine::builder(DIM)
+            .path(&db)
+            .declared_identity(b.clone())
+            .build()
+            .expect_err("another identity");
+        assert!(
+            matches!(err, MemoryError::EmbeddingModelMismatch { .. }),
+            "{journal}: {err:?}"
+        );
+        assert_eq!(
+            store_state(&db),
+            before,
+            "{journal}: the refused open changed the store"
+        );
+        let mut engine = MemoryEngine::builder(DIM)
+            .path(&db)
+            .declared_identity(a.clone())
+            .build()
+            .unwrap();
+        engine.close().await.unwrap();
+        assert_eq!(
+            store_state(&db).2,
+            crate::CURRENT_SCHEMA_VERSION.to_string(),
+            "{journal}: the matching open migrates"
+        );
+    }
+}
+
+#[tokio::test]
+async fn declared_identity_accepts_a_blank_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("blank.db");
+    let fp = EmbeddingFingerprint::new("m", "p", DIM);
+    let mut engine = MemoryEngine::builder(DIM)
+        .path(&db)
+        .declared_identity(fp.clone())
+        .build()
+        .unwrap();
+    engine.close().await.unwrap();
+    let mut engine = MemoryEngine::builder(DIM)
+        .path(&db)
+        .declared_identity(fp)
+        .build()
+        .unwrap();
+    engine.close().await.unwrap();
+    let err = MemoryEngine::builder(DIM)
+        .path(&db)
+        .declared_identity(EmbeddingFingerprint::new("m", "p", DIM + 1))
+        .build()
+        .expect_err("a declared dimension other than the engine's");
+    assert!(
+        matches!(err, MemoryError::EmbeddingDimension { .. }),
+        "{err:?}"
+    );
 }

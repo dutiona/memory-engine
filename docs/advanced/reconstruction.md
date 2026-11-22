@@ -95,10 +95,18 @@ work signal — so:
 Re-running `reconstruct` after a crash **resumes** the same populating space — `begin_populating` is
 idempotent (it reopens an existing populating space with a matching fingerprint).
 
-Backfill covers **every** fact, expired or not. The promote copy-swaps with a _total_ `UPDATE`, and
-`facts.embedding` is `NOT NULL`; a fact missing a populating vector would either abort the swap or
-split the active space across two identities. A homogeneous active space is the invariant;
-re-embedding expired facts is the cheap price.
+Backfill covers **every** fact, expired or not. A fact that holds a vector and lacked a populating
+one at the promote would split the active space across two identities. A homogeneous active space is
+the invariant; re-embedding expired facts is the cheap price.
+
+A fact **without** a vector (waiting for its first one, or failed, in the deferred-embedding queue)
+that the new provider rejects permanently (`InputRejected`: 400, 413, 422) does not abort the
+backfill (#1081). The rejected window is re-embedded one input at a time, the rejected fact is
+skipped for the rest of the run, and nothing is written for it, so it holds no vector to mix. The
+promote leaves it as it is: without a vector and in the queue, where the drain retries or fails it,
+and lists it in `PromoteOutcome::without_vector`. A rejected fact that **holds** a vector, and any
+other provider error, still aborts the reconstruction: completing would drop that fact's only
+serving vector. A rerun re-derives the same skips, since the skipped facts never gain a populating row.
 
 ### Promote — one atomic transaction
 
@@ -109,11 +117,13 @@ drops the transaction and rolls back, so a mid-promote failure cannot leave part
    storage layer (the copy-swap is a blob-level `UPDATE`), so `populating.dim` may differ from
    `active.dim` (#742). The width invariant is the engine-side per-vector backfill check; a
    different-dim promote fences the handle (below).
-1. **Completeness gate _inside_ the tx** — every fact must already have a populating vector. This
-   runs inside the transaction (not before it), so a straggler that lands after the catch-up pass
-   is caught here rather than silently dropped (no TOCTOU).
+1. **Completeness gate _inside_ the tx** — every fact that holds a vector must already have a
+   populating one. This runs inside the transaction (not before it), so a straggler that lands after
+   the catch-up pass is caught here rather than silently dropped (no TOCTOU). A fact without a vector
+   needs none: one stored without a vector after the catch-up waits for the drain.
 2. **Retain** the old active vectors into `fact_vectors[old]` for rollback.
-3. **Copy-swap** the populating vectors into `facts.embedding` (the O(N) swap).
+3. **Copy-swap** the populating vectors into `facts.embedding` (the O(N) swap), for the facts that
+   have one; the others keep no vector. The deferred-embedding queue keeps only their rows.
 4. **Demote-then-activate** the registry status (the partial-unique index never transiently sees two
    `active` rows). **This flip _is_ the identity swap** — `embedding_meta::load` reads the active
    row's fingerprint — so the served identity and the served vectors change together, atomically.
@@ -122,8 +132,19 @@ drops the transaction and rolls back, so a mid-promote failure cannot leave part
    again ([incremental operation](consolidation.md#incremental-operation)).
 
 The result is a `PromoteOutcome` (see [below](#promoteoutcome-and-index-rebuild)): the swapped-fact
-count, the deprecated old space's name, the new active fingerprint (carrying the new dim for #742),
+count, the ids of the facts left without a vector (`without_vector`), the deprecated old space's name, the new active fingerprint (carrying the new dim for #742),
 the straggler count, and `rebuild_index`.
+
+## Archived facts keep their old vectors
+
+A reconstruction re-embeds the live store only: facts already archived into `.pak` files keep the
+vectors they were archived with. Each pak (format v3, #1061) records the embedding identity the store
+recorded when it was written, read in the same transaction as its facts. Archive search
+(`MemoryQuery::include_archives`) compares a pak's vectors with the query's embedding only when that
+identity equals the store's active one; every other pak, an older v2 pak (which records none)
+included, is still matched by text and is counted in `QueryDiagnostics::archive_paks_unscored`. So
+after a reconstruction to a new model, archived facts stay findable by text and are never ranked by a
+vector from another space. A binary older than format v3 refuses a v3 pak.
 
 ## Single-active invariant
 

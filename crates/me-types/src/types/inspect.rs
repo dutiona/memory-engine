@@ -229,4 +229,10 @@ pub struct EngineSnapshot {
     #[serde(default)]
     pub lifecycle_segments: Vec<LifecycleSegmentSnapshot>,
     pub config: BTreeMap<String, String>,
+    /// The store's id high-water marks, `sqlite_sequence` as `table → seq` (#1131): the
+    /// highest id each table ever gave, erased and archived rows included. A restore starts
+    /// each table's ids above it, so no id is reused. Absent, so empty, in a pre-#1131
+    /// snapshot, which restores its marks from its surviving rows.
+    #[serde(default)]
+    pub sequences: BTreeMap<String, i64>,
 }

@@ -13,15 +13,17 @@
 //!
 //! [`next_backfill_window`] and [`count_unbackfilled`] deliberately do **not**
 //! filter on `t_expired`: a reconstruction must produce a populating vector for
-//! *every* fact row, expired or not. The promote (#623 D6) copy-swaps with a
-//! *total* `UPDATE facts SET embedding = (SELECT … space_id = :pop)`. Because
-//! `facts.embedding` is `NOT NULL`, a fact lacking a populating vector would
-//! either abort the swap (NULL into a `NOT NULL` column) or — if the swap were
-//! scoped to "facts that have one" — leave `facts.embedding` a heterogeneous mix
-//! of old- and new-space vectors, silently corrupting similarity for any reader
+//! *every* fact row that holds a vector, expired or not. A fact with a vector and
+//! no populating one would leave `facts.embedding` a heterogeneous mix of old- and
+//! new-space vectors after the swap, silently corrupting similarity for any reader
 //! (e.g. `explain_fact`, `fact_history`) that does not filter expired facts.
 //! Re-embedding expired facts costs a few extra provider calls; a homogeneous
 //! active space is the correctness invariant that buys.
+//!
+//! A fact **without** a vector (#1021: waiting or failed in the deferred-embedding
+//! queue) is offered to the backfill too, but needs no populating vector: one the
+//! new provider rejects (#1081) keeps `X''` and its queue row through the promote,
+//! which swaps only the facts that have a populating vector.
 
 use me_types::error::StorageError;
 use rusqlite::{Connection, params};
@@ -127,11 +129,12 @@ pub fn write_backfill_batch(
     Ok(inserted)
 }
 
-/// Count facts that still lack a vector in `space_id`.
+/// Count facts that hold a vector and still lack one in `space_id`.
 ///
-/// The same anti-join as
-/// [`next_backfill_window`], reduced to a count. `0` means the space is fully
-/// backfilled: the promote completeness gate (#623 D6). Covers every fact.
+/// The anti-join of [`next_backfill_window`], reduced to a count and to facts with a
+/// vector: `0` is the promote completeness gate (#623 D6). A fact without a vector (#1021)
+/// is not counted: one the new provider rejected is left as it is by the promote (#1081),
+/// and the active space stays homogeneous because it holds no vector to mix.
 ///
 /// # Errors
 ///
@@ -144,7 +147,7 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
             "SELECT COUNT(*)
            FROM facts f
            LEFT JOIN fact_vectors v ON v.fact_id = f.id AND v.space_id = ?1
-          WHERE v.fact_id IS NULL",
+          WHERE v.fact_id IS NULL AND length(f.embedding) > 0",
             params![space_id],
             |row| row.get(0),
         )
@@ -165,23 +168,23 @@ pub fn count_unbackfilled(conn: &Connection, space_id: &str) -> Result<usize> {
 ///    the engine-side `backfill_space` per-vector check against the populating
 ///    space's declared dim, and a different-dim promote fences the engine handle
 ///    until it reopens at the new dim).
-/// 1. **Completeness gate INSIDE the tx** (no TOCTOU) — every fact must already
-///    have a populating vector. A non-zero count aborts (a straggler arrived
-///    after the engine's pre-tx catch-up).
+/// 1. **Completeness gate INSIDE the tx** (no TOCTOU) — every fact that holds a vector
+///    must already have a populating one. A non-zero count aborts (a straggler arrived
+///    after the engine's pre-tx catch-up). A fact without a vector needs none (#1081).
 /// 2. **Retain** the old active vectors into `fact_vectors[old]` for rollback; a fact
 ///    waiting for its vector (#1021) has none to retain.
 /// 3. **Copy-swap** the populating vectors into `facts.embedding` (the active
-///    serving store). The gate guarantees the subquery is never `NULL`
-///    (`facts.embedding` is `NOT NULL`) and covers every fact → the active space
-///    stays homogeneous.
+///    serving store), for the facts that have one. The gate guarantees every fact that
+///    held a vector has one, so the active space stays homogeneous; the others keep `X''`
+///    and are returned in `without_vector`.
 /// 4. **Status flip** — demote the old active, then activate the populating row
 ///    (demote-then-activate, so the single-active partial index is never violated).
 ///    This flip *is* the identity flip: `embedding_meta::load` reads the active
 ///    row's fingerprint.
 /// 5. **Cleanup** — delete `fact_vectors[populating]` (now redundant with
 ///    `facts.embedding`; the active space's vectors never live in `fact_vectors`), and
-///    empty the deferred-embedding queue: the gate gave every fact a vector, a waiting
-///    or failed one included, backfilled from its content like any other (#1021).
+///    drop the deferred-embedding queue rows of the facts that now hold a vector: a waiting
+///    or failed one the backfill embedded leaves it, one still without a vector keeps it.
 ///
 /// Returns a [`PromoteOutcome`] carrying the swapped-fact count, the deprecated
 /// old space's name, and the new active fingerprint. `stragglers_caught` is `0`
@@ -247,10 +250,22 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
     let promoted = tx
         .execute(
             "UPDATE facts SET embedding =
-            (SELECT embedding FROM fact_vectors WHERE fact_id = facts.id AND space_id = ?1)",
+            (SELECT embedding FROM fact_vectors WHERE fact_id = facts.id AND space_id = ?1)
+             WHERE id IN (SELECT fact_id FROM fact_vectors WHERE space_id = ?1)",
             params![populating],
         )
         .map_err(StorageError::backend)?;
+    let without_vector = {
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT id FROM facts WHERE NOT ({HAS_VECTOR}) ORDER BY id"
+            ))
+            .map_err(StorageError::backend)?;
+        stmt.query_map([], |r| r.get(0))
+            .map_err(StorageError::backend)?
+            .collect::<rusqlite::Result<Vec<i64>>>()
+            .map_err(StorageError::backend)?
+    };
 
     // (4) Demote-then-activate (the partial-unique index never sees two actives).
     embedding_spaces::deprecate(&tx, &active.name)?;
@@ -262,8 +277,13 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
         params![populating],
     )
     .map_err(StorageError::backend)?;
-    tx.execute("DELETE FROM embed_queue", [])
-        .map_err(StorageError::backend)?;
+    tx.execute(
+        &format!(
+            "DELETE FROM embed_queue WHERE fact_id IN (SELECT id FROM facts WHERE {HAS_VECTOR})"
+        ),
+        [],
+    )
+    .map_err(StorageError::backend)?;
     // Every vector is new (#1080): dedup compares every fact again, and a plan computed in
     // the old space is discarded.
     crate::store::facts::rewind_dedup_watermark(&tx, 1)?;
@@ -272,6 +292,7 @@ pub fn promote_space(conn: &Connection, populating: &str) -> Result<PromoteOutco
 
     Ok(PromoteOutcome {
         promoted,
+        without_vector,
         deprecated_space: active.name,
         new_fingerprint: new.fingerprint,
         stragglers_caught: 0,
@@ -629,6 +650,45 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM embed_queue", [], |r| r.get(0))
             .unwrap();
         assert_eq!(queued, 0, "every fact has a vector after the swap");
+    }
+
+    /// #1081: a fact with no vector that the reconstruction's provider rejected has no
+    /// populating row; the promote leaves it vectorless and in the queue, and names it.
+    #[test]
+    fn promote_leaves_a_fact_without_a_populating_vector_in_the_queue() {
+        let conn = fresh_conn();
+        set_active(&conn, "model-a");
+        add_populating_space(&conn);
+        let embedded = insert_fact(&conn, "embedded");
+        let accepted = crate::test_util::seed_without_vector(&conn, "accepted");
+        let rejected = crate::test_util::seed_without_vector(&conn, "rejected");
+        backfill_all(&conn, SPACE, &[embedded, accepted], 1.0);
+
+        let outcome = promote_space(&conn, SPACE).expect("promote");
+
+        assert_eq!(outcome.promoted, 2);
+        assert_eq!(outcome.without_vector, [rejected]);
+        assert_eq!(read_embedding(&conn, accepted), vec![1.0_f32; DIM]);
+        let width: i64 = conn
+            .query_row(
+                "SELECT length(embedding) FROM facts WHERE id = ?1",
+                params![rejected],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(width, 0, "the rejected fact keeps no vector");
+        let queued: Vec<i64> = conn
+            .prepare("SELECT fact_id FROM embed_queue")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            queued,
+            [rejected],
+            "only the fact still without a vector waits"
+        );
     }
 
     #[test]

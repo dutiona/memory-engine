@@ -23,3 +23,5 @@ lifecycle_segments: []
 config:
   schema_version: "18"
   storage_epoch: "1"
+sequences:
+  scopes: 1

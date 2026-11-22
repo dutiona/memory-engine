@@ -193,7 +193,7 @@ pub async fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyho
             // Existing DB: accept an explicit --embed-dim so a never-embedded store (no
             // recorded identity yet under #613) is still writable. The engine's open path
             // rejects a mismatch against any recorded identity.
-            open_engine_writable_with_dim(db, dim)?
+            open_engine_writable_with_dim(db, dim, None)?
         } else {
             open_engine_writable(db)?
         };
@@ -399,14 +399,18 @@ mod tests {
             memory_dir: None,
             embed: EmbeddingArgs {
                 embed_url: Some("http://127.0.0.1:0/v1/embeddings".into()),
-                embed_model: None, // partial config → build_required errors
-                embed_provider: "ollama".into(),
+                identity: crate::commands::embedding_args::IdentityArgs {
+                    embed_model: None, // partial config → build_required errors
+                    embed_provider: memory_engine_embed::HttpEmbeddingProvider::DEFAULT_PROVIDER
+                        .into(),
+                    served: crate::commands::embedding_args::ServedArgs::default(),
+                },
                 embed_api_key: None,
+                embed_api_key_file: None,
                 native_dim: None,
                 query_instruction: None,
                 mrl_dim: None,
                 embed_timeout: 5,
-                served: crate::commands::embedding_args::ServedArgs::default(),
             },
             scope: None,
             max_turns: 0,

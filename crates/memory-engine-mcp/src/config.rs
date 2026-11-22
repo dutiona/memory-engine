@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use memory_engine::ServedArtifact;
 use memory_engine::error::{ConflictError, MemoryError, Result as EngineResult};
@@ -42,14 +42,16 @@ pub struct EmbeddingSection {
     /// Model name to request (e.g. `nomic-embed-text`).
     pub model: String,
 
-    /// API key (optional — for authenticated endpoints).
+    /// API key (optional — for authenticated endpoints). Never beside `--embed-api-key-file`.
     pub api_key: Option<String>,
 
-    /// Operator-declared serving backend (e.g. `"llama.cpp"`, `"ollama"`, `"tei"`, `"openai"`). Cannot
+    /// Operator-declared serving backend (e.g. `llama.cpp`, `ollama`, `tei`, `openai`). Cannot
     /// be sniffed from the endpoint (Ollama and TEI both speak `/v1/embeddings`); it feeds
     /// the [`EmbeddingFingerprint`](memory_engine::EmbeddingFingerprint) identity, so it
     /// must reflect the real backend. Free-form (like `model`); unrecognized values warn
-    /// at startup but are accepted. Defaults to `"ollama"` for back-compat.
+    /// at startup but are accepted. Defaults to
+    /// [`HttpEmbeddingProvider::DEFAULT_PROVIDER`](memory_engine_embed::HttpEmbeddingProvider::DEFAULT_PROVIDER)
+    /// for back-compat.
     #[serde(default = "default_provider")]
     pub provider: String,
 
@@ -115,6 +117,11 @@ pub struct EmbeddingOverrides {
         hide_env_values = true
     )]
     pub api_key: Option<String>,
+
+    /// A file holding the embedding API key, with one trailing newline allowed (#1101);
+    /// the one key source when set, beside neither `--embed-api-key` nor `api_key`.
+    #[arg(long = "embed-api-key-file", env = "MEMORY_MCP_EMBED_API_KEY_FILE")]
+    pub api_key_file: Option<PathBuf>,
 
     /// Embedding serving backend (e.g. `llama.cpp`, `ollama`, `tei`, `openai`) —
     /// operator-declared, feeds the fingerprint. Free-form; unrecognized values warn.
@@ -185,8 +192,10 @@ pub struct ResolvedEmbedding {
 ///
 /// # Errors
 ///
-/// [`MemoryError::Conflict`] (`PolicyParameter`) when any embedder setting is given
-/// without both a URL and a model, when the served artifact is partial or
+/// [`MemoryError::Conflict`] (`PolicyParameter`) when the key is set twice (the key file
+/// beside the key, from a flag, the environment or `api_key`), when the key file cannot be
+/// read ([`read_api_key_file`](memory_engine_embed::read_api_key_file)), when any embedder
+/// setting is given without both a URL and a model, when the served artifact is partial or
 /// invalid ([`ServedArtifact::from_parts`]), when `mrl_dim` differs from `engine_dim`, or
 /// when, without MRL, the native dimension differs from `engine_dim`.
 ///
@@ -214,7 +223,25 @@ pub fn resolve_embedding(
     let pick = |cli: &Option<String>, toml: Option<String>| cli.clone().or(toml);
     let url = pick(&overrides.url, section.map(|b| b.endpoint.clone()));
     let model = pick(&overrides.model, section.map(|b| b.model.clone()));
-    let api_key = pick(&overrides.api_key, section.and_then(|b| b.api_key.clone()));
+    let api_key = match &overrides.api_key_file {
+        Some(file) => {
+            let other = if overrides.api_key.is_some() {
+                Some("--embed-api-key / MEMORY_MCP_EMBED_API_KEY")
+            } else if section.is_some_and(|b| b.api_key.is_some()) {
+                Some("api_key in [embedding]")
+            } else {
+                None
+            };
+            if let Some(other) = other {
+                return Err(invalid(format!(
+                    "the embedder key is set twice: --embed-api-key-file / \
+                     MEMORY_MCP_EMBED_API_KEY_FILE and {other}; set one"
+                )));
+            }
+            Some(memory_engine_embed::read_api_key_file(file)?)
+        }
+        None => pick(&overrides.api_key, section.and_then(|b| b.api_key.clone())),
+    };
     let provider = pick(&overrides.provider, section.map(|b| b.provider.clone()));
     let query_instruction = pick(
         &overrides.query_instruction,
@@ -315,103 +342,11 @@ impl std::fmt::Debug for EmbeddingSection {
 }
 
 fn default_provider() -> String {
-    "ollama".to_string()
+    memory_engine_embed::HttpEmbeddingProvider::DEFAULT_PROVIDER.to_owned()
 }
 
 const fn default_timeout() -> u64 {
     30
-}
-
-/// Probe the embedding dimension from an existing database.
-///
-/// Reads `dim` from the active `embedding_spaces` row (v13+, #622), falling back to the
-/// legacy `embedding_meta` config row (v12, #613) and then to the bare `embed_dim` key: the
-/// dimension of a store whose facts all wait for their vectors (#1021), as pre-#613 databases
-/// carried it. Opens the file read-only. Mirrors `peek_embed_dim_from_db` in
-/// `memory-engine-cli/src/db.rs`.
-///
-/// # Errors
-///
-/// Returns an error if the database doesn't exist, has no recorded embedding
-/// identity yet (nothing embedded), or the stored value is malformed.
-pub fn probe_embed_dim(db_path: &Path) -> Result<usize, String> {
-    use rusqlite::OptionalExtension;
-
-    if !db_path.is_file() {
-        return Err(format!(
-            "database path is not a file or does not exist: {}",
-            db_path.display()
-        ));
-    }
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| format!("cannot open database: {e}"))?;
-
-    // Preferred (v13+): the embedding_spaces registry's active row records `dim` (#622).
-    // Guard on the table existing so an un-migrated v12 DB (no such table) falls through to
-    // the legacy config paths below rather than erroring.
-    let has_registry: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='embedding_spaces'",
-            [],
-            |_| Ok(true),
-        )
-        .optional()
-        .map_err(|e| format!("schema query failed: {e}"))?
-        .unwrap_or(false);
-    if has_registry {
-        let dim: Option<i64> = conn
-            .query_row(
-                "SELECT dim FROM embedding_spaces WHERE status = 'active'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| format!("embedding_spaces query failed: {e}"))?;
-        if let Some(dim) = dim {
-            return usize::try_from(dim)
-                .map_err(|_| "embedding_spaces 'dim' out of range".to_owned());
-        }
-    }
-
-    // Legacy fallback: the pre-#622 embedding_meta config row records `dim` (#613).
-    let meta_raw: Option<String> = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'embedding_meta'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| format!("config query failed: {e}"))?;
-    if let Some(raw) = meta_raw {
-        let meta: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| format!("corrupt embedding_meta in config table: {e}"))?;
-        let dim = meta
-            .get("dim")
-            .and_then(serde_json::Value::as_u64)
-            .ok_or_else(|| "embedding_meta is missing a numeric 'dim' field".to_owned())?;
-        return usize::try_from(dim).map_err(|_| "embedding_meta 'dim' out of range".to_owned());
-    }
-
-    // No identity before the first vector: a store whose facts all wait records its
-    // dimension in the bare `embed_dim` key (#1021), as a pre-#613 database did.
-    let legacy: Option<String> = conn
-        .query_row(
-            "SELECT value FROM config WHERE key = 'embed_dim'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| format!("config query failed: {e}"))?;
-    if let Some(dim_str) = legacy {
-        return dim_str
-            .parse::<usize>()
-            .map_err(|e| format!("invalid embed_dim value '{dim_str}': {e}"));
-    }
-
-    Err("database has no embedding identity yet (nothing has been embedded)".to_owned())
 }
 
 #[cfg(test)]
@@ -470,33 +405,5 @@ model = "llama3"
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown field"), "{err}");
-    }
-
-    #[test]
-    fn probe_nonexistent_db() {
-        let result = probe_embed_dim(Path::new("/tmp/nonexistent_memory_engine_test.db"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn probe_reads_dim_from_embedding_spaces_registry() {
-        // #622: a v13 store records the identity (incl. dim) in the embedding_spaces
-        // table, not the config row. The probe must read it from there.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("probe.db");
-        // Build creates the v13 schema (empty registry); the temporary engine drops here.
-        memory_engine::MemoryEngine::builder(8)
-            .path(path.clone())
-            .build()
-            .unwrap();
-        let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute(
-            "INSERT INTO embedding_spaces (name, model, provider, dim, status)
-             VALUES ('default', 'm', 'tei', 8, 'active')",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-        assert_eq!(probe_embed_dim(&path).unwrap(), 8);
     }
 }

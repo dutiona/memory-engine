@@ -3,7 +3,7 @@
 //! Every command that builds an [`HttpEmbeddingProvider`] (query, batch-ingest,
 //! bootstrap, consolidate) flattens [`EmbeddingArgs`] so the identity/asymmetry config
 //! keys match the MCP server's `[embedding]` section: `provider` (feeds the
-//! [`EmbeddingFingerprint`] that #614 enforces — replaces the old hardcoded `"ollama"`),
+//! [`EmbeddingFingerprint`] that #614 enforces — replaces the old hardcoded provider),
 //! `query_instruction` (asymmetric query prefix), `mrl_dim` (Matryoshka truncation), and
 //! the four served-artifact keys (`artifact_sha256`, `pooling`, `normalization`,
 //! `max_input_tokens`; ADR 0015 §1). Centralizing construction here keeps the
@@ -27,18 +27,18 @@ pub struct EmbeddingArgs {
     #[arg(long, env = "MEMORY_ENGINE_EMBED_URL")]
     pub embed_url: Option<String>,
 
-    /// Embedding model name / slug (e.g. `Qwen/Qwen3-Embedding-0.6B`).
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_MODEL")]
-    pub embed_model: Option<String>,
-
-    /// Serving backend — operator-declared, feeds the embedding fingerprint (#614).
-    /// e.g. `llama.cpp`, `ollama`, `tei`, `openai`. Defaults to `ollama` for back-compat.
-    #[arg(long, env = "MEMORY_ENGINE_EMBED_PROVIDER", default_value = "ollama")]
-    pub embed_provider: String,
+    /// The identity the provider reports: model, serving backend, served artifact.
+    #[command(flatten)]
+    pub identity: IdentityArgs,
 
     /// Bearer API key for the embedding endpoint.
     #[arg(long, env = "MEMORY_ENGINE_EMBED_API_KEY", hide_env_values = true)]
     pub embed_api_key: Option<String>,
+
+    /// A file holding the bearer API key, with one trailing newline allowed (#1101); the one
+    /// key source when set, never beside `--embed-api-key`.
+    #[arg(long, env = "MEMORY_ENGINE_EMBED_API_KEY_FILE")]
+    pub embed_api_key_file: Option<std::path::PathBuf>,
 
     /// Native model dimension before MRL truncation. Required only with `--mrl-dim`
     /// (then the provider validates raw responses against this while the engine stores
@@ -61,10 +61,51 @@ pub struct EmbeddingArgs {
     /// HTTP timeout in seconds for embedding calls.
     #[arg(long, default_value = "30")]
     pub embed_timeout: u64,
+}
+
+/// The embedding identity flags (ADR 0015 §1): the identity an embedder reports, or the one
+/// `add-fact` declares for a pre-computed vector (#1060, #1017 Decision 8), so both spell it
+/// with the same flags.
+#[derive(clap::Args, Clone)]
+pub struct IdentityArgs {
+    /// Embedding model name / slug (e.g. `Qwen/Qwen3-Embedding-0.6B`).
+    #[arg(long, env = "MEMORY_ENGINE_EMBED_MODEL")]
+    pub embed_model: Option<String>,
+
+    /// Serving backend — operator-declared, feeds the embedding fingerprint (#614).
+    /// e.g. `llama.cpp`, `ollama`, `tei`, `openai`. Defaults to
+    /// [`HttpEmbeddingProvider::DEFAULT_PROVIDER`] for back-compat.
+    #[arg(
+        long,
+        env = "MEMORY_ENGINE_EMBED_PROVIDER",
+        default_value = HttpEmbeddingProvider::DEFAULT_PROVIDER
+    )]
+    pub embed_provider: String,
 
     /// The served artifact (ADR 0015 §1): all four flags or none.
     #[command(flatten)]
     pub served: ServedArgs,
+}
+
+impl IdentityArgs {
+    /// The identity a pre-computed vector of `dim` components declares: exactly what a
+    /// provider configured with these flags would report (#1017 Decision 8).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `--embed-model` is absent (a blank store would otherwise record
+    /// a guess, ADR-0015 §3) or the served-artifact flags are invalid.
+    pub fn declared(&self, dim: usize) -> anyhow::Result<memory_engine::EmbeddingFingerprint> {
+        let model = self.embed_model.as_deref().context(
+            "a pre-computed --embedding must declare its identity: --embed-model is required \
+             (ADR-0015 §3)",
+        )?;
+        let identity = memory_engine::EmbeddingFingerprint::new(model, &self.embed_provider, dim);
+        Ok(match self.served.resolve()? {
+            Some(served) => identity.with_served(served),
+            None => identity,
+        })
+    }
 }
 
 /// The served-artifact flags (ADR 0015 §1), mirroring the MCP server's `[embedding]` keys.
@@ -127,18 +168,30 @@ impl EmbeddingArgs {
     ///
     /// # Errors
     ///
-    /// Returns an error on a partial configuration or any provider construction failure.
+    /// Returns an error on a partial configuration, on a bad key setting (both key sources
+    /// at once, or a key file [`read_api_key_file`](memory_engine_embed::read_api_key_file)
+    /// refuses), even with no embedder configured, or any provider construction failure.
     pub fn build_optional(
         &self,
         engine_dim: usize,
     ) -> anyhow::Result<Option<HttpEmbeddingProvider>> {
-        match (self.embed_url.as_deref(), self.embed_model.as_deref()) {
+        // Resolved first, so a bad key setting is refused even where nothing is embedded.
+        let api_key = self.api_key()?;
+        match (
+            self.embed_url.as_deref(),
+            self.identity.embed_model.as_deref(),
+        ) {
             // Served flags declare an identity to check; without an embedder there is none.
-            (None, None) if self.served.any() => {
+            (None, None) if self.identity.served.any() => {
                 anyhow::bail!("the served-artifact flags need --embed-url and --embed-model")
             }
+            (None, None) if self.embed_api_key_file.is_some() => {
+                anyhow::bail!("--embed-api-key-file needs --embed-url and --embed-model")
+            }
             (None, None) => Ok(None),
-            (Some(url), Some(model)) => Ok(Some(self.build_inner(url, model, engine_dim)?)),
+            (Some(url), Some(model)) => {
+                Ok(Some(self.build_inner(url, model, api_key, engine_dim)?))
+            }
             _ => anyhow::bail!("--embed-url and --embed-model must be provided together"),
         }
     }
@@ -188,6 +241,19 @@ impl EmbeddingArgs {
             .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))?
     }
 
+    /// The embedder key: from `--embed-api-key-file`, else `--embed-api-key`, never both.
+    fn api_key(&self) -> anyhow::Result<Option<String>> {
+        match (&self.embed_api_key, &self.embed_api_key_file) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "the embedder key is set twice: --embed-api-key-file / \
+                 MEMORY_ENGINE_EMBED_API_KEY_FILE and --embed-api-key / \
+                 MEMORY_ENGINE_EMBED_API_KEY; set one"
+            ),
+            (_, Some(path)) => Ok(Some(memory_engine_embed::read_api_key_file(path)?)),
+            (key, None) => Ok(key.clone()),
+        }
+    }
+
     /// Construct the provider, wiring `provider`, `query_instruction`, and `mrl_dim`.
     ///
     /// The provider's `expected_dim` is the **native** dimension it validates raw
@@ -200,6 +266,7 @@ impl EmbeddingArgs {
         &self,
         url: &str,
         model: &str,
+        api_key: Option<String>,
         engine_dim: usize,
     ) -> anyhow::Result<HttpEmbeddingProvider> {
         // MRL truncates a NATIVE-length response down to the stored dim, so the native
@@ -218,8 +285,8 @@ impl EmbeddingArgs {
         let mut provider = HttpEmbeddingProvider::new(
             url.to_owned(),
             model.to_owned(),
-            self.embed_provider.clone(),
-            self.embed_api_key.clone(),
+            self.identity.embed_provider.clone(),
+            api_key,
             native_dim,
             self.embed_timeout,
         )
@@ -228,7 +295,7 @@ impl EmbeddingArgs {
         if let Some(instruction) = &self.query_instruction {
             provider = provider.with_query_instruction(instruction.clone());
         }
-        if let Some(served) = self.served.resolve()? {
+        if let Some(served) = self.identity.served.resolve()? {
             provider = provider.with_served_artifact(served);
         }
         if let Some(target) = self.mrl_dim {
@@ -261,18 +328,75 @@ mod tests {
     fn args(url: Option<&str>, model: Option<&str>) -> EmbeddingArgs {
         EmbeddingArgs {
             embed_url: url.map(String::from),
-            embed_model: model.map(String::from),
-            embed_provider: "tei".into(),
+            identity: IdentityArgs {
+                embed_model: model.map(String::from),
+                embed_provider: "tei".into(),
+                served: ServedArgs::default(),
+            },
             embed_api_key: None,
+            embed_api_key_file: None,
             native_dim: None,
             query_instruction: None,
             mrl_dim: None,
             embed_timeout: 5,
-            served: ServedArgs::default(),
         }
     }
 
     const URL: &str = "http://127.0.0.1:0/v1/embeddings";
+
+    /// A key file holding `key\n`, in its own directory.
+    fn key_file(key: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("embed-key");
+        std::fs::write(&path, format!("{key}\n")).unwrap();
+        (dir, path)
+    }
+
+    /// #1101: the key file supplies the key; beside the key itself it is refused, naming
+    /// both settings and neither secret; a lone file needs the embedder it keys.
+    #[test]
+    fn the_key_settings_follow_the_one_source_rule() {
+        let key = format!("file-key-{}", std::process::id());
+        let (_dir, path) = key_file(&key);
+        let mut a = args(Some(URL), Some("m"));
+        a.embed_api_key_file = Some(path.clone());
+        assert_eq!(a.api_key().unwrap().as_deref(), Some(key.as_str()));
+
+        let flag = format!("flag-key-{}", std::process::id());
+        a.embed_api_key = Some(flag.clone());
+        let err = a.build_optional(8).err().unwrap().to_string();
+        assert!(err.contains("MEMORY_ENGINE_EMBED_API_KEY_FILE"), "{err}");
+        assert!(err.contains("--embed-api-key /"), "{err}");
+        assert!(!err.contains(&key) && !err.contains(&flag), "{err}");
+
+        let mut lone = args(None, None);
+        lone.embed_api_key_file = Some(path);
+        let err = lone.build_optional(8).err().unwrap().to_string();
+        assert!(err.contains("needs --embed-url and --embed-model"), "{err}");
+    }
+
+    /// #1101: a missing key file is refused, naming its path, even with no embedder.
+    #[test]
+    fn a_missing_key_file_is_refused_without_an_embedder() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing-key");
+        let mut a = args(None, None);
+        a.embed_api_key_file = Some(missing.clone());
+        let err = a.build_optional(8).err().unwrap().to_string();
+        assert!(err.contains(&missing.display().to_string()), "{err}");
+    }
+
+    /// #1064: the clap default is the provider the MCP server defaults to.
+    #[test]
+    fn embed_provider_defaults_to_the_shared_provider() {
+        use clap::{Args, FromArgMatches};
+        let cmd = EmbeddingArgs::augment_args(clap::Command::new("t"));
+        let parsed = EmbeddingArgs::from_arg_matches(&cmd.get_matches_from(["t"])).unwrap();
+        assert_eq!(
+            parsed.identity.embed_provider,
+            HttpEmbeddingProvider::DEFAULT_PROVIDER
+        );
+    }
 
     #[test]
     fn build_optional_none_when_both_absent() {
@@ -354,7 +478,7 @@ mod tests {
     #[test]
     fn served_flags_feed_the_fingerprint() {
         let mut a = args(Some(URL), Some("m"));
-        a.served = served_args(Some(SHA), Some("last"));
+        a.identity.served = served_args(Some(SHA), Some("last"));
         let fp = a.build_required(8).unwrap().fingerprint();
         let served = fp.served.expect("served artifact declared");
         assert_eq!(served.artifact_sha256, SHA);
@@ -366,7 +490,7 @@ mod tests {
     #[test]
     fn partial_served_flags_name_the_missing_fields() {
         let mut a = args(Some(URL), Some("m"));
-        a.served = served_args(Some(SHA), None);
+        a.identity.served = served_args(Some(SHA), None);
         let err = a.build_optional(8).err().expect("must error").to_string();
         assert!(err.contains("pooling"), "{err}");
     }
@@ -374,14 +498,14 @@ mod tests {
     #[test]
     fn a_non_canonical_sha256_is_rejected() {
         let mut a = args(Some(URL), Some("m"));
-        a.served = served_args(Some(&SHA.to_uppercase()), Some("last"));
+        a.identity.served = served_args(Some(&SHA.to_uppercase()), Some("last"));
         assert!(a.build_optional(8).is_err());
     }
 
     #[test]
     fn served_flags_without_an_embedder_are_refused() {
         let mut a = args(None, None);
-        a.served = served_args(Some(SHA), Some("last"));
+        a.identity.served = served_args(Some(SHA), Some("last"));
         let err = a.build_optional(8).err().expect("must error").to_string();
         assert!(err.contains("--embed-url"), "{err}");
     }

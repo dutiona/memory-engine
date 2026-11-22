@@ -255,7 +255,9 @@ let engine = MemoryEngine::restore_sqlite(Path::new("backup.db"), &config)?;
   `-wal`, `-shm` or `-journal` sidecar: SQLite would replay a leftover one onto the restored file.
 - `config.embed_dim` is validated against the snapshot — mismatches are rejected.
 - `restore_sqlite` only accepts clean `VACUUM INTO` backups produced by `dump_state`.
-  Copying a live WAL-mode database is unsafe.
+  Copying a live WAL-mode database is unsafe. A backup of any schema version (v12 or later
+  carries an identity) is accepted: its recorded dimension is read where it lies, before
+  anything migrates, and the open then migrates it to the current schema.
 - `restore_json` and `restore_sqlite` accept the full `EngineConfig`, preserving
   pool size, search config, upcaster registry, and backup directory settings.
 - Compression is auto-detected from magic bytes (gzip: `1f 8b`, zstd: `28 b5 2f fd`).

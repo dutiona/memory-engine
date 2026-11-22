@@ -21,6 +21,7 @@ use pragmas::{check_foreign_keys, set_foreign_keys, set_pragmas, set_pragmas_rea
 // path keeps resolving after the god-module split (behavior-preserving).
 pub use backup::backup_before_migration;
 pub use config::{get_config, list_config, set_config};
+pub(crate) use migrations::decode_v12_identity;
 
 /// Current schema version. Bump when adding migrations.
 ///

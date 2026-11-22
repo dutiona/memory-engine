@@ -45,6 +45,7 @@ MEMORY_MCP_LISTEN=127.0.0.1:<port> MEMORY_MCP_TOKEN_FILE=/path/to/tokens MEMORY_
 |---|---|---|
 | `--listen` (required) | `MEMORY_MCP_LISTEN` | Socket address to serve on |
 | `--token-file` (required) | `MEMORY_MCP_TOKEN_FILE` | The token-hash file (below) |
+| `--embed-api-key-file` | `MEMORY_MCP_EMBED_API_KEY_FILE` | A file holding the embedder API key alone, one trailing newline allowed; mount it read-only, like the token file. The one key source when set: beside `--embed-api-key` / `MEMORY_MCP_EMBED_API_KEY` or `api_key` the server refuses to start, naming both settings. A missing, unreadable or empty file refuses to start, naming its path and never its contents. The key is held like `api_key`: never logged |
 | `--user` (required) | `MEMORY_MCP_USER` | The owner: the user level is `user:<user>` (ADR-0020 §7). A lowercase DNS label |
 | `--allowed-host` (repeatable) | `MEMORY_MCP_ALLOWED_HOSTS` (comma list, no spaces) | A `Host` value served besides loopback |
 | `--backup-dir` | `MEMORY_MCP_BACKUP_DIR` | Overrides `engine.backup_dir` |
@@ -64,7 +65,7 @@ backup_dir = "/path/to/backups"  # Optional — an existing directory; a migrati
 [embedding]
 endpoint = "http://localhost:11434/v1/embeddings"
 model = "nomic-embed-text"
-api_key = "sk-..."   # Optional — for authenticated endpoints
+api_key = "sk-..."   # Optional — for authenticated endpoints; or --embed-api-key-file, never both
 provider = "ollama"  # Serving backend, e.g. llama.cpp | ollama | tei | openai (default: ollama). Free-form; feeds the fingerprint.
 dimensions = 384     # Native model dimension (validated against the raw response)
 query_instruction = ""  # nomic is symmetric: no query prefix (absent = ME's pinned instruction)
@@ -124,7 +125,7 @@ mrl_dim = 256         # Truncate + L2-renormalize to this; must equal engine emb
 
 On startup the server verifies the configured provider's identity (`model`, `provider`, `dim`, MRL, element type and the served artifact) against the one the store was created with, and **refuses to start on a mismatch** (#614, #1017). This prevents the silent-corruption case where a different model — even at the same dimension, or the same model served from another file — embeds queries into an incompatible vector space. A fresh store with nothing embedded yet has no recorded identity and accepts any provider; the identity is stamped on the first embedding write.
 
-An absent served artifact matches only another absent one, so a store recorded before schema v15 (or without the served keys) refuses a configuration that declares them, and the reverse. The recoveries are to drop the declaration and keep serving the recorded identity, or to start from a blank store. Reconstruction under the new identity is the normative path (ADR-0015 §4) but has no CLI or MCP surface yet (#689). The refused start has already migrated the store to schema v15, which an older binary refuses, so recover with the new binary; rolling back is not one of the recoveries.
+An absent served artifact matches only another absent one, so a store recorded before schema v15 (or without the served keys) refuses a configuration that declares them, and the reverse. The recoveries are to drop the declaration and keep serving the recorded identity, or to start from a blank store. Reconstruction under the new identity is the normative path (ADR-0015 §4) but has no CLI or MCP surface yet (#689). A refused start leaves the store as it was: the check reads it read-only, before anything migrates it, so either binary still opens it (#1065). A store of another dimension is likewise refused before it migrates.
 
 ### Transport and authentication
 
