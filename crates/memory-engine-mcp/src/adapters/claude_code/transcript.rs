@@ -179,12 +179,17 @@ struct Raw {
     record: NeutralRecord,
 }
 
-/// The key of the message an assistant entry belongs to: its `message.id`, else the entry.
-fn message_key(entry: &Entry<'_>) -> String {
-    message(entry.object)
+/// The message an assistant entry belongs to: its session, its actor, and its `message.id`,
+/// else the entry itself. A fork repeats a message under its own session, so each session's
+/// copy is its own message and maps to the original's record, never to one text of both.
+type MessageKey = ((String, Option<String>), String);
+
+fn message_key(entry: &Entry<'_>) -> MessageKey {
+    let id = message(entry.object)
         .and_then(|m| m.get("id"))
         .and_then(Value::as_str)
-        .map_or_else(|| format!("entry {}", entry.uuid), str::to_owned)
+        .map_or_else(|| format!("entry {}", entry.uuid), str::to_owned);
+    (entry.turn(), id)
 }
 
 fn synthetic(object: &Map<String, Value>) -> bool {
@@ -195,8 +200,8 @@ fn synthetic(object: &Map<String, Value>) -> bool {
 }
 
 /// A message's entries, by message key: where it ends and whether it completed.
-fn messages(objects: &[(usize, Value)]) -> HashMap<String, Message> {
-    let mut messages: HashMap<String, Message> = HashMap::new();
+fn messages(objects: &[(usize, Value)]) -> HashMap<MessageKey, Message> {
+    let mut messages: HashMap<MessageKey, Message> = HashMap::new();
     for (index, (_, value)) in objects.iter().enumerate() {
         let Some(entry) = value.as_object().and_then(|o| entry(o).ok()) else {
             continue;
@@ -321,7 +326,7 @@ fn read_capped(body: &[u8], max_entries: usize) -> Result<Mapped, &'static str> 
 /// The walk over a file's entries, in file order.
 #[derive(Default)]
 struct Reader {
-    messages: HashMap<String, Message>,
+    messages: HashMap<MessageKey, Message>,
     calls: HashMap<String, Call>,
     /// The open turns, by session and actor.
     turns: HashSet<(String, Option<String>)>,
@@ -1024,6 +1029,57 @@ mod tests {
             "after every whole-second record"
         );
         assert_eq!(seq("bf.over.p"), None);
+    }
+
+    /// A fork repeats an assistant message under its own session: each session's copy is its own
+    /// message, so both map to the original's event ID, text and digest, never one doubled text.
+    #[test]
+    fn a_forks_repeated_message_is_the_originals() {
+        let one = json!([{ "type": "text", "text": "part one" }]);
+        let two = json!([{ "type": "text", "text": "part two" }]);
+        let session = |line: String, id: &str| {
+            let mut value: Value = serde_json::from_str(&line).unwrap();
+            value["sessionId"] = json!(id);
+            value.to_string()
+        };
+        let original = [
+            user_text("u1", "2026-03-19T10:00:00.000Z", "a prompt"),
+            assistant("a1", "2026-03-19T10:00:01.000Z", "m1", &one, None),
+            assistant(
+                "a2",
+                "2026-03-19T10:00:02.000Z",
+                "m1",
+                &two,
+                Some("end_turn"),
+            ),
+        ];
+        let mut lines: Vec<String> = original.to_vec();
+        lines.extend(original.iter().map(|l| session(l.clone(), "a-fork")));
+
+        let mapped = read(&body(&lines)).unwrap();
+
+        let stops: Vec<&ImportEvent> = events(&mapped)
+            .into_iter()
+            .filter(|e| e.record.content.kind().as_str() == "stop")
+            .collect();
+        assert_eq!(stops.len(), 2, "one per session");
+        for stop in &stops {
+            assert_eq!(stop.event_id, "bf.a2.s");
+            let Content::Stop { message, .. } = &stop.record.content else {
+                panic!("a stop");
+            };
+            assert_eq!(message.as_deref(), Some("part one\npart two"));
+        }
+        assert_eq!(stops[0].body_sha256, stops[1].body_sha256);
+        let alone = read(&body(&original)).unwrap();
+        let first = events(&alone)
+            .into_iter()
+            .find(|e| e.event_id == "bf.a2.s")
+            .unwrap();
+        assert_eq!(
+            first.body_sha256, stops[0].body_sha256,
+            "the original's digest"
+        );
     }
 
     #[test]

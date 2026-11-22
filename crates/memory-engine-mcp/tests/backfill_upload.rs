@@ -995,6 +995,66 @@ async fn a_stub_is_reported_whatever_the_denylist_holds() {
     assert_eq!(stub["input"], json!({ "sensitive_path": path }));
 }
 
+/// A fork's file repeats the original's assistant message under its own session: once the
+/// original is imported, the fork's copy is a duplicate of it, never a collision.
+#[tokio::test]
+async fn a_forks_repeated_message_is_a_duplicate_of_the_original() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let at = |s: u32| format!("2026-03-19T10:00:0{s}.000Z");
+    let message = |uuid: &str, s: u32, text: &str, stop: Value| {
+        entry(
+            uuid,
+            "assistant",
+            &at(s),
+            "/work/fixture/p",
+            &json!({ "message": {
+            "id": "m1", "content": [{ "type": "text", "text": text }], "stop_reason": stop,
+        } }),
+        )
+    };
+    let original = [
+        entry(
+            "u1",
+            "user",
+            &at(0),
+            "/work/fixture/p",
+            &json!({ "message": { "content": "a prompt" } }),
+        ),
+        message("a1", 1, "part one", Value::Null),
+        message("a2", 2, "part two", json!("end_turn")),
+    ];
+    let fork: Vec<String> = original
+        .iter()
+        .map(|line| {
+            let mut value: Value = serde_json::from_str(line).unwrap();
+            value["sessionId"] = json!("a-fork");
+            value.to_string()
+        })
+        .collect();
+    let file = |lines: &[String]| {
+        let mut text = lines.join("\n");
+        text.push('\n');
+        Upload::transcript().body(text.into_bytes())
+    };
+    dry_run_then_write(&server, &file(&original)).await;
+
+    let both: Vec<String> = original.iter().cloned().chain(fork).collect();
+    let (dry, write) = dry_run_then_write(&server, &file(&both)).await;
+
+    assert_eq!(dry["events"]["collision"], 0, "{dry}");
+    assert_eq!(dry["events"]["stored"], 0);
+    assert_eq!(
+        write["events"]["duplicate"], 4,
+        "the prompt and the stop, twice"
+    );
+    let stops: Vec<Value> = imported_events(&server)
+        .into_iter()
+        .filter(|p| p["kind"] == "stop")
+        .collect();
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0]["message"], "part one\npart two");
+}
+
 /// With the embedder down an upload stores and queues its memories: full-text recall finds them
 /// at once, and the drain gives them their vectors once the embedder is up.
 #[tokio::test]
