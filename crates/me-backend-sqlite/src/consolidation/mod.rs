@@ -149,8 +149,16 @@ pub fn apply_plan(
         .map_err(StorageError::backend)?;
 
     // A write since the load made a fact eligible again or protected one (#1080): the plan
-    // is stale, so nothing is written and the next run recomputes.
-    if facts::read_consolidation_generation(&tx)? != plan.generation {
+    // is stale, so nothing is written and the next run recomputes. Logged, because the run
+    // otherwise looks idle although its summaries were computed and thrown away.
+    let generation = facts::read_consolidation_generation(&tx)?;
+    if generation != plan.generation {
+        tracing::warn!(
+            planned = plan.generation,
+            current = generation,
+            "consolidation plan discarded: a pin, unpin, unforget or reconstruction committed \
+             between its load and its apply; the next run recomputes"
+        );
         let none = ConsolidationStats {
             duplicates_removed: 0,
             clusters_created: 0,
