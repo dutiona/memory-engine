@@ -249,8 +249,10 @@ pub trait SchemaManager: Send + Sync {
     /// `fact_id`).
     async fn write_backfill_batch(&self, space: &str, rows: Vec<(i64, Vec<f32>)>) -> Result<usize>;
 
-    /// Count facts still lacking a vector in `space`. `0` means fully backfilled —
-    /// the promote completeness gate (#623 D6).
+    /// Count facts that hold a vector and still lack one in `space`. `0` means fully
+    /// backfilled — the promote completeness gate (#623 D6). A fact without a vector
+    /// (#1021) is not counted: the promote leaves one the new provider rejected as it is
+    /// (#1081).
     ///
     /// # Errors
     ///
@@ -260,11 +262,14 @@ pub trait SchemaManager: Send + Sync {
 
     /// Atomically promote the `populating` space to active (#623 D6): in one
     /// transaction, retain the old active vectors for rollback, copy-swap the
-    /// populating vectors into `facts.embedding`, and flip the registry status
-    /// (the identity flip), clearing the dedup watermark and bumping the consolidation
-    /// generation (#1080). Dimension-agnostic since #742: a different-dim populating
-    /// space promotes too, and the engine fences its handle until it reopens at the new
-    /// dimension; the width invariant is the engine-side backfill's per-vector check.
+    /// populating vectors into `facts.embedding` for the facts that have one, and flip
+    /// the registry status (the identity flip), clearing the dedup watermark and bumping
+    /// the consolidation generation (#1080). A fact without a vector and without a
+    /// populating one keeps no vector and its deferred-embedding queue row, and is listed
+    /// in [`PromoteOutcome::without_vector`]. Dimension-agnostic since #742: a
+    /// different-dim populating space promotes too, and the engine fences its handle
+    /// until it reopens at the new dimension; the width invariant is the engine-side
+    /// backfill's per-vector check.
     ///
     /// # Errors
     ///

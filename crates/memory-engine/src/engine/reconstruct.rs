@@ -28,12 +28,13 @@
 //! re-validates cleanly and rebuilds the index at the new dim). A truly in-place,
 //! no-reopen dimension transition is deferred (see the issue).
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use super::spawn_join_err;
 use crate::engine::MemoryEngine;
-use crate::error::{ConflictError, MemoryError, Result};
+use crate::error::{ConflictError, EmbedderError, MemoryError, Result};
 use crate::traits::EmbeddingProvider;
 use crate::types::{EmbeddingFingerprint, PromoteOutcome};
 
@@ -169,14 +170,28 @@ impl MemoryEngine {
 
         // 2. Backfill every fact's content under the new identity. Vectors are
         //    validated against `target_dim` (which may differ from the engine's
-        //    current `embed_dim` — a different-dim reconstruction).
-        self.backfill_space(&space, embedder, target_dim, DEFAULT_BACKFILL_BATCH)
-            .await?;
+        //    current `embed_dim` — a different-dim reconstruction). `skipped` keeps the
+        //    facts without a vector the provider rejected out of the catch-up's batches.
+        let mut skipped = BTreeSet::new();
+        self.backfill_space(
+            &space,
+            embedder,
+            target_dim,
+            DEFAULT_BACKFILL_BATCH,
+            &mut skipped,
+        )
+        .await?;
 
         // 3. Catch-up: re-embed facts ingested during the backfill (live
         //    reconstruction). The count is the stragglers caught before promote.
         let stragglers = self
-            .backfill_space(&space, embedder, target_dim, DEFAULT_BACKFILL_BATCH)
+            .backfill_space(
+                &space,
+                embedder,
+                target_dim,
+                DEFAULT_BACKFILL_BATCH,
+                &mut skipped,
+            )
             .await?;
 
         // 4. Atomic promote (the completeness gate re-checks INSIDE the tx).
@@ -232,7 +247,15 @@ impl MemoryEngine {
     /// `after_id` advances past each window to skip the already-written prefix —
     /// an intra-run optimization only; correctness rests on the port's cursorless
     /// anti-join (`facts.id` is monotonic, so a concurrently inserted fact always
-    /// has a higher id and is never skipped).
+    /// has a higher id and is never skipped). It takes each window's last id as
+    /// fetched, so a window made only of `skipped` facts never ends the pass.
+    ///
+    /// A permanently rejected input (#1081, `EmbedderError::InputRejected`: 400, 413,
+    /// 422) does not abort the backfill when its fact has no vector (it waits for its
+    /// first one, or failed, #1021): the window is re-embedded one input at a time, the
+    /// rejected fact is added to `skipped` and nothing is written for it, so the promote
+    /// leaves it in the queue. A rejected fact that holds a vector, or any other error,
+    /// aborts as before: completing would drop that fact's only serving vector.
     ///
     /// # Errors
     ///
@@ -246,12 +269,13 @@ impl MemoryEngine {
         embedder: &Arc<dyn EmbeddingProvider>,
         target_dim: usize,
         batch_size: usize,
+        skipped: &mut BTreeSet<i64>,
     ) -> Result<usize> {
         let mut after_id = 0_i64;
         let mut total = 0_usize;
 
         loop {
-            let window = self
+            let mut window = self
                 .storage
                 .next_backfill_window(space_name, after_id, batch_size)
                 .await?;
@@ -259,18 +283,15 @@ impl MemoryEngine {
                 break; // fully backfilled
             };
             after_id = last_id;
+            window.retain(|(id, _)| !skipped.contains(id));
+            if window.is_empty() {
+                continue;
+            }
 
-            // Embed off the async executor: the provider call may be a blocking
-            // HTTP round-trip, and a `reqwest::blocking` provider would panic if
-            // run on a runtime thread (the #631 add_fact pattern).
-            let provider = Arc::clone(embedder);
-            let texts: Vec<String> = window.iter().map(|(_, content)| content.clone()).collect();
-            let embeddings = tokio::task::spawn_blocking(move || {
-                let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-                provider.embed_batch(&refs)
-            })
-            .await
-            .map_err(spawn_join_err)??;
+            let (window, embeddings) = self.embed_window(embedder, window, skipped).await?;
+            if window.is_empty() {
+                continue;
+            }
 
             if embeddings.len() != window.len() {
                 return Err(MemoryError::Internal(format!(
@@ -303,10 +324,66 @@ impl MemoryEngine {
 
         Ok(total)
     }
+
+    /// Embed one backfill window, off the async executor: the provider call may be a
+    /// blocking HTTP round-trip, and a `reqwest::blocking` provider would panic if run on a
+    /// runtime thread (the #631 `add_fact` pattern). Returns the window it embedded, which
+    /// lacks every fact `backfill_space` skips, and their vectors in the same order.
+    ///
+    /// On a batch the provider rejects (`InputRejected`), each input is embedded alone; one
+    /// rejected alone whose fact has no vector joins `skipped`, any other error returns.
+    async fn embed_window(
+        &self,
+        embedder: &Arc<dyn EmbeddingProvider>,
+        window: Vec<(i64, String)>,
+        skipped: &mut BTreeSet<i64>,
+    ) -> Result<(Vec<(i64, String)>, Vec<Vec<f32>>)> {
+        let provider = Arc::clone(embedder);
+        let texts: Vec<String> = window.iter().map(|(_, content)| content.clone()).collect();
+        let batch = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+            provider.embed_batch(&refs)
+        })
+        .await
+        .map_err(spawn_join_err)?;
+        match batch {
+            Err(MemoryError::Embedder(EmbedderError::InputRejected(_))) => {}
+            other => return Ok((window, other?)),
+        }
+        let provider = Arc::clone(embedder);
+        let texts: Vec<String> = window.iter().map(|(_, content)| content.clone()).collect();
+        let alone: Vec<Result<Vec<f32>>> =
+            tokio::task::spawn_blocking(move || texts.iter().map(|t| provider.embed(t)).collect())
+                .await
+                .map_err(spawn_join_err)?;
+        let mut kept = Vec::with_capacity(window.len());
+        let mut vectors = Vec::with_capacity(window.len());
+        for ((id, content), result) in window.into_iter().zip(alone) {
+            match result {
+                Ok(vector) => {
+                    kept.push((id, content));
+                    vectors.push(vector);
+                }
+                Err(rejected @ MemoryError::Embedder(EmbedderError::InputRejected(_))) => {
+                    if !self.storage.get_fact(id).await?.embedding.is_empty() {
+                        tracing::warn!(
+                            fact_id = id,
+                            "the reconstruction's embedder rejects a fact that has a vector"
+                        );
+                        return Err(rejected);
+                    }
+                    skipped.insert(id);
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        Ok((kept, vectors))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
     use super::space_name_for;
@@ -369,7 +446,7 @@ mod tests {
 
         // A small batch forces several windows — exercises the loop's advance.
         let written = engine
-            .backfill_space(SPACE, &embedder(), DIM, 2)
+            .backfill_space(SPACE, &embedder(), DIM, 2, &mut BTreeSet::new())
             .await
             .unwrap();
         assert_eq!(written, 5, "one vector per fact across multiple windows");
@@ -384,7 +461,7 @@ mod tests {
 
         assert_eq!(
             engine
-                .backfill_space(SPACE, &embedder(), DIM, 8)
+                .backfill_space(SPACE, &embedder(), DIM, 8, &mut BTreeSet::new())
                 .await
                 .unwrap(),
             3
@@ -392,7 +469,7 @@ mod tests {
         // Re-running over a fully-backfilled space writes nothing.
         assert_eq!(
             engine
-                .backfill_space(SPACE, &embedder(), DIM, 8)
+                .backfill_space(SPACE, &embedder(), DIM, 8, &mut BTreeSet::new())
                 .await
                 .unwrap(),
             0
@@ -429,7 +506,7 @@ mod tests {
 
         // Restart: the loop re-derives only the remaining 2 via the anti-join.
         let written = engine
-            .backfill_space(SPACE, &embedder(), DIM, 8)
+            .backfill_space(SPACE, &embedder(), DIM, 8, &mut BTreeSet::new())
             .await
             .unwrap();
         assert_eq!(written, 2, "only the un-backfilled remainder is written");
@@ -443,7 +520,7 @@ mod tests {
         begin(&engine).await;
         assert_eq!(
             engine
-                .backfill_space(SPACE, &embedder(), DIM, 8)
+                .backfill_space(SPACE, &embedder(), DIM, 8, &mut BTreeSet::new())
                 .await
                 .unwrap(),
             2
@@ -455,7 +532,7 @@ mod tests {
         assert_eq!(engine.storage().count_unbackfilled(SPACE).await.unwrap(), 1);
         assert_eq!(
             engine
-                .backfill_space(SPACE, &embedder(), DIM, 8)
+                .backfill_space(SPACE, &embedder(), DIM, 8, &mut BTreeSet::new())
                 .await
                 .unwrap(),
             1
@@ -879,7 +956,7 @@ mod tests {
         });
 
         let err = engine
-            .backfill_space(SPACE, &liar, DIM, 8)
+            .backfill_space(SPACE, &liar, DIM, 8, &mut BTreeSet::new())
             .await
             .unwrap_err();
         assert!(
@@ -987,5 +1064,219 @@ mod tests {
                 "different-dim fences, does not rebuild at the wrong dim"
             );
         }
+    }
+
+    // --- #1081: a fact without a vector that the target rejects does not abort ---
+
+    /// Answers `fail` for any input holding `poison`, a constant vector otherwise, and
+    /// counts how often each poison input was sent.
+    struct PoisonEmbedder {
+        fail: fn(String) -> MemoryError,
+        sent: std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+    }
+
+    impl PoisonEmbedder {
+        fn new(fail: fn(String) -> MemoryError) -> Arc<Self> {
+            Arc::new(Self {
+                fail,
+                sent: std::sync::Mutex::default(),
+            })
+        }
+
+        fn rejecting() -> Arc<Self> {
+            Self::new(|text| {
+                MemoryError::Embedder(crate::error::EmbedderError::InputRejected(format!(
+                    "400: refused {text}"
+                )))
+            })
+        }
+    }
+
+    impl EmbeddingProvider for PoisonEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            if text.contains("poison") {
+                *self.sent.lock().unwrap().entry(text.into()).or_default() += 1;
+                return Err((self.fail)(text.into()));
+            }
+            Ok(vec![0.9_f32; DIM])
+        }
+
+        fn fingerprint(&self) -> EmbeddingFingerprint {
+            EmbeddingFingerprint::new("target", "test", DIM)
+        }
+    }
+
+    fn old_embedder() -> Arc<dyn EmbeddingProvider> {
+        Arc::new(TagEmbedder {
+            model: "old-model",
+            value: 0.1,
+            dim: DIM,
+        })
+    }
+
+    /// A file store with `a` and `b` embedded under the old identity, `poison one`
+    /// deferred and then failed by a 400 (the issue's item), and `poison two` still waiting.
+    async fn store_with_rejected_items(dir: &std::path::Path) -> (MemoryEngine, [i64; 4]) {
+        use crate::engine::embed_queue::{Backoff, Settled};
+        use crate::types::NextEmbedding;
+
+        let engine = MemoryEngine::builder(DIM)
+            .path(dir.join("memory.db"))
+            .build()
+            .unwrap();
+        let a = engine
+            .add_fact(&req("a"), old_embedder(), None)
+            .await
+            .unwrap();
+        let b = engine
+            .add_fact(&req("b"), old_embedder(), None)
+            .await
+            .unwrap();
+        let failed = engine.add_fact_deferred(&req("poison one")).await.unwrap();
+        let NextEmbedding::Due(item) = engine.next_embedding().await.unwrap() else {
+            panic!("the deferred fact is due");
+        };
+        let settled = engine
+            .settle_embedding(
+                &item,
+                Err(MemoryError::Embedder(
+                    crate::error::EmbedderError::InputRejected("400".into()),
+                )),
+                &old_embedder().fingerprint(),
+                Backoff::DEFAULT,
+            )
+            .await
+            .unwrap();
+        assert_eq!(settled, Settled::Rejected);
+        let waiting = engine.add_fact_deferred(&req("poison two")).await.unwrap();
+        (engine, [a, b, failed, waiting])
+    }
+
+    #[tokio::test]
+    async fn reconstruct_leaves_a_fact_the_target_rejects_in_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, [a, b, failed, waiting]) = store_with_rejected_items(dir.path()).await;
+        let target = PoisonEmbedder::rejecting();
+        let target_fp = target.fingerprint();
+        let provider: Arc<dyn EmbeddingProvider> = target.clone();
+
+        let outcome = engine.reconstruct(&target_fp, &provider).await.unwrap();
+
+        assert_eq!(outcome.promoted, 2);
+        assert_eq!(outcome.without_vector, [failed, waiting]);
+        assert_eq!(outcome.new_fingerprint, target_fp);
+        for id in [a, b] {
+            assert_eq!(
+                engine.storage().get_fact(id).await.unwrap().embedding,
+                vec![0.9_f32; DIM]
+            );
+        }
+        for id in [failed, waiting] {
+            assert_eq!(
+                engine.storage().get_fact(id).await.unwrap().embedding,
+                Vec::<f32>::new()
+            );
+        }
+        for (text, sent) in target.sent.lock().unwrap().iter() {
+            assert!(*sent <= 2, "{text} was sent {sent} times");
+        }
+        engine.close().await.unwrap();
+        let status = crate::read_embed_queue_status(&dir.path().join("memory.db")).unwrap();
+        assert_eq!((status.failed, status.waiting), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn reconstruct_still_aborts_when_the_target_rejects_a_fact_with_a_vector() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        engine
+            .add_fact(&req("a"), old_embedder(), None)
+            .await
+            .unwrap();
+        engine
+            .add_fact(&req("poison"), old_embedder(), None)
+            .await
+            .unwrap();
+        let target = PoisonEmbedder::rejecting();
+        let provider: Arc<dyn EmbeddingProvider> = target.clone();
+        let err = engine
+            .reconstruct(&target.fingerprint(), &provider)
+            .await
+            .expect_err("a fact with a vector is never left without one");
+        assert!(
+            matches!(
+                err,
+                MemoryError::Embedder(crate::error::EmbedderError::InputRejected(_))
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            engine.storage().load_embedding_fingerprint().await.unwrap(),
+            Some(old_embedder().fingerprint())
+        );
+    }
+
+    #[tokio::test]
+    async fn reconstruct_still_aborts_on_an_answer_that_is_not_a_rejection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, _) = store_with_rejected_items(dir.path()).await;
+        let target = PoisonEmbedder::new(|text| {
+            MemoryError::Embedder(crate::error::EmbedderError::NoAnswer(text))
+        });
+        let provider: Arc<dyn EmbeddingProvider> = target.clone();
+        let err = engine
+            .reconstruct(&target.fingerprint(), &provider)
+            .await
+            .expect_err("only a rejection is skipped");
+        assert!(
+            matches!(
+                err,
+                MemoryError::Embedder(crate::error::EmbedderError::NoAnswer(_))
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            engine.storage().load_embedding_fingerprint().await.unwrap(),
+            Some(old_embedder().fingerprint())
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_passes_a_window_made_only_of_skipped_facts() {
+        let engine = MemoryEngine::builder(DIM).build().unwrap();
+        seed(&engine, &["one", "two", "three", "four", "five"]).await;
+        begin(&engine).await;
+        let mut skipped: BTreeSet<i64> = (1..=4).collect();
+        let written = engine
+            .backfill_space(SPACE, &embedder(), DIM, 2, &mut skipped)
+            .await
+            .unwrap();
+        assert_eq!(
+            written, 1,
+            "the two all-skipped windows do not end the pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconstruct_resumes_past_facts_it_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut engine, [_, _, failed, waiting]) = store_with_rejected_items(dir.path()).await;
+        let target = PoisonEmbedder::rejecting();
+        let target_fp = target.fingerprint();
+        let provider: Arc<dyn EmbeddingProvider> = target.clone();
+        // A crash before the promote: the space is open and backfilled once.
+        let space = space_name_for(&target_fp).unwrap();
+        engine
+            .storage()
+            .begin_populating_space(&space, &target_fp)
+            .await
+            .unwrap();
+        engine
+            .backfill_space(&space, &provider, DIM, 128, &mut BTreeSet::new())
+            .await
+            .unwrap();
+
+        let outcome = engine.reconstruct(&target_fp, &provider).await.unwrap();
+        assert_eq!(outcome.without_vector, [failed, waiting]);
+        engine.close().await.unwrap();
     }
 }

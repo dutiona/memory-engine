@@ -140,9 +140,13 @@ pub struct PromotionResult {
 /// it is #689.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromoteOutcome {
-    /// Facts whose active vector was copy-swapped to the new space (the homogeneous
-    /// active space covers every fact, so this is the total fact count).
+    /// Facts that took the new space's vector in the copy-swap.
     pub promoted: usize,
+    /// Facts left without a vector by the promote, by id (#1081): a fact that had none
+    /// (waiting or failed in the deferred-embedding queue, #1021) and that the new space's
+    /// provider rejected, or one stored without a vector after the backfill's last pass.
+    /// Each keeps its queue row, so the drain embeds it, or `status` shows it failed.
+    pub without_vector: Vec<i64>,
     /// The previously-active space, now `deprecated` and retained in `fact_vectors`
     /// for an instant rollback (the inverse copy-swap, #689).
     pub deprecated_space: String,
