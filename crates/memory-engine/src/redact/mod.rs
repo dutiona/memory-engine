@@ -26,7 +26,7 @@
 //! A new write method must scrub its content and join the gated list of
 //! `tests/redaction_write_paths.rs`, whose tripwire fails until it does.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::types::OutcomeClass;
@@ -816,8 +816,10 @@ fn scrub_member(key: &str, value: &mut Value, denylist: &[String]) -> Result<u64
     scrub_json(value, denylist)
 }
 
-/// Scrub every string leaf of `value` in place; keys and non-strings are kept. A hex leaf whose
-/// key is a context word is redacted too. Returns the number of secrets removed.
+/// Scrub every string leaf and every object key of `value` in place, by the same rules and
+/// `denylist`; non-strings are kept. A hex leaf whose key is a context word is redacted too.
+/// Keys that scrub to one text keep every member (see [`scrub_members`]). Returns the number of
+/// secrets removed.
 pub(crate) fn scrub_json(value: &mut Value, denylist: &[String]) -> Result<u64> {
     match value {
         Value::String(s) => {
@@ -828,12 +830,38 @@ pub(crate) fn scrub_json(value: &mut Value, denylist: &[String]) -> Result<u64> 
             Ok(n)
         }
         Value::Array(items) => items.iter_mut().map(|v| scrub_json(v, denylist)).sum(),
-        Value::Object(map) => map
-            .iter_mut()
-            .map(|(k, v)| scrub_member(k, v, denylist))
-            .sum(),
+        Value::Object(map) => scrub_members(map, denylist, |k, v| scrub_member(k, v, denylist)),
         _ => Ok(0),
     }
+}
+
+/// Rebuild `map` with each value scrubbed by `member`, given its original key, and each key
+/// scrubbed like a string with `key_denylist`. A key that scrubs to one already taken gets the
+/// first free `~1`, `~2`, … suffix, in key order, so no member is lost. Returns the findings.
+fn scrub_members(
+    map: &mut Map<String, Value>,
+    key_denylist: &[String],
+    mut member: impl FnMut(&str, &mut Value) -> Result<u64>,
+) -> Result<u64> {
+    let mut found = 0;
+    let mut scrubbed = Map::new();
+    for (key, mut value) in std::mem::take(map) {
+        found += member(&key, &mut value)?;
+        let (clean, n) = scrub_with(&key, key_denylist)?;
+        found += n;
+        let clean = if scrubbed.contains_key(&clean) {
+            // The map holds fewer members than this range has suffixes, so one is free.
+            (1..=scrubbed.len() + 1)
+                .map(|i| format!("{clean}~{i}"))
+                .find(|k| !scrubbed.contains_key(k))
+                .expect("one of len + 1 suffixes is free")
+        } else {
+            clean
+        };
+        scrubbed.insert(clean, value);
+    }
+    *map = scrubbed;
+    Ok(found)
 }
 
 const FACT_NAMES: &[&str] = &["root", "dev_root", "upstream_url", "origin_url", "branch"];
@@ -890,22 +918,21 @@ const IDENTIFIER_MEMBERS: &[&str] = &[
 
 /// Scrub an event payload: its genuine capture context (`PROVENANCE_KEY`, in MC-9's exact
 /// shape) gets the machine-token rule only, its identifier members every rule but the
-/// `denylist`, everything else every rule and the `denylist`.
+/// `denylist`, everything else every rule and the `denylist`. Its member names are the payload's
+/// schema: they get every rule but the `denylist`, which a schema name could equal.
 pub(crate) fn scrub_payload(payload: &mut Value, denylist: &[String]) -> Result<u64> {
     let Value::Object(map) = payload else {
         return scrub_json(payload, denylist);
     };
-    let mut found = 0;
-    for (k, v) in map.iter_mut() {
-        found += if k == PROVENANCE_KEY && is_provenance(v) {
+    scrub_members(map, &[], |k, v| {
+        Ok(if k == PROVENANCE_KEY && is_provenance(v) {
             scrub_provenance_value(v)
-        } else if IDENTIFIER_MEMBERS.contains(&k.as_str()) {
+        } else if IDENTIFIER_MEMBERS.contains(&k) {
             scrub_member(k, v, &[])?
         } else {
             scrub_member(k, v, denylist)?
-        };
-    }
-    Ok(found)
+        })
+    })
 }
 
 // ── The capture cut ──────────────────────────────────────────────────────────

@@ -127,6 +127,45 @@ fn scrub_json_redacts_leaves_and_keeps_keys_and_non_strings() {
     );
 }
 
+/// An object's keys are content too: a key holding a known secret format or a denylist literal
+/// is redacted like a string, and keys that redact to one text keep every value, the later ones
+/// (in key order) under `~1`, `~2`, ….
+#[test]
+fn scrub_json_redacts_keys_and_keeps_every_member() {
+    let other = format!("AKIA{}", "IOSFODNN7EXAMPLF");
+    let object = |pairs: Vec<(String, Value)>| Value::Object(pairs.into_iter().collect());
+    let mut v = object(vec![
+        (ghp(), json!(1)),
+        ("fixturehost-config".to_owned(), json!(2)),
+        (aws(), json!(3)),
+        (other.clone(), json!(4)),
+        ("plain".to_owned(), object(vec![(aws(), json!(5))])),
+    ]);
+
+    let found = scrub_json(&mut v, &dl(&["fixturehost"])).unwrap();
+
+    assert_eq!(found, 5);
+    assert_eq!(
+        v,
+        json!({
+            "[REDACTED:aws-access-key]": 3,
+            "[REDACTED:aws-access-key]~1": 4,
+            "[REDACTED:denylist]-config": 2,
+            "[REDACTED:github-pat]": 1,
+            "plain": { "[REDACTED:aws-access-key]": 5 },
+        })
+    );
+    let mut payload = object(vec![
+        ("input".to_owned(), object(vec![(other, json!("x"))])),
+        ("machine".to_owned(), json!("laptop")),
+    ]);
+    assert_eq!(scrub_payload(&mut payload, &[]).unwrap(), 1);
+    assert_eq!(
+        payload,
+        json!({ "input": { "[REDACTED:aws-access-key]": "x" }, "machine": "laptop" })
+    );
+}
+
 #[test]
 fn a_hex_leaf_is_redacted_when_its_key_is_a_context_word() {
     let hex = "0123456789abcdef".repeat(2);

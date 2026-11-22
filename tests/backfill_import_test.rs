@@ -665,6 +665,41 @@ async fn import_ids_survive_the_payload_scrub() {
     assert_eq!(keys, want);
 }
 
+/// A tool input's keys are content: a key holding the denylist literal or a known secret format
+/// is redacted in the stored event and in its activity alike.
+#[tokio::test]
+async fn a_tool_input_key_is_redacted_in_the_event_and_the_activity() {
+    let s = Store::new();
+    let aws = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+    let input: serde_json::Map<String, Value> = [
+        ("fixturehost".to_owned(), json!("a")),
+        (aws.clone(), json!("b")),
+    ]
+    .into_iter()
+    .collect();
+    let items = vec![main_item(
+        "bf.1.t0",
+        0,
+        tool(Value::Object(input), "ok", &[]),
+    )];
+
+    s.write(&upload(HOME), &items, &["fixturehost".to_owned()])
+        .await;
+
+    let stored = s.events().await[0].payload["input"].to_string();
+    let conn = rusqlite::Connection::open(&s.db).unwrap();
+    let args: String = conn
+        .query_row("SELECT args FROM activities", [], |r| r.get(0))
+        .unwrap();
+    for text in [&stored, &args] {
+        assert!(
+            !text.contains("fixturehost") && !text.contains(&aws),
+            "{text}"
+        );
+    }
+    assert!(stored.contains("[REDACTED:aws-access-key]"), "{stored}");
+}
+
 /// The denylist holds host names, which are machine names: a literal equal to the machine and to
 /// the session ID redacts content, never an identifier.
 #[tokio::test]

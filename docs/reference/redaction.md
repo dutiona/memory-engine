@@ -66,6 +66,11 @@ fact with a warning instead. Each scan is one pass plus binary searches, so its 
 Two memories that differ only by a redacted secret become the same text, so a forget's tombstone of one also keeps the
 other out.
 
+**JSON.** In metadata, tool inputs and event payloads, every string and every object key takes the same rules (the
+denylist included where the path applies it): a key is content too. Keys that redact to one text keep every member,
+the later ones in key order renamed `~1`, `~2`, …. An event payload's own member names are its schema, so they take
+every rule but the denylist.
+
 ## Write paths
 
 Every `MemoryEngine` write method checks its raw size, then (after its open and writable checks, so `ReadOnly` still
