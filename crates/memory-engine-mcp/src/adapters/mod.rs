@@ -109,6 +109,7 @@ pub(crate) fn keyed(
     }
     items
 }
+
 /// One project's rows of a plugin store (#1117): one upload's body, one JSON object per line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slice {
@@ -211,6 +212,11 @@ pub(crate) fn query(
 /// [`ExportError::ControlInProject`] for a project holding a tab or a line break,
 /// [`ExportError::OverTheBound`] for a slice over [`memory_engine::BACKFILL_BODY_BYTES`].
 pub(crate) fn slices(rows: Vec<Row>) -> Result<Vec<Slice>, ExportError> {
+    slices_capped(rows, memory_engine::BACKFILL_BODY_BYTES as u64)
+}
+
+/// [`slices`] with an explicit bound on a slice's bytes (test seam).
+fn slices_capped(rows: Vec<Row>, bound: u64) -> Result<Vec<Slice>, ExportError> {
     let mut by_project: BTreeMap<Option<String>, (BTreeSet<String>, Slice)> = BTreeMap::new();
     for (project, session, line) in rows {
         if project
@@ -238,7 +244,7 @@ pub(crate) fn slices(rows: Vec<Row>) -> Result<Vec<Slice>, ExportError> {
             .body
             .extend(Value::Object(line).to_string().into_bytes());
         slice.body.push(b'\n');
-        if slice.body.len() as u64 > memory_engine::BACKFILL_BODY_BYTES as u64 {
+        if slice.body.len() as u64 > bound {
             return Err(ExportError::OverTheBound);
         }
     }
@@ -250,6 +256,7 @@ pub(crate) fn slices(rows: Vec<Row>) -> Result<Vec<Slice>, ExportError> {
         })
         .collect())
 }
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -329,6 +336,21 @@ mod tests {
         assert_eq!(
             sessions(none),
             BTreeSet::from(["\"6abf0af7-d5d4-4183-97b4-14142808dffb\"".to_owned()])
+        );
+        let unfiled = store(CLAUDE_MEMORY);
+        unfiled
+            .execute_batch("UPDATE sessions SET project_id = NULL WHERE id = 1;")
+            .unwrap();
+        let unfiled = claude_memory::export(&unfiled).unwrap();
+        let none = unfiled.iter().find(|s| s.project.is_none()).unwrap();
+        assert!(
+            sessions(none).contains("\"a5b6c7d\""),
+            "a subagent stays with its main session, which has no project"
+        );
+        assert!(
+            unfiled
+                .iter()
+                .all(|s| s.project.as_deref() != Some("/work/fixture/alpha"))
         );
         let mem = claude_mem::export(&store(CLAUDE_MEM)).unwrap();
         let orphan = mem.iter().find(|s| s.project.is_none()).unwrap();
@@ -436,6 +458,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A BLOB no line can carry, a project `index.tsv` cannot carry, and a project over the upload
+    /// bound each refuse the whole export, naming what failed.
+    #[test]
+    fn an_export_refuses_what_no_upload_can_carry() {
+        let blob = store(CLAUDE_MEMORY);
+        blob.execute_batch("UPDATE messages SET content = x'00ff' WHERE id = 1;")
+            .unwrap();
+        assert!(matches!(
+            claude_memory::export(&blob),
+            Err(ExportError::Blob { table: "messages", column }) if column == "content"
+        ));
+        let tab = store(CLAUDE_MEMORY);
+        tab.execute_batch(
+            "UPDATE projects SET path = '/work/fixture/al' || char(9) || 'pha' WHERE id = 1;",
+        )
+        .unwrap();
+        assert!(matches!(
+            claude_memory::export(&tab),
+            Err(ExportError::ControlInProject)
+        ));
+        let rows = query(
+            &store(CLAUDE_MEMORY),
+            "messages",
+            "session",
+            "SELECT NULL, content FROM messages",
+        )
+        .unwrap();
+        let largest = slices(rows.clone()).unwrap()[0].body.len() as u64;
+        assert!(slices_capped(rows.clone(), largest).is_ok(), "at the bound");
+        assert!(matches!(
+            slices_capped(rows, largest - 1),
+            Err(ExportError::OverTheBound)
+        ));
     }
 
     #[test]

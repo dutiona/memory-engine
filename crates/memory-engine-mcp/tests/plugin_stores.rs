@@ -720,7 +720,7 @@ async fn a_store_row_yields_to_live_capture_and_transcripts() {
 }
 
 /// The same export again writes nothing and reinforces nothing; a grown export adds only its new
-/// rows.
+/// rows; a row edited at the source collides and stops its file.
 #[tokio::test]
 async fn re_exporting_a_store_adds_no_rows() {
     let server = TestServer::start_unreachable_with_denylist(&[]).await;
@@ -769,6 +769,30 @@ async fn re_exporting_a_store_adds_no_rows() {
         "the new prompt and stop"
     );
     assert_eq!(total(&grown, &["events", "collision"]), 0);
+
+    // A row edited at the source between two exports collides: its file's write is refused
+    // whole, and the store is unchanged.
+    let edited = slices_of(
+        "claude-mem",
+        "UPDATE user_prompts SET prompt_text = 'Edited at the source.' WHERE id = 1;",
+    );
+    let alpha = edited
+        .iter()
+        .find(|s| s.project.as_deref() == Some("alpha"))
+        .unwrap();
+    let upload = Upload::slice("claude-mem", alpha);
+    let (status, dry) = send(&server, "laptop", &upload).await;
+    assert_eq!(
+        (status, &dry["events"]["collision"]),
+        (200, &json!(1)),
+        "{dry}"
+    );
+    let before = counts(&server);
+    let preview = dry["preview"].as_str().unwrap();
+    let (status, write) = send(&server, "laptop", &upload.write(preview)).await;
+    assert_eq!(status, 409, "{write}");
+    assert_eq!(write["collisions"].as_array().map(Vec::len), Some(1));
+    assert_eq!(counts(&server), before);
 }
 
 /// Every store text is redacted with every rule and the denylist before it is stored or

@@ -23,8 +23,10 @@ const TABLE: &str = "messages";
 /// Why an export of more rows than ADR-0009's importer keeps is refused whole.
 const OVER_THE_LIMIT: &str = "the export is over the 1,000,000-row limit";
 
-/// Every message of every session, with its session's identity, in its main session's project.
-const MESSAGES: &str = "SELECT COALESCE(pp.path, p.path), m.id, m.uuid, s.uuid AS session,
+/// Every message of every session, with its session's identity, in its main session's project,
+/// none included, so a subagent's rows never land in another slice than its main session's.
+const MESSAGES: &str =
+    "SELECT CASE WHEN ps.id IS NULL THEN p.path ELSE pp.path END, m.id, m.uuid, s.uuid AS session,
             ps.uuid AS parent_session, s.cwd, m.timestamp, m.role, m.content, m.is_notification
        FROM messages m
        LEFT JOIN sessions s ON s.id = m.session_id
@@ -71,7 +73,8 @@ struct Message<'a> {
     user: bool,
     content: &'a str,
     notification: bool,
-    object: &'a Map<String, Value>,
+    /// The content members its digest is taken over.
+    digest: Value,
 }
 
 impl Message<'_> {
@@ -92,19 +95,13 @@ impl Message<'_> {
 
     /// Its record with its event ID, and the content members its digest is taken over.
     fn raw(&self, tag: char, content: Content) -> (Raw, Value) {
-        let digest = json!({
-            "role": self.object["role"],
-            "content": self.object["content"],
-            "timestamp": self.object["timestamp"],
-            "is_notification": self.object["is_notification"],
-        });
         let raw = Raw {
             line: self.line,
             time: self.time,
             event_id: event_id(self.uuid, tag),
             record: self.record(content),
         };
-        (raw, digest)
+        (raw, self.digest.clone())
     }
 }
 
@@ -116,16 +113,19 @@ fn event_id(uuid: &str, tag: char) -> String {
 fn message(line: usize, object: &Map<String, Value>) -> Option<Message<'_>> {
     let text = |name: &str| object.get(name).and_then(Value::as_str);
     let uuid = text("uuid").filter(|u| is_event_id(&event_id(u, 's')))?;
-    let user = match text("role")? {
+    let role = text("role")?;
+    let user = match role {
         "user" => true,
         "assistant" => false,
         _ => return None,
     };
-    let notification = match object.get("is_notification").and_then(Value::as_i64)? {
+    let flag = object.get("is_notification").and_then(Value::as_i64)?;
+    let notification = match flag {
         0 => false,
         1 => true,
         _ => return None,
     };
+    let (timestamp, content) = (text("timestamp")?, text("content")?);
     Some(Message {
         line,
         id: object.get("id").and_then(Value::as_i64)?,
@@ -133,11 +133,13 @@ fn message(line: usize, object: &Map<String, Value>) -> Option<Message<'_>> {
         session: text("session").filter(|s| !s.is_empty())?,
         parent: Some(nullable(object, "parent_session")?).filter(|p| !p.is_empty()),
         cwd: Some(nullable(object, "cwd")?).filter(|c| !c.is_empty()),
-        time: text("timestamp").and_then(parse_timestamp)?,
+        time: parse_timestamp(timestamp)?,
         user,
-        content: text("content")?,
+        content,
         notification,
-        object,
+        digest: json!({
+            "role": role, "content": content, "timestamp": timestamp, "is_notification": flag,
+        }),
     })
 }
 
