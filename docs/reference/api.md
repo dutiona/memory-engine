@@ -18,8 +18,7 @@ This page summarizes the public API surface of the `memory-engine` crate.
 
 | Method                | Signature                                                  | Description                                                                                                                    |
 | --------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `open`                | `(config: &EngineConfig) -> Result<Self>`                  | Open or create a file-backed engine. Validates `embed_dim` against stored value on subsequent opens.                           |
-| `open_memory`         | `(embed_dim: usize) -> Result<Self>`                       | Open an in-memory engine (testing).                                                                                            |
+| `builder`             | `(embed_dim: usize) -> MemoryEngineBuilder<InMemory>`      | Start building an engine: `.build()` opens it in memory; `.path(p)` makes it file-backed, created or opened at `p`, whose recorded dimension must equal `embed_dim`. |
 | `declared_identity`   | `(self, identity: EmbeddingFingerprint) -> Self` (file builder) | Open only a store whose recorded embedding identity equals `identity`, checked read-only before any migration (#1065). |
 | `read_recorded_embedding` | `(db: &Path) -> Result<RecordedEmbedding>` (free function) | What a store records of its embedding (identity, bare dimension, or nothing), read at any schema version without migrating. |
 | `restore_json`        | `(snapshot: &Path, config: &EngineConfig) -> Result<Self>` | Restore from a JSON snapshot into a new file-backed engine. Auto-detects gzip/zstd compression. Config path must not exist.    |
