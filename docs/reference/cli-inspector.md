@@ -351,7 +351,9 @@ The `--backend llm` path requires all four `--llm-*` / `--embed-*` flags (the LL
 embeds its own summaries). The embedder flags (`--embed-model`, `--embed-provider`, the MRL
 and served-artifact flags) must name the identity the store records: it is checked before
 the LLM is called, and a mismatch exits 1 with `embedding identity check failed` and no JSON
-(#1062). The #209 guard defers a cycle that follows a caller write; the command retries a
+(#1062). A store that records no identity yet (for example, every fact still waits for its vector) passes
+that check; the apply then refuses the summaries (#613), after the LLM calls, and the JSON says
+`failed`. The #209 guard defers a cycle that follows a caller write; the command retries a
 deferred cycle up to 8 times in one invocation, so one call runs, and it reports
 `"outcome": "skipped"` only when a concurrent writer keeps it deferred. This is the
 subprocess seam the efficiency×quality benchmark drives — see

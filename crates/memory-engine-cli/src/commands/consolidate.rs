@@ -121,7 +121,8 @@ async fn run_llm(
             .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))??,
     );
     // The apply would refuse the summaries of a foreign embedder (#1062): refuse
-    // it before the LLM is called, as `query` does. A refused embedder has sent no
+    // it before the LLM is called, as `query` does. A store with no identity yet passes
+    // here and is refused by the apply (#613). A refused embedder has sent no
     // request, so dropping it here, on the executor, is safe (as in `query`).
     engine
         .verify_embedding_identity(&*embedder)
