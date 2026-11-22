@@ -247,6 +247,34 @@ impl EmbeddingFingerprint {
         self
     }
 
+    /// Reject a `candidate` that differs from this recorded identity (ADR 0015 §3, #614).
+    ///
+    /// Equality is field by field over the whole tuple, the served artifact included; an
+    /// absent artifact equals only another absent one. `self` is the store's recorded identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemoryError::EmbeddingModelMismatch`] when any field differs.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use me_types::types::EmbeddingFingerprint;
+    ///
+    /// let stored = EmbeddingFingerprint::new("m", "p", 8);
+    /// assert!(stored.ensure_matches(&stored.clone()).is_ok());
+    /// assert!(stored.ensure_matches(&EmbeddingFingerprint::new("m", "p", 4)).is_err());
+    /// ```
+    pub fn ensure_matches(&self, candidate: &Self) -> Result<()> {
+        if self == candidate {
+            return Ok(());
+        }
+        Err(MemoryError::EmbeddingModelMismatch {
+            expected: Box::new(self.clone()),
+            actual: Box::new(candidate.clone()),
+        })
+    }
+
     /// Construct a fingerprint for a Matryoshka-truncated `float32` embedding space,
     /// recording the native `base_dim` the model emits before truncation to `dim`.
     #[must_use]
@@ -779,5 +807,39 @@ mod tests {
             Some(2048),
         );
         assert!(empty.is_err(), "empty pooling");
+    }
+
+    #[test]
+    fn ensure_matches_is_field_by_field() {
+        let stored = EmbeddingFingerprint::new("m", "p", 8);
+        stored
+            .ensure_matches(&stored.clone())
+            .expect("equal identities match");
+        let served = ServedArtifact::from_parts(
+            Some("a".repeat(64)),
+            Some("last".into()),
+            Some("l2".into()),
+            Some(2048),
+        )
+        .unwrap()
+        .unwrap();
+        let mut element = stored.clone();
+        element.element_type = "int8".into();
+        for candidate in [
+            EmbeddingFingerprint::new("other", "p", 8),
+            EmbeddingFingerprint::new("m", "other", 8),
+            EmbeddingFingerprint::new("m", "p", 4),
+            EmbeddingFingerprint::with_matryoshka("m", "p", 8, 16),
+            element,
+            stored.clone().with_served(served),
+        ] {
+            match stored.ensure_matches(&candidate) {
+                Err(MemoryError::EmbeddingModelMismatch { expected, actual }) => {
+                    assert_eq!(*expected, stored);
+                    assert_eq!(*actual, candidate);
+                }
+                other => panic!("{candidate:?} must mismatch, got {other:?}"),
+            }
+        }
     }
 }

@@ -122,7 +122,7 @@ pub fn record_if_absent(
     // (harmless) so both branches share one gate. `load` reads through the `Transaction`
     // deref to `Connection`.
     if let Some(stored) = load(tx)? {
-        ensure_match(&stored, candidate)?;
+        stored.ensure_matches(candidate)?;
         return Ok(stored);
     }
     if candidate.dim != expected_dim {
@@ -151,24 +151,7 @@ pub fn record_if_absent(
 /// Returns [`MemoryError::EmbeddingModelMismatch`] if an identity is recorded and
 /// `candidate` differs from it, or any [`load`] error.
 pub fn check_compatible(conn: &Connection, candidate: &EmbeddingFingerprint) -> Result<()> {
-    load(conn)?.map_or_else(|| Ok(()), |stored| ensure_match(&stored, candidate))
-}
-
-/// Reject a `candidate` that differs from the `stored` identity (#614).
-///
-/// Equality is field-by-field over the whole tuple (`EmbeddingFingerprint: Eq`), so a
-/// difference in *any* identity field — `model`, `provider`, `dim`,
-/// `matryoshka_base_dim`, `element_type`, or the served artifact (`artifact_sha256`,
-/// `pooling`, `normalization`, `max_input_tokens`; absent equals only absent) — is a
-/// mismatch.
-fn ensure_match(stored: &EmbeddingFingerprint, candidate: &EmbeddingFingerprint) -> Result<()> {
-    if stored == candidate {
-        return Ok(());
-    }
-    Err(MemoryError::EmbeddingModelMismatch {
-        expected: Box::new(stored.clone()),
-        actual: Box::new(candidate.clone()),
-    })
+    load(conn)?.map_or_else(|| Ok(()), |stored| stored.ensure_matches(candidate))
 }
 
 /// Require that a store has a recorded embedding identity before a **pre-computed-embedding** write.
