@@ -46,8 +46,25 @@ async fn create_db_with_event() -> (TempDir, PathBuf) {
     (dir, db_path)
 }
 
+/// The embedder settings `add-fact`'s identity flags read from the environment: each test
+/// clears them, so a host's own configuration never declares an identity for it.
+const EMBED_ENV: [&str; 8] = [
+    "MEMORY_ENGINE_EMBED_URL",
+    "MEMORY_ENGINE_EMBED_MODEL",
+    "MEMORY_ENGINE_EMBED_PROVIDER",
+    "MEMORY_ENGINE_EMBED_API_KEY",
+    "MEMORY_ENGINE_EMBED_ARTIFACT_SHA256",
+    "MEMORY_ENGINE_EMBED_POOLING",
+    "MEMORY_ENGINE_EMBED_NORMALIZATION",
+    "MEMORY_ENGINE_EMBED_MAX_INPUT_TOKENS",
+];
+
 fn cli() -> Command {
-    Command::cargo_bin("memory-engine-cli").unwrap()
+    let mut cmd = Command::cargo_bin("memory-engine-cli").unwrap();
+    for var in EMBED_ENV {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 // --- Happy paths ---
@@ -68,6 +85,8 @@ fn add_fact_happy_path_plain() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
         ])
         .assert()
         .success()
@@ -88,6 +107,8 @@ fn add_fact_happy_path_table() {
             "episodic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
         ])
         .assert()
         .success()
@@ -111,6 +132,8 @@ fn add_fact_json_output() {
             "procedural",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
         ])
         .assert()
         .success()
@@ -136,6 +159,8 @@ fn add_fact_with_optional_flags() {
             "episodic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
             "--base-importance",
             "0.9",
             "--t-valid",
@@ -170,6 +195,8 @@ async fn add_fact_with_source_event_id() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
             "--source-event-id",
             "1",
         ])
@@ -194,6 +221,8 @@ fn add_fact_invalid_fact_type() {
             "invalid",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
         ])
         .assert()
         .failure()
@@ -214,6 +243,8 @@ fn add_fact_importance_out_of_range() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
             "--base-importance",
             "1.5",
         ])
@@ -236,6 +267,8 @@ fn add_fact_temporal_inconsistency() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
             "--t-valid",
             "2026-06-01T00:00:00Z",
             "--t-invalid",
@@ -262,6 +295,8 @@ fn add_fact_embedding_dimension_mismatch() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON, // 4-dim
+            "--embed-model",
+            "test-model",
         ])
         .assert()
         .success();
@@ -277,6 +312,8 @@ fn add_fact_embedding_dimension_mismatch() {
             "semantic",
             "--embedding",
             "[0.1, 0.2]", // 2-dim, store is dim 4
+            "--embed-model",
+            "test-model",
         ])
         .assert()
         .failure()
@@ -315,6 +352,8 @@ fn add_fact_malformed_embedding() {
             "semantic",
             "--embedding",
             "[not, valid, json]",
+            "--embed-model",
+            "test-model",
         ])
         .assert()
         .failure()
@@ -334,6 +373,8 @@ fn add_fact_nonexistent_db() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
         ])
         .assert()
         .failure()
@@ -355,6 +396,8 @@ fn add_fact_metadata_non_object() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
             "--metadata",
             "\"just a string\"",
         ])
@@ -374,6 +417,8 @@ fn add_fact_metadata_non_object() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
             "--metadata",
             "[1, 2, 3]",
         ])
@@ -400,6 +445,8 @@ fn add_fact_scope_creates_segments() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
             "--scope",
             "project/experiment",
         ])
@@ -435,6 +482,8 @@ fn add_fact_invalid_datetime() {
             "semantic",
             "--embedding",
             EMBEDDING_JSON,
+            "--embed-model",
+            "test-model",
             "--t-valid",
             "not-a-date",
         ])
@@ -459,7 +508,7 @@ fn add_fact_refuses_a_vector_beside_unredacted_content() {
                 "add-fact",
             ])
             .args(["--content", content, "--fact-type", "semantic"])
-            .args(["--embedding", EMBEDDING_JSON])
+            .args(["--embedding", EMBEDDING_JSON, "--embed-model", "test-model"])
             .assert()
     };
     add(&format!("deploy key {aws}"))
@@ -471,4 +520,125 @@ fn add_fact_refuses_a_vector_beside_unredacted_content() {
         .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get::<_, i64>(0))
         .unwrap();
     assert_eq!(count, 1);
+}
+
+// --- #1060: a pre-computed vector declares its identity ---
+
+const SHA: &str = "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439";
+
+/// `add-fact` of one fact into `db` with the given identity flags.
+fn add_declared(
+    db: &std::path::Path,
+    content: &str,
+    identity: &[&str],
+) -> assert_cmd::assert::Assert {
+    cli()
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "--format",
+            "plain",
+            "add-fact",
+        ])
+        .args(["--content", content, "--fact-type", "semantic"])
+        .args(["--embedding", EMBEDDING_JSON])
+        .args(identity)
+        .assert()
+}
+
+/// The active embedding space: `(model, provider, dim, artifact_sha256)`, if any.
+fn active_space(db: &std::path::Path) -> Option<(String, String, i64, Option<String>)> {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    conn.query_row(
+        "SELECT model, provider, dim, artifact_sha256 FROM embedding_spaces WHERE status = 'active'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )
+    .ok()
+}
+
+fn fact_count(db: &std::path::Path) -> i64 {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn add_fact_records_its_declared_identity_on_a_blank_store() {
+    let (_dir, db) = create_empty_db();
+    add_declared(&db, "one", &["--embed-model", "m", "--embed-provider", "p"]).success();
+    assert_eq!(active_space(&db), Some(("m".into(), "p".into(), 4, None)));
+}
+
+#[test]
+fn add_fact_records_a_declared_served_artifact() {
+    let (_dir, db) = create_empty_db();
+    add_declared(
+        &db,
+        "one",
+        &[
+            "--embed-model",
+            "m",
+            "--embed-provider",
+            "p",
+            "--embed-artifact-sha256",
+            SHA,
+            "--embed-pooling",
+            "last",
+            "--embed-normalization",
+            "l2",
+            "--embed-max-input-tokens",
+            "2048",
+        ],
+    )
+    .success();
+    assert_eq!(
+        active_space(&db),
+        Some(("m".into(), "p".into(), 4, Some(SHA.into())))
+    );
+}
+
+#[test]
+fn add_fact_refuses_an_undeclared_vector() {
+    let (_dir, blank) = create_empty_db();
+    add_declared(&blank, "one", &[])
+        .failure()
+        .stderr(predicate::str::contains("--embed-model"));
+    assert_eq!((fact_count(&blank), active_space(&blank)), (0, None));
+
+    let (_dir2, stamped) = create_empty_db();
+    add_declared(&stamped, "one", &["--embed-model", "m"]).success();
+    add_declared(&stamped, "two", &[])
+        .failure()
+        .stderr(predicate::str::contains("--embed-model"));
+    assert_eq!(fact_count(&stamped), 1);
+}
+
+#[test]
+fn add_fact_accepts_a_declaration_the_store_records() {
+    let (_dir, db) = create_empty_db();
+    add_declared(&db, "one", &["--embed-model", "m", "--embed-provider", "p"]).success();
+    add_declared(&db, "two", &["--embed-model", "m", "--embed-provider", "p"]).success();
+    assert_eq!(fact_count(&db), 2);
+}
+
+#[test]
+fn add_fact_refuses_a_declaration_the_store_does_not_record() {
+    let (_dir, db) = create_empty_db();
+    add_declared(&db, "one", &["--embed-model", "m", "--embed-provider", "p"]).success();
+    let before = std::fs::read(&db).unwrap();
+    add_declared(
+        &db,
+        "two",
+        &["--embed-model", "other", "--embed-provider", "p"],
+    )
+    .failure()
+    .stderr(predicate::str::contains("embedding model mismatch"));
+    assert_eq!(
+        std::fs::read(&db).unwrap(),
+        before,
+        "a refused add-fact leaves the store as it was"
+    );
+    assert_eq!(fact_count(&db), 1);
 }

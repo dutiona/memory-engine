@@ -132,7 +132,7 @@ pub fn open_engine_writable(path: &Path) -> anyhow::Result<Writable> {
     ensure_store_exists(path)?;
     let lock = lock_store(path)?;
     let embed_dim = peek_embed_dim_from_db(path)?;
-    build_writable(path, embed_dim, lock)
+    build_writable(path, embed_dim, None, lock)
 }
 
 /// Open a `MemoryEngine` with **write** capability using an explicitly known
@@ -143,10 +143,18 @@ pub fn open_engine_writable(path: &Path) -> anyhow::Result<Writable> {
 /// freshly-created, never-embedded database that has no recorded dimension yet.
 /// If the database *was* previously embedded at a different dimension, the
 /// engine's open path rejects the mismatch against the stored `embedding_meta`.
-pub fn open_engine_writable_with_dim(path: &Path, embed_dim: usize) -> anyhow::Result<Writable> {
+///
+/// A `declared` identity (`add-fact`'s pre-computed vector, #1060) must equal the one the
+/// store records, checked read-only before anything migrates (#1065); a blank store accepts
+/// any.
+pub fn open_engine_writable_with_dim(
+    path: &Path,
+    embed_dim: usize,
+    declared: Option<memory_engine::EmbeddingFingerprint>,
+) -> anyhow::Result<Writable> {
     ensure_store_exists(path)?;
     let lock = lock_store(path)?;
-    build_writable(path, embed_dim, lock)
+    build_writable(path, embed_dim, declared, lock)
 }
 
 /// Create a new store at `path` (the `--create` paths of `batch-ingest` and `bootstrap`),
@@ -175,11 +183,19 @@ pub fn ensure_store_absent(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_writable(path: &Path, embed_dim: usize, lock: StoreLock) -> anyhow::Result<Writable> {
+fn build_writable(
+    path: &Path,
+    embed_dim: usize,
+    declared: Option<memory_engine::EmbeddingFingerprint>,
+    lock: StoreLock,
+) -> anyhow::Result<Writable> {
     let backup_dir = path.parent().map(Path::to_path_buf);
     let mut builder = MemoryEngine::builder(embed_dim).path(path.to_path_buf());
     if let Some(dir) = backup_dir {
         builder = builder.backup_dir(dir);
+    }
+    if let Some(identity) = declared {
+        builder = builder.declared_identity(identity);
     }
     Ok(Writable {
         engine: builder.build()?,
@@ -322,7 +338,9 @@ mod tests {
         let _a = StoreLock::acquire(&existing).unwrap();
         let _b = StoreLock::acquire(&fresh).unwrap();
         for err in [
-            open_engine_writable_with_dim(&existing, 4).err().unwrap(),
+            open_engine_writable_with_dim(&existing, 4, None)
+                .err()
+                .unwrap(),
             create_engine(&fresh, 4).err().unwrap(),
         ] {
             assert!(

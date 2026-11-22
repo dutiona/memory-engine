@@ -96,6 +96,10 @@ async fn every_writable_command_refuses_while_the_store_is_held() {
         "semantic",
         "--embedding",
         EMBEDDING,
+        "--embed-model",
+        "mock",
+        "--embed-provider",
+        "test",
     ]));
     refuses_as_held(cli(&db).args(["record-outcome", "--fact-id", "1", "--outcome", "positive"]));
     refuses_as_held(cli(&db).arg("consolidate"));

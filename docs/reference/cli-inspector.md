@@ -172,6 +172,24 @@ or a call record the snapshot lacks, holds both an event and a quarantine record
 fact it lacks, and a target holding only receipts or segments counts as not empty. A snapshot from before schema v18 has
 no such sections and loads as it did. The `activities` table is outside the snapshot, as before.
 
+#### `add-fact` — Store One Fact with a Pre-computed Vector
+
+```bash
+memory-engine-cli --db memory.db add-fact --content "The sky is blue" --fact-type semantic \
+  --embedding "[0.1, 0.2, 0.3, 0.4]" \
+  --embed-model Qwen/Qwen3-Embedding-0.6B --embed-provider llama.cpp
+```
+
+The vector was computed outside the engine, so it declares the identity of the model that made it, with the
+identity flags the embedder commands use (#1060): `--embed-model` (required), `--embed-provider` (default `ollama`),
+and the served-artifact flags `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`,
+`--embed-max-input-tokens` (all four or none), each with its `MEMORY_ENGINE_EMBED_*` variable. The store must record
+exactly that identity (ADR-0015 §3): a mismatch fails with `embedding model mismatch`, checked read-only before anything is
+written or migrated, so nothing is stored. A blank store records the declared identity with its first fact. There is
+no `--mrl-dim`: a store recorded under Matryoshka truncation refuses vectors from `add-fact`. Other flags:
+`--t-valid`, `--t-invalid`, `--base-importance`, `--scope`, `--metadata` (a JSON object), `--pinned`,
+`--source-event-id`. A content that redaction would change is refused, since the vector was computed from it (#1024).
+
 #### `batch-ingest` — Bulk Fact Loading from JSONL
 
 ```bash
