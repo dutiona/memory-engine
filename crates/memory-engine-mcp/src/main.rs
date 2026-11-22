@@ -96,11 +96,14 @@ async fn run() -> Result<(), BoxError> {
     // 1. Load config (TOML file, with CLI overrides)
     let mcp_config = load_config(&cli)?;
 
-    // 2. Resolve embed_dim: explicit config > DB probe
+    // 2. Resolve embed_dim: explicit config > what the store records, read at its own schema
+    //    version without migrating it
     let embed_dim = match mcp_config.engine.embed_dim {
         Some(dim) => dim,
-        None => config::probe_embed_dim(&mcp_config.engine.db_path)
-            .map_err(|e| format!("cannot determine embed_dim: {e}"))?,
+        None => memory_engine::read_recorded_embedding(&mcp_config.engine.db_path)
+            .map_err(|e| format!("cannot determine embed_dim: {e}"))?
+            .dim()
+            .ok_or("cannot determine embed_dim: the database records no dimension yet (nothing has been stored)")?,
     };
 
     // 3. Resolve the embedder configuration and build the provider before the store opens,

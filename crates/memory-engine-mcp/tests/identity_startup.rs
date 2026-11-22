@@ -538,3 +538,22 @@ fn refuses_embedder_fields_without_an_embedder() {
         ],
     );
 }
+
+/// With no `embed_dim` configured the server takes the store's recorded dimension, read at
+/// the store's own schema version (here v14), before anything migrates it.
+#[test]
+fn serves_an_older_store_without_a_configured_dimension() {
+    let unserved = EmbeddingFingerprint::new("Qwen/Qwen3-Embedding-0.6B", "llama.cpp", DIM);
+    let dir = tempfile::tempdir().unwrap();
+    stamp_store(dir.path(), &unserved);
+    roll_back_to_v14(dir.path());
+    write_config(dir.path(), &unserved);
+    let file = dir.path().join("config.toml");
+    let without_dim = std::fs::read_to_string(&file)
+        .unwrap()
+        .replace(&format!("embed_dim = {DIM}\n"), "");
+    assert!(!without_dim.contains("embed_dim"), "{without_dim}");
+    std::fs::write(&file, without_dim).unwrap();
+    let mut server = spawn(dir.path(), &[]);
+    assert_serves(&mut server, "older store, probed dimension");
+}

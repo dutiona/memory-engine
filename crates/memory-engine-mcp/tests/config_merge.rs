@@ -4,10 +4,8 @@
 //! - TOML provides defaults
 //! - CLI flags override individual TOML fields
 //! - Missing TOML sections handled gracefully
-//! - `embed_dim` probing from DB fallback
 //! - `deny_unknown_fields` rejects extra config
 
-use memory_engine::MemoryEngine;
 use memory_engine_mcp::config::{
     EmbeddingOverrides, EmbeddingSection, McpConfig, ResolvedEmbedding, resolve_embedding,
 };
@@ -273,69 +271,6 @@ fn the_dimension_checks_run_in_the_resolver() {
             .is_some()
     );
     assert!(resolve_embedding(&EmbeddingOverrides::default(), Some(&mrl), 8).is_err());
-}
-
-// ---------------------------------------------------------------------------
-// embed_dim probing
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn probe_embed_dim_from_existing_db() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("test.db");
-
-    // Create a real database with a known dimension. Under #613 the dimension is
-    // recorded on the first embedding write, so seed the identity directly.
-    let engine = MemoryEngine::builder(384)
-        .path(db_path.clone())
-        .build()
-        .unwrap();
-    engine
-        .set_config(
-            "embedding_meta",
-            &serde_json::to_string(&memory_engine::EmbeddingFingerprint::new(
-                "test", "test", 384,
-            ))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    drop(engine);
-
-    let probed = memory_engine_mcp::config::probe_embed_dim(&db_path).unwrap();
-    assert_eq!(probed, 384);
-}
-
-#[test]
-fn probe_embed_dim_nonexistent_db() {
-    let result =
-        memory_engine_mcp::config::probe_embed_dim(std::path::Path::new("/tmp/no_such_db.sqlite"));
-    assert!(result.is_err());
-}
-
-#[tokio::test]
-async fn probe_embed_dim_different_dimensions() {
-    let dir = TempDir::new().unwrap();
-    let db_path = dir.path().join("test.db");
-
-    let engine = MemoryEngine::builder(768)
-        .path(db_path.clone())
-        .build()
-        .unwrap();
-    engine
-        .set_config(
-            "embedding_meta",
-            &serde_json::to_string(&memory_engine::EmbeddingFingerprint::new(
-                "test", "test", 768,
-            ))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    drop(engine);
-
-    let probed = memory_engine_mcp::config::probe_embed_dim(&db_path).unwrap();
-    assert_eq!(probed, 768);
 }
 
 // ---------------------------------------------------------------------------
