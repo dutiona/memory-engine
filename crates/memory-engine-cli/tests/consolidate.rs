@@ -182,8 +182,8 @@ async fn llm_backend_synthesizes_via_wiremock_end_to_end() {
     assert_eq!(res["llm"]["prompt_eval_count"], 15);
 }
 
-/// The store is stamped by `FakeEmbed` (`mock`/`test`); the summaries of an embedder of
-/// another identity are refused by the apply, and nothing is written (#1062).
+/// The store is stamped by `FakeEmbed` (`mock`/`test`); a summary embedder of another
+/// identity is a setup error, refused before the LLM is called (#1062).
 #[tokio::test]
 async fn llm_backend_refuses_a_summary_embedder_of_another_identity() {
     let (_dir, db) = create_db().await;
@@ -194,6 +194,7 @@ async fn llm_backend_refuses_a_summary_embedder_of_another_identity() {
             "response": r#"{"merges":[{"source_ids":[1,2],"summary":"the sky is blue/azure"}]}"#,
             "done": true, "eval_count": 40, "prompt_eval_count": 15
         })))
+        .expect(0)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -233,15 +234,13 @@ async fn llm_backend_refuses_a_summary_embedder_of_another_identity() {
     .await
     .expect("join");
 
-    assert!(!out.status.success(), "a refused apply must exit non-zero");
-    let json: Value = serde_json::from_slice(&out.stdout).expect("JSON on stdout");
-    assert_eq!(json["outcome"], "failed", "got: {json}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
     assert!(
-        json["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("embedding model mismatch")),
-        "the error names the mismatch: {json}"
+        stderr.contains("embedding identity check failed"),
+        "stderr:\n{stderr}"
     );
+    assert!(out.stdout.is_empty(), "a setup error emits no JSON");
 
     let engine = memory_engine::MemoryEngine::builder(DIM)
         .path(db)
@@ -303,7 +302,9 @@ async fn consolidate_failure_emits_json_and_exits_nonzero() {
                 "--embed-url",
                 &embed_url,
                 "--embed-model",
-                "e",
+                "mock",
+                "--embed-provider",
+                "test",
             ])
             .output()
             .unwrap()
