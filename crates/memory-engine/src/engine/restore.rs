@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::error::{ConflictError, MemoryError, MigrationError, Result};
+use crate::error::{ConflictError, MemoryError, MigrationError, Result, StorageError};
 use crate::pool::ConnectionPool;
 use crate::store::upcaster::UpcasterRegistry;
 
@@ -98,8 +98,10 @@ impl MemoryEngine {
     /// Copying a live WAL-mode database is unsafe (the WAL sidecar may be missing).
     ///
     /// Neither `config.path` nor its `-wal`, `-shm` or `-journal` sidecar may already
-    /// exist, and the backup may have no non-empty `-wal` or `-journal` of its own. The
-    /// backup's `embed_dim` is validated against `config.embed_dim`.
+    /// exist, and the backup may have no non-empty `-wal` or `-journal` of its own. A backup of
+    /// any schema version is accepted (#1049): its recorded dimension is read where it lies,
+    /// before anything migrates, and validated against `config.embed_dim`; the open then
+    /// migrates it to the current schema.
     ///
     /// # Errors
     ///
@@ -108,7 +110,7 @@ impl MemoryEngine {
     /// Returns `MemoryError::NotFound` if the backup path is not an existing
     /// regular file (missing, or a directory / other non-file).
     /// Returns `MemoryError::Migration` if the backup has a non-empty `-wal` or
-    /// `-journal`.
+    /// `-journal`, or records no `schema_version` (it is not a memory-engine database).
     /// Returns `MemoryError::EmbeddingDimension` on dimension mismatch.
     pub fn restore_sqlite(backup_path: &Path, config: &EngineConfig) -> Result<Self> {
         // SQLite replays a leftover `-wal` or `-journal` onto whatever file sits at the
@@ -145,37 +147,55 @@ impl MemoryEngine {
 
         std::fs::copy(backup_path, &config.path)?;
 
-        // Any failure after copy must clean up the orphan file.
+        // Any failure after copy must clean up the orphan file and any sidecar a probe left:
+        // none existed before (checked above).
         let cleanup = |e| {
-            let _ = std::fs::remove_file(&config.path);
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(sidecar(&config.path, suffix));
+            }
             e
         };
 
-        // Probe the copied DB for embedding-identity dim validation (#613). The probe is
-        // closed before any cleanup: removing the file under an open WAL connection
-        // leaves its `-wal` and `-shm` behind.
-        let db_meta = {
-            let probe = crate::store::schema::open_connection(&config.path.to_string_lossy())
-                .map_err(cleanup)?;
-            crate::store::embedding_meta::load(&probe)
+        // A copy with no `schema_version` is not a memory-engine store: refuse it before the
+        // writable open would create our schema inside it (the reader alone cannot tell it from
+        // a blank store). The probe connection is closed before any cleanup: removing the file
+        // under an open WAL connection leaves its `-wal` and `-shm` behind.
+        let has_version = {
+            let probe =
+                crate::store::schema::open_connection_read_only(&config.path.to_string_lossy())
+                    .map_err(cleanup)?;
+            let has_config: bool = probe
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'config'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| cleanup(StorageError::backend(e).into()))?;
+            has_config
+                && crate::store::schema::get_config(&probe, "schema_version")
+                    .map_err(cleanup)?
+                    .is_some()
+        };
+        if !has_version {
+            return Err(cleanup(
+                MigrationError::Incompatible(format!(
+                    "backup {} is not a memory-engine database",
+                    backup_path.display()
+                ))
+                .into(),
+            ));
         }
-        .map_err(cleanup)?;
 
-        // A backup that recorded an identity must agree on dimension. A backup with
-        // no identity yet (never embedded) is valid and skips the check — the identity
-        // is re-established on its first embedding write. Legacy v11 backups carried a
-        // bare `embed_dim` and no `embedding_meta`, so they would also skip the check;
-        // this is acceptable because there are no users and no pre-existing v11 backups
-        // (ADR 0015 §"No data migration"), and a v11 backup would need the v11→v12
-        // migration on open regardless.
-        if let Some(fp) = db_meta
-            && config.embed_dim != fp.dim
+        // A backup that recorded an identity, at any schema version, must agree on dimension;
+        // one with none has nothing to compare (#1049: read where it lies, before migrating).
+        let recorded = super::read_recorded_embedding(&config.path).map_err(cleanup)?;
+        if let Some(stored) = recorded.dim()
+            && config.embed_dim != stored
         {
-            let _ = std::fs::remove_file(&config.path);
-            return Err(MemoryError::EmbeddingDimension {
+            return Err(cleanup(MemoryError::EmbeddingDimension {
                 expected: config.embed_dim,
-                actual: fp.dim,
-            });
+                actual: stored,
+            }));
         }
 
         Self::open_from_config(config, None).inspect_err(|_| {

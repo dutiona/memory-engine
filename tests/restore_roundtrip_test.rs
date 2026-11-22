@@ -505,3 +505,149 @@ async fn a_snapshot_with_a_dangling_tombstone_is_refused() {
         assert!(!target.exists(), "nothing written for {stone}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// #1049: a backup from before schema v15 restores and migrates
+// ---------------------------------------------------------------------------
+
+/// A `dump_state(Sqlite)` backup of a store stamped `mock/test/4`, rolled back by raw SQL to
+/// `version` (18 keeps the current layout): 14 (no served columns), 13 (also no `fact_vectors`), 12 (the registry folded
+/// back into the `embedding_meta` config value). `waiting` makes a store whose one fact waits
+/// for its vector instead (no identity, only `embed_dim`).
+async fn older_backup(dir: &std::path::Path, version: u32, waiting: bool) -> std::path::PathBuf {
+    let source = dir.join(format!("source-{version}-{waiting}.db"));
+    let mut engine = MemoryEngine::builder(DIM).path(&source).build().unwrap();
+    let request = AddFactRequest {
+        content: "an older fact".into(),
+        fact_type: FactType::Semantic,
+        source_event_id: None,
+        scope: None,
+        opts: None,
+    };
+    if waiting {
+        engine.add_fact_deferred(&request).await.unwrap();
+    } else {
+        engine
+            .add_fact(
+                &request,
+                std::sync::Arc::new(FakeEmbed) as std::sync::Arc<dyn EmbeddingProvider>,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    engine.close().await.unwrap();
+    let mut engine = MemoryEngine::builder(DIM).path(&source).build().unwrap();
+    let backup = dir.join(format!("backup-{version}-{waiting}.db"));
+    engine
+        .dump_state(&DumpFormat::Sqlite(backup.clone()))
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let conn = rusqlite::Connection::open(&backup).unwrap();
+    if version <= 14 {
+        conn.execute_batch(
+            "ALTER TABLE embedding_spaces DROP COLUMN artifact_sha256;
+             ALTER TABLE embedding_spaces DROP COLUMN pooling;
+             ALTER TABLE embedding_spaces DROP COLUMN normalization;
+             ALTER TABLE embedding_spaces DROP COLUMN max_input_tokens;",
+        )
+        .unwrap();
+    }
+    if version <= 13 {
+        conn.execute_batch("DROP TABLE fact_vectors;").unwrap();
+    }
+    if version == 12 {
+        let meta: Option<String> = conn
+            .query_row(
+                "SELECT json_object('model', model, 'provider', provider, 'dim', dim,
+                        'matryoshka_base_dim', matryoshka_base_dim, 'element_type', element_type)
+                   FROM embedding_spaces WHERE status = 'active'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(meta) = meta {
+            conn.execute(
+                "INSERT INTO config (key, value) VALUES ('embedding_meta', ?1)",
+                [meta],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("DROP TABLE embedding_spaces;").unwrap();
+    }
+    conn.execute(
+        "UPDATE config SET value = ?1 WHERE key = 'schema_version'",
+        [version.to_string()],
+    )
+    .unwrap();
+    drop(conn);
+    backup
+}
+
+#[tokio::test]
+async fn restore_sqlite_migrates_an_older_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    for version in [14, 13, 12] {
+        let backup = older_backup(dir.path(), version, false).await;
+        let target = dir.path().join(format!("restored-{version}.db"));
+        let mut restored =
+            MemoryEngine::restore_sqlite(&backup, &EngineConfig::new(target.clone(), DIM))
+                .unwrap_or_else(|e| panic!("v{version}: {e}"));
+        assert_eq!(
+            restored.statistics().await.unwrap().facts.total,
+            1,
+            "v{version}"
+        );
+        restored.close().await.unwrap();
+        assert_eq!(
+            memory_engine::read_recorded_embedding(&target).unwrap(),
+            memory_engine::RecordedEmbedding::Identity(EmbeddingFingerprint::new(
+                "mock", "test", 4
+            )),
+            "v{version}"
+        );
+        let version_now: String = rusqlite::Connection::open(&target)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM config WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            version_now,
+            memory_engine::CURRENT_SCHEMA_VERSION.to_string(),
+            "v{version}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn restore_sqlite_refuses_an_older_backup_of_another_dimension() {
+    let dir = tempfile::tempdir().unwrap();
+    for (version, waiting) in [(14, false), (12, false), (18, true)] {
+        let backup = older_backup(dir.path(), version, waiting).await;
+        let target = dir.path().join(format!("restored-{version}-{waiting}.db"));
+        let err = MemoryEngine::restore_sqlite(&backup, &EngineConfig::new(target.clone(), 8))
+            .expect_err("another dimension");
+        assert!(
+            matches!(
+                err,
+                memory_engine::MemoryError::EmbeddingDimension {
+                    expected: 8,
+                    actual: 4
+                }
+            ),
+            "v{version} waiting={waiting}: {err:?}"
+        );
+        for suffix in ["", "-wal", "-shm"] {
+            let mut leftover = target.as_os_str().to_owned();
+            leftover.push(suffix);
+            assert!(
+                !std::path::Path::new(&leftover).exists(),
+                "left behind: {leftover:?}"
+            );
+        }
+    }
+}

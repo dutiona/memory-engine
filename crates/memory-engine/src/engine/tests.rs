@@ -6424,9 +6424,19 @@ pub(super) async fn older_store(dir: &std::path::Path, fp: &EmbeddingFingerprint
     db
 }
 
-/// The store's bytes (the database and its `-wal`, absent read as empty) and its
+/// The SHA-256 of the store's database and of its `-wal` (absent read as empty), and its
 /// `schema_version`: what a refused open must leave unchanged (#1065).
-pub(super) fn store_state(db: &std::path::Path) -> (Vec<u8>, Vec<u8>, String) {
+pub(super) fn store_state(db: &std::path::Path) -> (String, String, String) {
+    use sha2::Digest as _;
+    let hex = |bytes: Vec<u8>| {
+        sha2::Sha256::digest(bytes)
+            .iter()
+            .fold(String::new(), |mut out, b| {
+                use std::fmt::Write as _;
+                let _ = write!(out, "{b:02x}");
+                out
+            })
+    };
     let mut wal = db.as_os_str().to_owned();
     wal.push("-wal");
     let version =
@@ -6439,8 +6449,8 @@ pub(super) fn store_state(db: &std::path::Path) -> (Vec<u8>, Vec<u8>, String) {
             )
             .unwrap();
     (
-        std::fs::read(db).unwrap(),
-        std::fs::read(PathBuf::from(wal)).unwrap_or_default(),
+        hex(std::fs::read(db).unwrap()),
+        hex(std::fs::read(PathBuf::from(wal)).unwrap_or_default()),
         version,
     )
 }
@@ -6460,4 +6470,68 @@ async fn read_recorded_embedding_never_writes() {
         crate::read_recorded_embedding(&dir.path().join("missing.db")),
         Err(MemoryError::NotFound(_))
     ));
+}
+
+#[tokio::test]
+async fn an_open_at_another_dimension_never_migrates_an_older_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = older_store(dir.path(), &EmbeddingFingerprint::new("m", "p", DIM)).await;
+    let before = store_state(&db);
+    let err = MemoryEngine::builder(8)
+        .path(&db)
+        .build()
+        .expect_err("another dimension");
+    assert!(
+        matches!(
+            err,
+            MemoryError::Migration(MigrationError::EmbedDimMismatch {
+                stored: DIM,
+                requested: 8
+            })
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        store_state(&db),
+        before,
+        "the refused open changed the store"
+    );
+}
+
+#[tokio::test]
+async fn an_all_waiting_store_refuses_another_dimension() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("waiting.db");
+    let mut engine = MemoryEngine::builder(DIM).path(&db).build().unwrap();
+    engine
+        .add_fact_deferred(&AddFactRequest {
+            content: "waits for its vector".into(),
+            fact_type: FactType::Semantic,
+            source_event_id: None,
+            scope: None,
+            opts: None,
+        })
+        .await
+        .unwrap();
+    engine.close().await.unwrap();
+    let before = store_state(&db);
+    let err = MemoryEngine::builder(8)
+        .path(&db)
+        .build()
+        .expect_err("another dimension");
+    assert!(
+        matches!(
+            err,
+            MemoryError::Migration(MigrationError::EmbedDimMismatch {
+                stored: DIM,
+                requested: 8
+            })
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        store_state(&db),
+        before,
+        "the refused open changed the store"
+    );
 }

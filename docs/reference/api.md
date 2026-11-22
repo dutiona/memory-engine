@@ -22,7 +22,7 @@ This page summarizes the public API surface of the `memory-engine` crate.
 | `open_memory`         | `(embed_dim: usize) -> Result<Self>`                       | Open an in-memory engine (testing).                                                                                            |
 | `restore_json`        | `(snapshot: &Path, config: &EngineConfig) -> Result<Self>` | Restore from a JSON snapshot into a new file-backed engine. Auto-detects gzip/zstd compression. Config path must not exist.    |
 | `restore_json_memory` | `(snapshot: &Path) -> Result<Self>`                        | Restore from a JSON snapshot into a new in-memory engine. Auto-detects compression.                                            |
-| `restore_sqlite`      | `(backup: &Path, config: &EngineConfig) -> Result<Self>`   | Restore from a `dump_sqlite()` backup into a new file-backed engine. Only accepts clean VACUUM INTO backups (no live WAL DBs). |
+| `restore_sqlite`      | `(backup: &Path, config: &EngineConfig) -> Result<Self>`   | Restore from a `dump_sqlite()` backup of any schema version into a new file-backed engine, migrated on open. Only accepts clean VACUUM INTO backups (no live WAL DBs). |
 | `embed_dim`           | `(&self) -> usize`                                         | Return the configured embedding dimension.                                                                                     |
 | `is_file_backed`      | `(&self) -> bool`                                          | Whether the engine uses a file (vs in-memory).                                                                                 |
 
