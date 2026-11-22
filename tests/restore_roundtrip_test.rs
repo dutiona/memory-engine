@@ -242,6 +242,32 @@ async fn restore_sqlite_probe_failure_leaves_no_sidecars() {
     }
 }
 
+/// A backup that passes every pre-open check but fails to migrate on open leaves no target
+/// and no sidecar either, like every earlier refusal.
+#[tokio::test]
+async fn restore_sqlite_open_failure_leaves_no_sidecars() {
+    let dir = tempfile::tempdir().unwrap();
+    let backup_path = dir.path().join("hollow-v10.db");
+    rusqlite::Connection::open(&backup_path)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO config VALUES ('schema_version', '10');",
+        )
+        .unwrap();
+
+    let config = EngineConfig::new(dir.path().join("restored.db"), DIM);
+    let err = MemoryEngine::restore_sqlite(&backup_path, &config).unwrap_err();
+    assert!(
+        err.to_string().contains("no such table"),
+        "refused by the migration on open: {err}"
+    );
+    for suffix in ["", "-wal", "-shm"] {
+        let leftover = dir.path().join(format!("restored.db{suffix}"));
+        assert!(!leftover.exists(), "left behind: {}", leftover.display());
+    }
+}
+
 #[tokio::test]
 async fn restore_json_fails_if_target_exists() {
     let engine = make_engine().await;

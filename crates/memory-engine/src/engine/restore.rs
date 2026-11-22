@@ -198,9 +198,7 @@ impl MemoryEngine {
             }));
         }
 
-        Self::open_from_config(config, None).inspect_err(|_| {
-            let _ = std::fs::remove_file(&config.path);
-        })
+        Self::open_from_config(config, None).map_err(cleanup)
     }
 }
 
