@@ -109,7 +109,7 @@ fn the_denylist_skips_short_literals_and_placeholders() {
 // ── JSON ─────────────────────────────────────────────────────────────────────
 
 #[test]
-fn scrub_json_redacts_leaves_and_keeps_keys_and_non_strings() {
+fn scrub_json_redacts_leaves_and_keeps_clean_keys_and_non_strings() {
     let mut v = json!({
         "description": format!("leaked {} here", aws()),
         "nested": { "note": format!("token {}", ghp()) },
