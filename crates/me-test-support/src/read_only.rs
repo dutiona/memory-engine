@@ -1,7 +1,7 @@
 //! Cross-cutting read-only-rejection contract.
 
 use me_types::error::MemoryError;
-use me_types::types::lifecycle::DeliveryWrite;
+use me_types::types::lifecycle::{BatchMode, DeliveryWrite};
 
 use super::factory::ConformanceBackend;
 use super::fixtures::{checkpoint, new_event, new_fact, new_summary};
@@ -63,6 +63,16 @@ pub async fn write_rejected_reads_succeed<F: ConformanceBackend>(f: &F) {
     assert_ro!(
         be.end_idle_segments(chrono::Utc::now(), chrono::Utc::now()),
         "Lifecycle::end_idle_segments"
+    );
+    assert_ro!(
+        be.record_deliveries(
+            "laptop",
+            chrono::Utc::now(),
+            Vec::new(),
+            [0; 32],
+            BatchMode::DryRun
+        ),
+        "Lifecycle::record_deliveries"
     );
 
     // A representative read still works on a read-only backend.

@@ -1298,7 +1298,7 @@ mod tests {
             &UpcasterRegistry::new(),
             DIM,
             &key,
-            DeliveryWrite::Capture(Box::new(capture)),
+            &DeliveryWrite::Capture(Box::new(capture)),
         )
         .unwrap();
     }

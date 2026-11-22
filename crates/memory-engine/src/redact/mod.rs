@@ -7,7 +7,7 @@
 //! leave a remainder the next one catches.
 //!
 //! Detectors, in priority order (an earlier one wins an overlap):
-//! 0. the author's denylist (bootstrap's input only);
+//! 0. the author's denylist (the inputs of bootstrap and of the backfill route, #1026);
 //! 1. `machine-token`: `me_` and 32 base62 characters, with no `[0-9A-Za-z_]` on either side
 //!    (ADR-0020 §4);
 //! 2. provider prefixes: a known token prefix at a token boundary, 20 bytes or more in all
@@ -26,7 +26,7 @@
 //! A new write method must scrub its content and join the gated list of
 //! `tests/redaction_write_paths.rs`, whose tripwire fails until it does.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::types::OutcomeClass;
@@ -804,7 +804,7 @@ fn key_has_context(key: &str) -> bool {
     key[key.len() - word_len..].split('_').any(is_key)
 }
 
-fn scrub_member(key: &str, value: &mut Value, denylist: &[String]) -> Result<u64> {
+fn scrub_member(key: &str, value: &mut Value, denylist: &[String], keys: Keys) -> Result<u64> {
     if let Value::String(s) = value
         && s.len() >= HEX_SECRET_MIN_LEN
         && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -813,12 +813,42 @@ fn scrub_member(key: &str, value: &mut Value, denylist: &[String]) -> Result<u64
         "[REDACTED:hex-secret]".clone_into(s);
         return Ok(1);
     }
-    scrub_json(value, denylist)
+    scrub_tree(value, denylist, keys)
 }
 
-/// Scrub every string leaf of `value` in place; keys and non-strings are kept. A hex leaf whose
-/// key is a context word is redacted too. Returns the number of secrets removed.
+/// Whether a JSON tree's object keys are content to scrub, or a schema the core wrote.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keys {
+    Scrub,
+    Keep,
+}
+
+/// Scrub every string leaf and every object key of `value` in place, by the same rules and
+/// `denylist`; non-strings are kept. A hex leaf whose key is a context word is redacted too.
+/// Keys that scrub to one text keep every member (see [`scrub_members`]). Returns the number of
+/// secrets removed.
 pub(crate) fn scrub_json(value: &mut Value, denylist: &[String]) -> Result<u64> {
+    scrub_tree(value, denylist, Keys::Scrub)
+}
+
+/// As [`scrub_json`], but the top-level member names in `schema`, which the core writes itself
+/// (a memory file's metadata names), keep their key: a denylist literal must never rename them.
+/// Their values are scrubbed, and every other key, nested ones included, is the caller's and is
+/// redacted.
+pub(crate) fn scrub_metadata(
+    value: &mut Value,
+    denylist: &[String],
+    schema: &[&str],
+) -> Result<u64> {
+    let Value::Object(map) = value else {
+        return scrub_json(value, denylist);
+    };
+    scrub_members(map, denylist, schema, |k, v| {
+        scrub_member(k, v, denylist, Keys::Scrub)
+    })
+}
+
+fn scrub_tree(value: &mut Value, denylist: &[String], keys: Keys) -> Result<u64> {
     match value {
         Value::String(s) => {
             let (clean, n) = scrub_with(s, denylist)?;
@@ -827,13 +857,54 @@ pub(crate) fn scrub_json(value: &mut Value, denylist: &[String]) -> Result<u64> 
             }
             Ok(n)
         }
-        Value::Array(items) => items.iter_mut().map(|v| scrub_json(v, denylist)).sum(),
+        Value::Array(items) => items
+            .iter_mut()
+            .map(|v| scrub_tree(v, denylist, keys))
+            .sum(),
+        Value::Object(map) if keys == Keys::Scrub => scrub_members(map, denylist, &[], |k, v| {
+            scrub_member(k, v, denylist, keys)
+        }),
         Value::Object(map) => map
             .iter_mut()
-            .map(|(k, v)| scrub_member(k, v, denylist))
+            .map(|(k, v)| scrub_member(k, v, denylist, keys))
             .sum(),
         _ => Ok(0),
     }
+}
+
+/// Rebuild `map` with each value scrubbed by `member`, given its original key, and each key but
+/// those in `kept` scrubbed like a string with `key_denylist`. A key that scrubs to one already
+/// taken gets the first free `~1`, `~2`, … suffix, in key order, so no member is lost. Returns
+/// the findings.
+fn scrub_members(
+    map: &mut Map<String, Value>,
+    key_denylist: &[String],
+    kept: &[&str],
+    mut member: impl FnMut(&str, &mut Value) -> Result<u64>,
+) -> Result<u64> {
+    let mut found = 0;
+    let mut scrubbed = Map::new();
+    for (key, mut value) in std::mem::take(map) {
+        found += member(&key, &mut value)?;
+        let (clean, n) = if kept.contains(&key.as_str()) {
+            (key, 0)
+        } else {
+            scrub_with(&key, key_denylist)?
+        };
+        found += n;
+        let clean = if scrubbed.contains_key(&clean) {
+            // The map holds fewer members than this range has suffixes, so one is free.
+            (1..=scrubbed.len() + 1)
+                .map(|i| format!("{clean}~{i}"))
+                .find(|k| !scrubbed.contains_key(k))
+                .expect("one of len + 1 suffixes is free")
+        } else {
+            clean
+        };
+        scrubbed.insert(clean, value);
+    }
+    *map = scrubbed;
+    Ok(found)
 }
 
 const FACT_NAMES: &[&str] = &["root", "dev_root", "upstream_url", "origin_url", "branch"];
@@ -871,21 +942,60 @@ fn scrub_provenance_value(value: &mut Value) -> u64 {
     }
 }
 
+/// The members of a captured event's payload that are identifiers, not content: validated
+/// names and keys, which get the machine-token rule alone, as the provenance block does. Any
+/// other rule could change one (a 20-character machine name reads as high-entropy), and the
+/// author's denylist holds host names, which are machine names: either would hide a row from
+/// `erase --machine` (#1026). An identifier that holds a machine token is refused upstream.
+const IDENTIFIER_MEMBERS: &[&str] = &[
+    "machine",
+    "event_id",
+    "time",
+    "seq",
+    "harness",
+    "client_version",
+    "harness_version",
+    "kind",
+    "actor",
+    "agent_id",
+    "agent_type",
+];
+
 /// Scrub an event payload: its genuine capture context (`PROVENANCE_KEY`, in MC-9's exact
-/// shape) gets the machine-token rule only, everything else every rule.
+/// shape) gets the machine-token rule only, everything else every rule, the keys of nested
+/// objects included. Its member names are the payload's schema and get every rule too.
 pub(crate) fn scrub_payload(payload: &mut Value) -> Result<u64> {
+    scrub_event_payload(payload, &[], &[], Keys::Scrub)
+}
+
+/// Scrub a captured event's payload, live or imported (#1025, #1026): as [`scrub_payload`], but
+/// its identifier members, validated before they get here, get the machine-token rule only, and
+/// every other member also loses the author's `denylist`. Its member names are the payload's
+/// schema: they get every rule but the `denylist`, which a schema name could equal. The keys of
+/// its nested objects are kept: a tool input's own keys were scrubbed by [`capture_tool_use`],
+/// and a stub's `sensitive_path` is the core's.
+pub(crate) fn scrub_capture_payload(payload: &mut Value, denylist: &[String]) -> Result<u64> {
+    scrub_event_payload(payload, IDENTIFIER_MEMBERS, denylist, Keys::Keep)
+}
+
+fn scrub_event_payload(
+    payload: &mut Value,
+    identifiers: &[&str],
+    denylist: &[String],
+    nested: Keys,
+) -> Result<u64> {
     let Value::Object(map) = payload else {
-        return scrub_json(payload, &[]);
+        return scrub_tree(payload, denylist, nested);
     };
-    let mut found = 0;
-    for (k, v) in map.iter_mut() {
-        found += if k == PROVENANCE_KEY && is_provenance(v) {
-            scrub_provenance_value(v)
-        } else {
-            scrub_member(k, v, &[])?
-        };
-    }
-    Ok(found)
+    scrub_members(map, &[], &[], |k, v| {
+        Ok(
+            if (k == PROVENANCE_KEY && is_provenance(v)) || identifiers.contains(&k) {
+                scrub_provenance_value(v)
+            } else {
+                scrub_member(k, v, denylist, nested)?
+            },
+        )
+    })
 }
 
 // ── The capture cut ──────────────────────────────────────────────────────────
@@ -988,17 +1098,18 @@ pub(crate) struct ToolCapture {
 /// result are scrubbed, then cut to [`CAPTURE_CAP`]. An `Other` outcome text is scrubbed and cut
 /// on both branches. A field over the write limit keeps an excerpt of its first window, scrubbed
 /// and cut the same way: the rest is never scanned, an input that large never deduplicates,
-/// and a result that large is never quoted.
+/// and a result that large is never quoted. Every text also loses the author's `denylist`.
 pub(crate) fn capture_tool_use(
     args: &Value,
     result: Option<&str>,
     outcome: OutcomeClass,
     touched_paths: &[String],
     cwd: Option<&str>,
+    denylist: &[String],
 ) -> Result<ToolCapture> {
     let (outcome, outcome_found) = match outcome {
         OutcomeClass::Other(text) => {
-            let (text, found) = capture_text(&text)?;
+            let (text, found) = capture_text(&text, denylist)?;
             (OutcomeClass::Other(text), found)
         }
         named => (named, 0),
@@ -1010,7 +1121,7 @@ pub(crate) fn capture_tool_use(
             })
     };
     if let Some(token) = touched_paths.iter().find(|t| sensitive(t)) {
-        let (token, found) = scrub_with(token, &[])?;
+        let (token, found) = scrub_with(token, denylist)?;
         return Ok(ToolCapture {
             args: serde_json::json!({ "sensitive_path": settled_cut(&token)? }),
             result: None,
@@ -1030,7 +1141,7 @@ pub(crate) fn capture_tool_use(
                 &std::collections::hash_map::RandomState::new(),
                 std::time::SystemTime::now(),
             );
-            let (clean, found) = scrub_with(window(&args.to_string()), &[])?;
+            let (clean, found) = scrub_with(window(&args.to_string()), denylist)?;
             (
                 Value::String(settled_cut(&clean)?),
                 format!("oversized\0{nonce}"),
@@ -1038,18 +1149,18 @@ pub(crate) fn capture_tool_use(
             )
         } else {
             let mut args = args.clone();
-            let found = scrub_json(&mut args, &[])?;
+            let found = scrub_json(&mut args, denylist)?;
             let hash_input = args.to_string();
             (cut_json(args, &hash_input)?, hash_input, found)
         };
     let (result, full_result, result_found) = match result {
         None => (None, None, 0),
         Some(r) if crate::limits::check_str_size(r, "tool result").is_err() => {
-            let (clean, found) = scrub_with(window(r), &[])?;
+            let (clean, found) = scrub_with(window(r), denylist)?;
             (Some(settled_cut(&clean)?), None, found)
         }
         Some(r) => {
-            let (clean, found) = scrub_with(r, &[])?;
+            let (clean, found) = scrub_with(r, denylist)?;
             (Some(settled_cut(&clean)?), Some(clean), found)
         }
     };
@@ -1067,8 +1178,8 @@ pub(crate) fn capture_tool_use(
 
 /// A tool text as stored: scrubbed, then cut; over the write limit, only its first window is
 /// scanned. Returns the text and its findings.
-fn capture_text(text: &str) -> Result<(String, u64)> {
-    let (clean, found) = scrub_with(window(text), &[])?;
+fn capture_text(text: &str, denylist: &[String]) -> Result<(String, u64)> {
+    let (clean, found) = scrub_with(window(text), denylist)?;
     Ok((settled_cut(&clean)?, found))
 }
 

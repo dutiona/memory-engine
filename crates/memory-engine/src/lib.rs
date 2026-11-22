@@ -180,7 +180,7 @@ pub use engine::embed_queue::{Backoff, Settled, read_embed_queue_status};
 pub use engine::lifecycle::read_quarantined;
 pub use engine::redaction_counts::read_redaction_counts;
 pub use engine::{EngineConfig, MemoryEngine};
-pub use me_types::limits::LIFECYCLE_BODY_BYTES;
+pub use me_types::limits::{BACKFILL_BODY_BYTES, LIFECYCLE_BODY_BYTES};
 pub use store_lock::{StoreLock, StoreLockError};
 // Explicit re-export of the full `error` public surface (the umbrella
 // `MemoryError` + the `Result` alias + each typed sub-enum). Enumerated rather

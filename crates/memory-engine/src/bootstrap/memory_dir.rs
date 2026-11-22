@@ -29,6 +29,7 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::traits::{EmbeddingProvider, PersistenceClassifier};
+use crate::types::lifecycle::MemoryItem;
 use crate::types::{ClassifierInput, FactType, NewFact};
 
 use super::BootstrapConfig;
@@ -282,11 +283,22 @@ pub fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<(
     Ok(())
 }
 
+/// The metadata names [`build_metadata`] writes: the importer's schema, which redaction never
+/// renames (ADR-0009 D5's queries read them).
+pub const METADATA_NAMES: &[&str] = &[
+    "source",
+    "file",
+    "name",
+    "description",
+    "memory_type",
+    "route",
+];
+
 /// Build the provenance metadata object for a memory-dir fact.
-fn build_metadata(path: &Path, parsed: &ParsedMemory, route_kb: bool) -> serde_json::Value {
+fn build_metadata(file: &str, parsed: &ParsedMemory, route_kb: bool) -> serde_json::Value {
     let mut metadata = serde_json::json!({
         "source": "memory-dir",
-        "file": path.file_name().and_then(|f| f.to_str()).unwrap_or_default(),
+        "file": file,
     });
     if let Some(name) = &parsed.name {
         metadata["name"] = serde_json::Value::String(name.clone());
@@ -301,6 +313,51 @@ fn build_metadata(path: &Path, parsed: &ParsedMemory, route_kb: bool) -> serde_j
         metadata["route"] = serde_json::Value::String("knowledge-base".to_owned());
     }
     metadata
+}
+
+/// Read one native memory file, named `name`, from its text `raw`, without redacting or embedding.
+///
+/// The memory is the file's body, routed by its memory type (`feedback` Procedural, `project`
+/// Episodic, any other Semantic, `reference` tagged `route: knowledge-base`), dated by its
+/// frontmatter, else its file name, else `fallback`, and described by its metadata. `None` for
+/// an empty body, such as a frontmatter-only stub.
+///
+/// # Examples
+///
+/// ```
+/// use chrono::{TimeZone, Utc};
+/// use memory_engine::bootstrap::memory_item;
+/// use memory_engine::types::FactType;
+///
+/// let mtime = Utc.with_ymd_and_hms(2026, 3, 1, 0, 0, 0).unwrap();
+/// let raw = "---\nname: tests-first\nmetadata:\n  type: feedback\n---\nWrite the test first.\n";
+/// let item = memory_item("feedback_2026_02_14.md", raw, mtime).unwrap();
+/// assert_eq!(item.fact_type, FactType::Procedural);
+/// assert_eq!(item.time, Utc.with_ymd_and_hms(2026, 2, 14, 0, 0, 0).unwrap());
+/// assert_eq!(item.metadata["file"], "feedback_2026_02_14.md");
+/// assert!(memory_item("stub.md", "---\nname: stub\n---\n", mtime).is_none());
+/// ```
+#[must_use]
+pub fn memory_item(name: &str, raw: &str, fallback: DateTime<Utc>) -> Option<MemoryItem> {
+    let parsed = parse_memory_file(raw);
+    if parsed.body.is_empty() {
+        return None;
+    }
+    // Backdate priority: frontmatter date > filename-encoded date > the caller's fallback (the
+    // file mtime). Native memory files carry no frontmatter date but encode the authored date
+    // in the filename; mtime tracks in-place rewrites (≈ import time), so it comes last.
+    let time = parsed
+        .frontmatter_date
+        .or_else(|| filename_date(Path::new(name)))
+        .unwrap_or(fallback);
+    let (fact_type, route_kb) = classify_memory_type(parsed.mem_type.as_deref());
+    Some(MemoryItem {
+        metadata: build_metadata(name, &parsed, route_kb),
+        text: parsed.body,
+        fact_type,
+        importance: MEMORY_IMPORTANCE,
+        time,
+    })
 }
 
 /// Read → parse → redact → **embed** one `.md` memory file.
@@ -330,12 +387,18 @@ pub fn prepare_memory_file(
             return Ok(None);
         }
     };
-    let parsed = parse_memory_file(&raw);
+    let name = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or_default();
+    // mtime is the last historical signal before falling back to now(), reached only when the
+    // metadata is unreadable (effectively never).
+    let fallback = file_mtime(path).unwrap_or_else(Utc::now);
     // Files with an empty body (e.g. a frontmatter-only stub) carry no fact.
-    if parsed.body.is_empty() {
+    let Some(item) = memory_item(name, &raw, fallback) else {
         return Ok(None);
-    }
-    match prepare_one_memory(embedder, config, classifier, scope_id, path, &parsed) {
+    };
+    match prepare_one_memory(embedder, config, classifier, scope_id, item) {
         Ok(prepared) => Ok(Some(prepared)),
         // A text that does not settle is skipped, as the session path skips one (#1024).
         Err(MemoryError::Conflict(ConflictError::Redaction(_))) => {
@@ -346,7 +409,7 @@ pub fn prepare_memory_file(
     }
 }
 
-/// Build one `NewFact` from a parsed `.md` memory file — redact, backdate, embed.
+/// Build one `NewFact` from a read `.md` memory file — redact, embed, pin.
 ///
 /// The pure-compute half of the former `import_one_memory`; the DB insert
 /// (dedup-with-reinforce) and the report accounting moved to the caller (facade),
@@ -359,38 +422,36 @@ fn prepare_one_memory(
     config: &BootstrapConfig,
     classifier: Option<&dyn PersistenceClassifier>,
     scope_id: i64,
-    path: &Path,
-    parsed: &ParsedMemory,
+    item: MemoryItem,
 ) -> Result<(NewFact, usize)> {
-    // Backdate priority: frontmatter date > filename-encoded date > file mtime
-    // > now(). Native memory files carry no frontmatter date but encode the
-    // authored date in the filename; mtime tracks in-place rewrites (≈ import
-    // time), so it is the last historical signal before falling back to now()
-    // (reached only when none of the above is available — effectively never).
-    let timestamp = parsed
-        .frontmatter_date
-        .or_else(|| filename_date(path))
-        .or_else(|| file_mtime(path))
-        .unwrap_or_else(Utc::now);
+    let MemoryItem {
+        text,
+        fact_type,
+        importance,
+        time: timestamp,
+        mut metadata,
+    } = item;
 
     // Redaction gate (#45/#51): scrub BEFORE embed/store. ME copy only — the
     // source .md is never modified. The finding count is held in `redactions`
     // and only added to the report on the *created* branch below, so the audit
     // counter is idempotent (a reinforced re-run re-scrubs but does not re-count).
     let mut redactions = 0usize;
-    let (content, found) = redact::scrub_with(&parsed.body, &config.denylist)?;
+    let (content, found) = redact::scrub_with(&text, &config.denylist)?;
     redactions += usize::try_from(found).unwrap_or(usize::MAX);
 
-    let (fact_type, route_kb) = classify_memory_type(parsed.mem_type.as_deref());
     let embedding = embedder.embed(&content)?;
 
     // Redact the metadata too: the frontmatter `name`/`description` are author
     // free-text and can carry a secret (e.g. a memory quoting a leaked token).
     // Scrub the whole metadata object so the stored row holds no unredacted
     // secret anywhere, not just in the body content.
-    let mut metadata = build_metadata(path, parsed, route_kb);
-    redactions +=
-        usize::try_from(redact::scrub_json(&mut metadata, &config.denylist)?).unwrap_or(usize::MAX);
+    redactions += usize::try_from(redact::scrub_metadata(
+        &mut metadata,
+        &config.denylist,
+        METADATA_NAMES,
+    )?)
+    .unwrap_or(usize::MAX);
 
     // Classifiers read only content/fact_type/base_importance/metadata — build the
     // owned `ClassifierInput` view, not a 20-field synthetic `Fact` cloning the
@@ -399,7 +460,7 @@ fn prepare_one_memory(
         let input = ClassifierInput {
             content: content.clone(),
             fact_type,
-            base_importance: MEMORY_IMPORTANCE,
+            base_importance: importance,
             metadata: metadata.clone(),
         };
         c.should_pin(&input)
@@ -418,7 +479,7 @@ fn prepare_one_memory(
         t_valid: None,
         t_invalid: None,
         source_event_id: None,
-        base_importance: MEMORY_IMPORTANCE,
+        base_importance: importance,
         access_count: 0,
         last_accessed: timestamp,
         metadata,
@@ -566,6 +627,60 @@ mod tests {
         let raw = "---\nvalid_to: null\ndate: null\n---\nbody\n";
         let p = parse_memory_file(raw);
         assert!(p.frontmatter_date.is_none());
+    }
+
+    /// The pure part of the import: the routing table, the date priority (frontmatter, then the
+    /// file name, then the fallback), the metadata members, and nothing for an empty body.
+    #[test]
+    fn memory_item_types_dates_and_describes() {
+        use chrono::TimeZone;
+        let day = |m, d| Utc.with_ymd_and_hms(2026, m, d, 0, 0, 0).unwrap();
+        let fallback = Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap();
+        let file = |kind: &str, extra: &str| {
+            format!("---\nname: n\ndescription: d\n{extra}metadata:\n  type: {kind}\n---\n\nbody\n")
+        };
+        for (kind, fact_type, route) in [
+            ("user", FactType::Semantic, false),
+            ("feedback", FactType::Procedural, false),
+            ("project", FactType::Episodic, false),
+            ("reference", FactType::Semantic, true),
+            ("other", FactType::Semantic, false),
+        ] {
+            let item = memory_item("m.md", &file(kind, ""), fallback).unwrap();
+            assert_eq!(item.fact_type, fact_type, "{kind}");
+            assert_eq!(item.text, "body", "{kind}");
+            assert!((item.importance - MEMORY_IMPORTANCE).abs() < f64::EPSILON);
+            let mut want = serde_json::json!({
+                "source": "memory-dir", "file": "m.md", "name": "n", "description": "d",
+                "memory_type": kind,
+            });
+            if route {
+                want["route"] = "knowledge-base".into();
+            }
+            assert_eq!(item.metadata, want, "{kind}");
+        }
+
+        let dated = file("user", "created: 2026-02-01\n");
+        assert_eq!(
+            memory_item("note_2026_01_10.md", &dated, fallback)
+                .unwrap()
+                .time,
+            day(2, 1)
+        );
+        let undated = file("user", "");
+        assert_eq!(
+            memory_item("note_2026_01_10.md", &undated, fallback)
+                .unwrap()
+                .time,
+            day(1, 10)
+        );
+        assert_eq!(
+            memory_item("note.md", &undated, fallback).unwrap().time,
+            fallback
+        );
+
+        assert!(memory_item("e.md", "---\nname: e\n---\n", fallback).is_none());
+        assert!(memory_item("e.md", "  \n", fallback).is_none());
     }
 
     #[test]

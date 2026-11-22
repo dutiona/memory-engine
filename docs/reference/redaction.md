@@ -11,7 +11,7 @@ overlap.
 
 | Priority | Rule | Matches |
 |---|---|---|
-| 0 | `denylist` | A literal of 4 bytes or more from the author's denylist file (`ME_REDACT_DENYLIST_FILE`). Bootstrap only; the server applies signatures only. |
+| 0 | `denylist` | A literal of 4 bytes or more from the author's denylist file (`ME_REDACT_DENYLIST_FILE`). Bootstrap and the server's backfill uploads only; every other server path applies signatures only. |
 | 1 | `machine-token` | `me_` and exactly 32 base62 characters, with no `[0-9A-Za-z_]` on either side (ADR-0020 §4). `me_types::Fact` is untouched. |
 | 2 | provider prefixes | A prefix below at a token boundary, 20 bytes or more in all. |
 | 3 | `connection-string-password` | The password of a `user:pass@` URL authority. |
@@ -66,12 +66,20 @@ fact with a warning instead. Each scan is one pass plus binary searches, so its 
 Two memories that differ only by a redacted secret become the same text, so a forget's tombstone of one also keeps the
 other out.
 
+**JSON.** In metadata, tool inputs and event payloads, every string and every object key takes the same rules (the
+denylist included where the path applies it): a key is content too. Keys that redact to one text keep every member,
+the later ones in key order renamed `~1`, `~2`, …. A key the core writes itself is the record's schema and is never
+rewritten, only its value: an event payload's own member names (they take every rule but the denylist), a stub's
+`sensitive_path`, and a memory file's metadata names at its top level (`source`, `file`, `name`, `description`,
+`memory_type`, `route`); any other metadata key, nested ones included, is the caller's and is redacted. A tool input's
+own keys are scrubbed when the call is captured.
+
 ## Write paths
 
 Every `MemoryEngine` write method checks its raw size, then (after its open and writable checks, so `ReadOnly` still
 wins, #972) scrubs its content fields and stores the scrubbed copy: fact content and metadata, event payloads, forget
 and move records, forget reasons, checkpoint summaries and metadata, recorded embedder errors, tool activities,
-bootstrap's turns and facts, cycle deltas, consolidation summaries and captured lifecycle events. `tests/redaction_write_paths.rs` reads every
+bootstrap's turns and facts, cycle deltas, consolidation summaries, captured lifecycle events and backfill uploads. `tests/redaction_write_paths.rs` reads every
 public method of `crates/memory-engine/src/engine/` and fails until each is listed as gated, with its test, or exempt,
 with its reason. A new write method must scrub its content and join the gated list.
 
@@ -163,16 +171,45 @@ client's own session.
   ([Tool calls](#tool-calls)): a call touching a sensitive path is a stub, and a text over the 1 MiB write limit keeps an
   excerpt of its first 1 MiB.
 - **The payload.** It takes the event payload scrub: its `project` provenance block, when it has exactly the shape the
-  server writes, gets the machine-token rule only; every other member gets every rule, `cwd` included. A directory name
-  that looks high-entropy may therefore be over-redacted in the payload, which no key is derived from.
-- **Identifiers.** The event ID, the session ID and the agent ID are stored as sent, in columns, never redacted; one the
-  machine-token rule would change is refused with a 422, so no key and no column holds a token. The server's log names
+  server writes, and its identifier members (`machine`, `event_id`, `time`, `seq`, `harness`, `client_version`,
+  `harness_version`, `kind`, `actor`, `agent_id`, `agent_type`) get the machine-token rule only; every other member
+  gets every rule, `cwd` included. A directory name that looks high-entropy may therefore be over-redacted in the
+  payload, which no key is derived from.
+- **Identifiers.** The event ID, the session ID and the agent ID are stored as sent, in columns and in the payload,
+  never redacted; one the machine-token rule would change is refused with a 422, so no key and no column holds a token. The server's log names
   an event ID only after the machine-token rule too, on every path, so a token pasted into `ME-Event-Id` is not logged.
 - **Quarantine.** A body that does not parse was never redacted, so a quarantine record holds no byte of it: the
   machine, the event ID, the client time as sent, the time of receipt, the harness, the byte size, the SHA-256 and the
   parse error as a class with its line and column, never the parser's message. The server logs the same and no more.
 - **Counters.** Each captured event adds its findings to `redact_count` and each stub to `stub_count`, once its
   transaction has committed; a duplicate or a refusal counts nothing.
+
+## Backfill uploads
+
+`POST /backfill/uploads` ([MCP server](mcp-server.md#backfill-uploads)) imports a machine's copied history through
+`MemoryEngine::import_backfill`, gated like `record_lifecycle_event`. Its events take exactly the
+[captured events](#captured-events) rules, through the same code, with one difference: the **author denylist** applies
+too. The server reads `ME_REDACT_DENYLIST_FILE` once at start and refuses every upload, dry runs included, when it is
+unset or unreadable, so no dry run is reviewed under weaker redaction than its write would get.
+
+- **What the denylist reaches.** Every content member an upload stores: prompts, tool names, inputs, results and errors
+  (before the cut), final messages, summaries, `cwd`, the upload's source, a memory's body and its frontmatter
+  metadata, and a stub's path.
+- **What it never reaches.** Identifiers: `machine`, `event_id`, `time`, `seq`, `harness`, `client_version`,
+  `harness_version`, `kind`, `actor`, `agent_id`, `agent_type`, the session ID, and a memory's `metadata.machine`. The
+  denylist holds host names, which are machine names, and a redacted machine would hide a row from `erase --machine`.
+  They get the machine-token rule alone, in every event payload, never another rule (a 20-character machine name
+  reads as high-entropy), and one the machine-token rule would change is refused.
+- **The provenance block** keeps the machine-token rule alone, as for a live event: keys and ADR-0021's re-filing read
+  it, so a denylisted name inside a project path stays in the provenance and in the report's `project`.
+- **The report** holds no byte the store would not: its texts are the stored texts, its identifiers passed the
+  machine-token rule, and a refused item is counted by its reason only. Its `redaction` member counts the placeholders
+  of the stored texts by rule.
+- **Counters.** A committed upload adds its stored items' findings to `redact_count` and its stubs to `stub_count`; a
+  dry run, a duplicate and a refusal count nothing.
+
+A tombstone matches a text as stored, so a text forgotten under one denylist and re-imported under another is not
+blocked.
 
 ## Queries
 

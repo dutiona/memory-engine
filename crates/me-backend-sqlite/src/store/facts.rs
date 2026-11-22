@@ -285,6 +285,24 @@ impl<'a> FactStore<'a> {
                 actual: fact.embedding.len(),
             });
         }
+        match self.reinforce_twin(fact)? {
+            Some(id) => Ok(ImportOutcome::Reinforced(id)),
+            None if tombstones::blocks(self.conn, &fact.content)? => Ok(ImportOutcome::Blocked),
+            None => Ok(ImportOutcome::Created(
+                self.insert_row(fact, self.embed_dim)?,
+            )),
+        }
+    }
+
+    /// Reinforce the active fact with `fact`'s content in `fact`'s scope, if there is one, as
+    /// [`insert_or_reinforce`](Self::insert_or_reinforce) does; returns its id. Writes nothing
+    /// otherwise, and reads no tombstone.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MemoryError::Storage` on query or update failure, `Unavailable` when the store is
+    /// busy.
+    pub fn reinforce_twin(&self, fact: &NewFact) -> Result<Option<i64>> {
         let hash = content_hash(&fact.content);
         // content_hash is index-backed (idx_facts_hash); the content equality guard
         // rejects the astronomically-unlikely 128-bit hash collision.
@@ -298,42 +316,36 @@ impl<'a> FactStore<'a> {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(StorageError::backend)?;
-
-        match existing {
-            Some(id) => {
-                // to_rfc3339() emits a `+00:00` offset with AutoSi-padded (0/3/6/9-digit)
-                // fractions; `+` (0x2B) sorts before any digit, so a shorter fraction
-                // (chronologically <=) always sorts first — lexicographic == chronological,
-                // and SQL min/max give earliest/latest. (Same invariant the rest of the
-                // store relies on for t_created/t_valid string comparison.)
-                let t_created = fact.t_created.to_rfc3339();
-                let last_accessed = fact.last_accessed.to_rfc3339();
-                self.conn
-                    .execute(
-                        "UPDATE facts
-                     SET access_count = access_count + 1,
-                         t_created = min(t_created, ?1),
-                         last_accessed = max(last_accessed, ?2),
-                         is_pinned = max(is_pinned, ?3),
-                         importance = max(importance, ?4)
-                     WHERE id = ?5",
-                        params![
-                            t_created,
-                            last_accessed,
-                            i64::from(fact.is_pinned),
-                            fact.base_importance,
-                            id
-                        ],
-                    )
-                    .map_err(StorageError::backend)?;
-                Ok(ImportOutcome::Reinforced(id))
-            }
-            None if tombstones::blocks(self.conn, &fact.content)? => Ok(ImportOutcome::Blocked),
-            None => Ok(ImportOutcome::Created(
-                self.insert_row(fact, self.embed_dim)?,
-            )),
-        }
+            .map_err(classify)?;
+        let Some(id) = existing else {
+            return Ok(None);
+        };
+        // to_rfc3339() emits a `+00:00` offset with AutoSi-padded (0/3/6/9-digit)
+        // fractions; `+` (0x2B) sorts before any digit, so a shorter fraction
+        // (chronologically <=) always sorts first — lexicographic == chronological,
+        // and SQL min/max give earliest/latest. (Same invariant the rest of the
+        // store relies on for t_created/t_valid string comparison.)
+        let t_created = fact.t_created.to_rfc3339();
+        let last_accessed = fact.last_accessed.to_rfc3339();
+        self.conn
+            .execute(
+                "UPDATE facts
+                 SET access_count = access_count + 1,
+                     t_created = min(t_created, ?1),
+                     last_accessed = max(last_accessed, ?2),
+                     is_pinned = max(is_pinned, ?3),
+                     importance = max(importance, ?4)
+                 WHERE id = ?5",
+                params![
+                    t_created,
+                    last_accessed,
+                    i64::from(fact.is_pinned),
+                    fact.base_importance,
+                    id
+                ],
+            )
+            .map_err(classify)?;
+        Ok(Some(id))
     }
 
     /// Get a fact by id, including full embedding deserialization.

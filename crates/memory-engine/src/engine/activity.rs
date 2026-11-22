@@ -69,6 +69,7 @@ impl MemoryEngine {
             req.outcome_class.clone().unwrap_or_default(),
             &req.touched_paths,
             req.cwd.as_deref(),
+            &[],
         )?;
         let partly_scanned_result = req.result.is_some() && capture.full_result.is_none();
         if let ActivityFilterDecision::Promote(action) = &mut decision {

@@ -232,7 +232,7 @@ here.
   recorded state is deterministic. Every binding records its evidence: the raw remotes with userinfo removed, the
   roots, the rule applied, the rules version and the actor.
 - **First sight** *(owner: no automatic join of remote-less projects)*. Only write paths mint a project: the event
-  endpoint, `remember`, and a `set_level` that files a memory in the session's project *(owner, on
+  endpoint, the backfill upload (dutiona/memory-engine#1026), `remember`, and a `set_level` that files a memory in the session's project *(owner, on
   [dutiona/infra#37](https://github.com/dutiona/infra/issues/37#issuecomment-6959376409): an agent can rehome
   memories into a renamed or rehomed project that holds nothing yet)*. A unique binding per Locator serializes two
   first sights that arrive together.

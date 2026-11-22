@@ -150,6 +150,7 @@ fn router(server: MemoryMcpServer, tokens: TokenTable, allowed_hosts: Vec<String
     Router::new()
         .route_service("/mcp", mcp)
         .route("/lifecycle/events", post(crate::lifecycle::events))
+        .route("/backfill/uploads", post(crate::backfill::uploads))
         .with_state(state)
         // Last on purpose: a route added after this layer would be served unauthenticated.
         .layer(from_fn_with_state(Arc::new(tokens), require_machine))

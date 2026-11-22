@@ -3,6 +3,7 @@
 **Status:** Accepted
 **Date:** 2026-03-19
 **Phase:** 4a
+**Amended for the backfill route by:** dutiona/memory-engine#1026 (an uploaded transcript imports under ADR-0020 §6, every event in the log and no keyword extraction or marker; memory files keep this ADR's rules)
 
 ## Context
 

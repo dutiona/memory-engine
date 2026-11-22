@@ -1,10 +1,13 @@
 //! The lifecycle route's tables (#1025, ADR-0020 §3, §5): one delivery's receipt, event and
 //! effects in one transaction, the session segments it steps, and the idle sweep.
 //!
+//! An upload's deliveries share one transaction, committed or rolled back whole (#1026).
+//!
 //! Every time written is the delivery's `received_at` or the sweep's `now`, as RFC 3339 with
 //! microseconds and `Z`, so its text sorts like the instant it names. Every statement's error
 //! goes through [`classify`], so a store that cannot take the write now is `Unavailable`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -19,7 +22,8 @@ use me_types::error::{MemoryError, Result, StorageError};
 use me_types::types::EventType;
 use me_types::types::inspect::{LifecycleReceiptSnapshot, LifecycleSegmentSnapshot};
 use me_types::types::lifecycle::{
-    Applied, CaptureWrite, DeliveryWrite, EndedBy, Kind, OrderKey, SegmentState, Step, step,
+    Applied, Batch, BatchMode, CaptureWrite, DeliveryWrite, EndedBy, Keyed, Kind, MemoryWrite,
+    OrderKey, SegmentState, Step, preview_digest, step,
 };
 
 /// The idempotency key of one delivery, with the digest of its body and the time it arrived.
@@ -47,9 +51,98 @@ pub(crate) fn record_delivery(
     registry: &UpcasterRegistry,
     embed_dim: usize,
     key: &ReceiptKey<'_>,
-    write: DeliveryWrite,
+    write: &DeliveryWrite,
 ) -> Result<Applied> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(classify)?;
+    let applied = apply_one(&tx, registry, embed_dim, key, write, None)?;
+    tx.commit().map_err(classify)?;
+    Ok(applied)
+}
+
+/// Record an upload's `items` in one transaction that takes the write lock first, and commit it
+/// only for a [`BatchMode::Write`] whose preview is the batch's and that met no collision.
+///
+/// # Errors
+///
+/// As [`record_delivery`]; nothing is written on any error.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_deliveries(
+    conn: &rusqlite::Connection,
+    registry: &UpcasterRegistry,
+    embed_dim: usize,
+    machine: &str,
+    received_at: DateTime<Utc>,
+    items: &[Keyed],
+    context: &[u8; 32],
+    mode: BatchMode,
+) -> Result<Batch> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).map_err(classify)?;
+    let sessions: BTreeSet<&str> = items
+        .iter()
+        .filter_map(|item| match &item.write {
+            DeliveryWrite::Capture(capture) => Some(capture.session_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut live_since = BTreeMap::new();
+    for session in sessions {
+        if let Some(start) = first_live_event(&tx, machine, session)? {
+            live_since.insert(session.to_owned(), start);
+        }
+    }
+    let mut applied = Vec::with_capacity(items.len());
+    for item in items {
+        let key = ReceiptKey {
+            machine,
+            event_id: &item.event_id,
+            body_sha256: &item.body_sha256,
+            received_at,
+        };
+        let live = match &item.write {
+            DeliveryWrite::Capture(capture) => live_since.get(&capture.session_id),
+            _ => None,
+        };
+        applied.push(apply_one(
+            &tx,
+            registry,
+            embed_dim,
+            &key,
+            &item.write,
+            live,
+        )?);
+    }
+    let preview = preview_digest(context, items, &applied);
+    let committed = match mode {
+        BatchMode::DryRun => false,
+        BatchMode::Write { preview: reviewed } => {
+            reviewed == preview && !applied.contains(&Applied::Collision)
+        }
+    };
+    if committed {
+        tx.commit().map_err(classify)?;
+    } else {
+        tx.rollback().map_err(classify)?;
+    }
+    Ok(Batch {
+        committed,
+        preview,
+        applied,
+        live_since,
+    })
+}
+
+/// Apply one delivery inside `tx`: the key is read first, and a held key answers
+/// [`Applied::Duplicate`] (same digest) or [`Applied::Collision`] (another) and writes nothing.
+/// A capture at or after `live_since`, its session's first live event, is
+/// [`Applied::LiveOverlap`] and writes nothing either.
+fn apply_one(
+    tx: &Transaction<'_>,
+    registry: &UpcasterRegistry,
+    embed_dim: usize,
+    key: &ReceiptKey<'_>,
+    write: &DeliveryWrite,
+    live_since: Option<&OrderKey>,
+) -> Result<Applied> {
     let held: Option<Vec<u8>> = tx
         .query_row(
             "SELECT body_sha256 FROM lifecycle_receipts WHERE machine = ?1 AND event_id = ?2",
@@ -65,16 +158,52 @@ pub(crate) fn record_delivery(
             Applied::Collision
         });
     }
-    let applied = match write {
-        DeliveryWrite::Check => return Ok(Applied::Absent),
+    match write {
+        DeliveryWrite::Check => Ok(Applied::Absent),
         DeliveryWrite::Quarantine(record) => {
-            insert_receipt(&tx, key, None, None, Some(&record.to_string()))?;
-            Applied::Quarantined
+            insert_receipt(tx, key, None, None, Some(&record.to_string()))?;
+            Ok(Applied::Quarantined)
         }
-        DeliveryWrite::Capture(capture) => capture_event(&tx, registry, embed_dim, key, *capture)?,
-    };
-    tx.commit().map_err(classify)?;
-    Ok(applied)
+        DeliveryWrite::Capture(capture) if live_since.is_some_and(|live| capture.key >= *live) => {
+            Ok(Applied::LiveOverlap)
+        }
+        DeliveryWrite::Capture(capture) => capture_event(tx, registry, embed_dim, key, capture),
+        DeliveryWrite::Memory(memory) => memory_event(tx, registry, embed_dim, key, memory),
+    }
+}
+
+/// The live events of one session and machine; the payload reads are guarded by `json_valid`,
+/// and `session_id` is the key of `idx_events_session`.
+const LIVE_EVENTS: &str = "SELECT timestamp,
+            CASE WHEN json_valid(payload) THEN json_extract(payload, '$.seq') END,
+            CASE WHEN json_valid(payload) THEN json_extract(payload, '$.event_id') END
+       FROM events
+      WHERE session_id = ?1 AND source = 'lifecycle'
+        AND CASE WHEN json_valid(payload) THEN json_extract(payload, '$.machine') END = ?2";
+
+/// The order key of the first event of `session` that `machine` delivered live, if any.
+fn first_live_event(
+    tx: &Transaction<'_>,
+    machine: &str,
+    session: &str,
+) -> Result<Option<OrderKey>> {
+    let mut stmt = tx.prepare_cached(LIVE_EVENTS).map_err(classify)?;
+    let mut rows = stmt.query(params![session, machine]).map_err(classify)?;
+    let mut first: Option<OrderKey> = None;
+    while let Some(row) = rows.next().map_err(classify)? {
+        let time: String = row.get(0).map_err(classify)?;
+        let seq: Option<i64> = row.get(1).map_err(classify)?;
+        let event_id: Option<String> = row.get(2).map_err(classify)?;
+        let key = OrderKey {
+            time: parse_timestamp(&time).map_err(classify)?,
+            seq: seq.and_then(|s| u32::try_from(s).ok()).unwrap_or_default(),
+            event_id: event_id.unwrap_or_default(),
+        };
+        if first.as_ref().is_none_or(|f| key < *f) {
+            first = Some(key);
+        }
+    }
+    Ok(first)
 }
 
 fn insert_receipt(
@@ -107,53 +236,71 @@ fn capture_event(
     registry: &UpcasterRegistry,
     embed_dim: usize,
     key: &ReceiptKey<'_>,
-    capture: CaptureWrite,
+    capture: &CaptureWrite,
 ) -> Result<Applied> {
-    let CaptureWrite {
-        home,
-        mut event,
-        session_id,
-        key: order,
-        kind,
-        main_turn,
-        boundary,
-        final_message,
-        activity,
-        fact,
-        call,
-    } = capture;
     let scopes = ScopeStore::new(tx);
-    let leaf = scopes.ensure_path(&home)?;
+    let leaf = scopes.ensure_path(&capture.home)?;
+    let mut event = capture.event.clone();
     event.scope_id = leaf;
     let event_row = EventStore::new(tx, registry).insert(&event)?;
-    if let Some((mut activity, window)) = activity {
+    if let Some((activity, window)) = &capture.activity {
+        let mut activity = activity.clone();
         activity.scope_id = leaf;
-        ActivityStore::new(tx).insert_or_dedup(&activity, window)?;
+        ActivityStore::new(tx).insert_or_dedup(&activity, *window)?;
     }
-    let fact_row = match fact {
-        Some(mut fact) if !tombstones::blocks(tx, &fact.content)? => {
+    let fact_row = match &capture.fact {
+        Some(fact) if !tombstones::blocks(tx, &fact.content)? => {
+            let mut fact = fact.clone();
             fact.scope_id = leaf;
             fact.source_event_id = Some(event_row);
             Some(embed_queue::queue(tx, &fact, embed_dim, key.received_at)?)
         }
         _ => None,
     };
-    let call_event = match call {
-        Some(call) => linked_call(tx, &call, key.machine)?,
+    let call_event = match &capture.call {
+        Some(call) => linked_call(tx, call, key.machine)?,
         None => None,
     };
     let seen = Seen {
-        kind,
-        main_turn,
-        boundary,
-        final_message,
+        kind: capture.kind,
+        main_turn: capture.main_turn,
+        boundary: capture.boundary,
+        final_message: capture.final_message,
         fact: fact_row,
     };
-    step_segments(tx, key, &session_id, &order, &seen)?;
+    step_segments(tx, key, &capture.session_id, &capture.key, &seen)?;
     insert_receipt(tx, key, Some(event_row), call_event, None)?;
     Ok(Applied::Stored {
         event: event_row,
         fact: fact_row,
+        reinforced: false,
+        chain: scopes.chain(leaf)?,
+    })
+}
+
+/// An imported memory with its event and receipt: no segment step, no activity.
+fn memory_event(
+    tx: &Transaction<'_>,
+    registry: &UpcasterRegistry,
+    embed_dim: usize,
+    key: &ReceiptKey<'_>,
+    memory: &MemoryWrite,
+) -> Result<Applied> {
+    let scopes = ScopeStore::new(tx);
+    let leaf = scopes.ensure_path(&memory.home)?;
+    let mut event = memory.event.clone();
+    event.scope_id = leaf;
+    let event_row = EventStore::new(tx, registry).insert(&event)?;
+    let mut fact = memory.fact.clone();
+    fact.scope_id = leaf;
+    fact.source_event_id = Some(event_row);
+    let (fact_row, reinforced) =
+        embed_queue::queue_or_reinforce(tx, &fact, embed_dim, key.received_at)?;
+    insert_receipt(tx, key, Some(event_row), None, None)?;
+    Ok(Applied::Stored {
+        event: event_row,
+        fact: fact_row,
+        reinforced,
         chain: scopes.chain(leaf)?,
     })
 }
@@ -584,7 +731,7 @@ mod tests {
                 &self.registry,
                 4,
                 &receipt,
-                DeliveryWrite::Capture(Box::new(capture)),
+                &DeliveryWrite::Capture(Box::new(capture)),
             )
             .unwrap()
         }
@@ -811,6 +958,165 @@ mod tests {
             linked(&h, "laptop", "e6", "dddddddddddddddd"),
             None,
             "not an MCP record"
+        );
+    }
+
+    /// Every row of every table, as text, by table.
+    fn tables(conn: &Connection) -> Vec<(String, Vec<String>)> {
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+        names
+            .into_iter()
+            .map(|name| {
+                let mut stmt = conn.prepare(&format!("SELECT * FROM \"{name}\"")).unwrap();
+                let columns = stmt.column_count();
+                let rows = stmt
+                    .query_map([], |r| {
+                        Ok((0..columns)
+                            .map(|i| format!("{:?}", r.get_ref(i).unwrap()))
+                            .collect::<Vec<_>>()
+                            .join("|"))
+                    })
+                    .unwrap()
+                    .map(std::result::Result::unwrap)
+                    .collect();
+                (name, rows)
+            })
+            .collect()
+    }
+
+    /// A dry run leaves every table as it was, the scope tree and the queue included, and a
+    /// write of the same batch then commits exactly what the dry run showed.
+    #[test]
+    fn a_dry_run_leaves_every_table_as_it_was() {
+        let h = Harness::new();
+        h.deliver("live", "s", 100, Kind::Prompt, |c| {
+            c.event.payload = json!({ "machine": "laptop", "seq": 1, "event_id": "live" });
+        });
+        let mut memory_event = event("s");
+        memory_event.session_id = None;
+        let items = vec![
+            Keyed {
+                event_id: "a".into(),
+                body_sha256: [1; 32],
+                write: DeliveryWrite::Capture(Box::new(CaptureWrite {
+                    home: "new/home".into(),
+                    event: event("s"),
+                    session_id: "s".into(),
+                    key: key(0, "a"),
+                    kind: Kind::Stop,
+                    main_turn: true,
+                    boundary: false,
+                    final_message: true,
+                    activity: Some((
+                        me_types::types::NewActivity {
+                            session_id: "s".into(),
+                            tool_name: "Bash".into(),
+                            args_hash: "h".into(),
+                            args: json!({}),
+                            result_summary: None,
+                            outcome_class: me_types::types::OutcomeClass::Success,
+                            timestamp: t0(),
+                            scope_id: 1,
+                            machine: Some("laptop".into()),
+                        },
+                        300,
+                    )),
+                    fact: Some(vectorless("made")),
+                    call: None,
+                })),
+            },
+            Keyed {
+                event_id: "m".into(),
+                body_sha256: [1; 32],
+                write: DeliveryWrite::Memory(Box::new(MemoryWrite {
+                    home: "other/home".into(),
+                    event: memory_event,
+                    fact: vectorless("remembered"),
+                })),
+            },
+            Keyed {
+                event_id: "late".into(),
+                body_sha256: [1; 32],
+                write: DeliveryWrite::Capture(Box::new(CaptureWrite {
+                    key: key(200, "late"),
+                    ..prompt_write("s", 200, "late")
+                })),
+            },
+        ];
+        let before = tables(&h.conn);
+        let at = t0() + Duration::days(1);
+
+        let dry = record_deliveries(
+            &h.conn,
+            &h.registry,
+            4,
+            "laptop",
+            at,
+            &items,
+            &[0; 32],
+            BatchMode::DryRun,
+        )
+        .unwrap();
+
+        assert!(!dry.committed);
+        assert_eq!(tables(&h.conn), before);
+        assert!(matches!(dry.applied[2], Applied::LiveOverlap));
+        let write = record_deliveries(
+            &h.conn,
+            &h.registry,
+            4,
+            "laptop",
+            at,
+            &items,
+            &[0; 32],
+            BatchMode::Write {
+                preview: dry.preview,
+            },
+        )
+        .unwrap();
+        assert!(write.committed);
+        assert_eq!(
+            write.applied, dry.applied,
+            "the same outcomes, row ids included"
+        );
+        assert_ne!(tables(&h.conn), before);
+    }
+
+    fn prompt_write(session: &str, secs: i64, id: &str) -> CaptureWrite {
+        CaptureWrite {
+            home: "p".to_owned(),
+            event: event(session),
+            session_id: session.to_owned(),
+            key: key(secs, id),
+            kind: Kind::Prompt,
+            main_turn: true,
+            boundary: false,
+            final_message: false,
+            activity: None,
+            fact: None,
+            call: None,
+        }
+    }
+
+    #[test]
+    fn the_live_lookup_reads_the_session_index() {
+        let conn = crate::test_util::setup_memory_db();
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {LIVE_EVENTS}"))
+            .unwrap()
+            .query_map(["s", "laptop"], |r| r.get(3))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+        assert!(
+            plan.iter().any(|step| step.contains("idx_events_session")),
+            "{plan:?}"
         );
     }
 

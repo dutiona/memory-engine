@@ -109,7 +109,7 @@ fn the_denylist_skips_short_literals_and_placeholders() {
 // ── JSON ─────────────────────────────────────────────────────────────────────
 
 #[test]
-fn scrub_json_redacts_leaves_and_keeps_keys_and_non_strings() {
+fn scrub_json_redacts_leaves_and_keeps_clean_keys_and_non_strings() {
     let mut v = json!({
         "description": format!("leaked {} here", aws()),
         "nested": { "note": format!("token {}", ghp()) },
@@ -124,6 +124,45 @@ fn scrub_json_redacts_leaves_and_keeps_keys_and_non_strings() {
     assert_eq!(
         (v["count"].clone(), v["flag"].clone()),
         (json!(7), json!(true))
+    );
+}
+
+/// An object's keys are content too: a key holding a known secret format or a denylist literal
+/// is redacted like a string, and keys that redact to one text keep every value, the later ones
+/// (in key order) under `~1`, `~2`, ….
+#[test]
+fn scrub_json_redacts_keys_and_keeps_every_member() {
+    let other = format!("AKIA{}", "IOSFODNN7EXAMPLF");
+    let object = |pairs: Vec<(String, Value)>| Value::Object(pairs.into_iter().collect());
+    let mut v = object(vec![
+        (ghp(), json!(1)),
+        ("fixturehost-config".to_owned(), json!(2)),
+        (aws(), json!(3)),
+        (other.clone(), json!(4)),
+        ("plain".to_owned(), object(vec![(aws(), json!(5))])),
+    ]);
+
+    let found = scrub_json(&mut v, &dl(&["fixturehost"])).unwrap();
+
+    assert_eq!(found, 5);
+    assert_eq!(
+        v,
+        json!({
+            "[REDACTED:aws-access-key]": 3,
+            "[REDACTED:aws-access-key]~1": 4,
+            "[REDACTED:denylist]-config": 2,
+            "[REDACTED:github-pat]": 1,
+            "plain": { "[REDACTED:aws-access-key]": 5 },
+        })
+    );
+    let mut payload = object(vec![
+        ("input".to_owned(), object(vec![(other, json!("x"))])),
+        ("machine".to_owned(), json!("laptop")),
+    ]);
+    assert_eq!(scrub_payload(&mut payload).unwrap(), 1);
+    assert_eq!(
+        payload,
+        json!({ "input": { "[REDACTED:aws-access-key]": "x" }, "machine": "laptop" })
     );
 }
 
@@ -203,6 +242,92 @@ fn content_cannot_hide_under_the_provenance_key() {
         json!({ PROVENANCE_KEY: provenance("/r", &json!("k".repeat(MAX_KEY_BYTES + 1))) });
     assert!(!is_provenance(&long_key[PROVENANCE_KEY]));
     assert_eq!(scrub_payload(&mut long_key).unwrap(), 0);
+}
+
+// ── The author denylist on the capture path (#1026) ─────────────────────────
+
+/// The backfill route's denylist reaches every content member a capture stores: a prompt, a tool
+/// input, a result and a stub token lose the literal, while the provenance and the identifiers
+/// keep it, so a host name in the denylist never hides its own rows.
+#[test]
+fn the_capture_path_takes_the_denylist() {
+    let host = "fixturehost";
+    let denylist = dl(&[host]);
+    let mut payload = json!({
+        "machine": host,
+        "event_id": format!("{host}-1"),
+        "agent_id": host,
+        "prompt": format!("deploy to {host} now"),
+        PROVENANCE_KEY: provenance(&format!("/srv/{host}/p"), &json!(null)),
+    });
+    assert_eq!(scrub_capture_payload(&mut payload, &denylist).unwrap(), 1);
+    assert_eq!(payload["prompt"], "deploy to [REDACTED:denylist] now");
+    for identifier in ["machine", "agent_id"] {
+        assert_eq!(payload[identifier], host, "{identifier}");
+    }
+    assert_eq!(payload["event_id"], format!("{host}-1"));
+    assert_eq!(
+        payload[PROVENANCE_KEY]["facts"]["root"],
+        format!("/srv/{host}/p")
+    );
+
+    let call = capture_tool_use(
+        &json!({ "command": format!("ssh {host} uptime") }),
+        Some(&format!("{host}: up 3 days")),
+        OutcomeClass::Success,
+        &[],
+        None,
+        &denylist,
+    )
+    .unwrap();
+    assert_eq!(
+        call.args,
+        json!({ "command": "ssh [REDACTED:denylist] uptime" })
+    );
+    assert_eq!(
+        call.result.as_deref(),
+        Some("[REDACTED:denylist]: up 3 days")
+    );
+    assert_eq!((call.input_found, call.result_found), (1, 1));
+
+    let path = format!("/srv/{host}/.env");
+    let stub = capture_tool_use(
+        &json!({ "file_path": path }),
+        Some("X=1"),
+        OutcomeClass::Success,
+        std::slice::from_ref(&path),
+        None,
+        &denylist,
+    )
+    .unwrap();
+    assert!(stub.stub);
+    assert_eq!(
+        stub.args,
+        json!({ "sensitive_path": "/srv/[REDACTED:denylist]/.env" })
+    );
+
+    // An identifier gets the machine-token rule alone: a name that reads as high-entropy, or a
+    // hex run after a key word, is a validated identifier, never redacted.
+    let agent = format!("{}-{}", "api_key", "a3f1b2c4d5e6f7a8".repeat(2));
+    let mut ids = json!({
+        "machine": "q7m2x9k4v8w3z6p1r5t0y8u2",
+        "agent_id": agent,
+        "event_id": format!("bf.{}.p", machine_token()),
+    });
+    assert_eq!(scrub_capture_payload(&mut ids, &denylist).unwrap(), 1);
+    assert_eq!(ids["machine"], "q7m2x9k4v8w3z6p1r5t0y8u2");
+    assert_eq!(ids["agent_id"], agent);
+    assert_eq!(ids["event_id"], "bf.[REDACTED:machine-token].p");
+    // Any other event payload is a caller's: no member of it is a validated identifier.
+    let mut ingested = json!({ "machine": "q7m2x9k4v8w3z6p1r5t0y8u2", "kind": aws() });
+    assert_eq!(scrub_payload(&mut ingested).unwrap(), 2);
+
+    let mut live = json!({ "prompt": format!("deploy to {host} now") });
+    assert_eq!(
+        scrub_capture_payload(&mut live, &[]).unwrap(),
+        0,
+        "live capture passes none"
+    );
 }
 
 // ── The cut ──────────────────────────────────────────────────────────────────

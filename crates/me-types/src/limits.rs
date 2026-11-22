@@ -41,6 +41,12 @@ pub const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 /// bounded expansion.
 pub const LIFECYCLE_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+/// The backfill route's body limit, 256 MiB (#1026): the largest source file one upload takes.
+///
+/// It is the stream bound of ADR-0009's JSONL importer, so a transcript the CLI could import is
+/// never too large to upload. A larger file is refused whole, never truncated.
+pub const BACKFILL_BODY_BYTES: usize = 256 * 1024 * 1024;
+
 /// Safety cap for the O(N·M) consolidation dedup pass (`compute_dedup`).
 ///
 /// Beyond this many active facts the pass is **skipped and the consolidation watermark

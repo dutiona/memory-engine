@@ -2,12 +2,16 @@
 //!
 //! Field names are the ones Claude Code's hooks carry, checked in as fixtures. The adapter also
 //! owns what ADR-0020 §11 leaves to it: the activity filter (the ignore list and the 300 s
-//! duplicate window), the paths a tool call touches, and the ME call line of a result.
+//! duplicate window), the paths a tool call touches, and the ME call line of a result. Its
+//! backfill readers (#1026), [`transcript`] and [`memory`], share those rules.
 
 use memory_engine::types::lifecycle::{
     Actor, BodyFault, Content, NeutralRecord, ParseClass, ParseFailure, StopOutcome, ToolOutcome,
 };
 use serde_json::{Map, Value};
+
+pub mod memory;
+pub mod transcript;
 
 /// Tools whose calls are formatting or lint fixes: stored as events, kept out of the activity
 /// stream. A case-insensitive substring of the tool name.
@@ -136,6 +140,7 @@ fn map(object: &Map<String, Value>) -> Result<NeutralRecord, BodyFault> {
             Actor::Main
         },
         cwd: owned(object, "cwd"),
+        harness_version: None,
         content,
     })
 }
@@ -151,9 +156,21 @@ fn tool_use(object: &Map<String, Value>, outcome: ToolOutcome) -> Result<Content
     } else {
         owned(object, "error")
     };
+    Ok(tool_content(tool, input, result, outcome))
+}
+
+/// A finished tool call as neutral content, from a hook or a transcript alike: the paths it
+/// touches, the call line its result opens with (read before any cut), and the activity window
+/// of a tool that is not ignored.
+fn tool_content(
+    tool: String,
+    input: Value,
+    result: Option<String>,
+    outcome: ToolOutcome,
+) -> Content {
     let lowered = tool.to_lowercase();
     let ignored = IGNORED.iter().any(|name| lowered.contains(name));
-    Ok(Content::ToolUse {
+    Content::ToolUse {
         paths: touched_paths(&tool, &input),
         call: result.as_deref().and_then(call_line),
         dedup_window_secs: (!ignored).then_some(DEDUP_WINDOW_SECS),
@@ -161,7 +178,7 @@ fn tool_use(object: &Map<String, Value>, outcome: ToolOutcome) -> Result<Content
         input,
         result,
         outcome,
-    })
+    }
 }
 
 /// A tool response as text: a string as it is, the text blocks of an MCP result joined by line
@@ -338,6 +355,10 @@ mod tests {
                 "{name}"
             );
             assert!(!record.session_id.is_empty(), "{name}");
+            assert_eq!(
+                record.harness_version, None,
+                "{name}: no hook input carries the harness's version"
+            );
             let got = match &record.content {
                 Content::ToolUse { outcome, .. } => format!("{outcome:?}"),
                 Content::Stop { outcome, .. } => format!("{outcome:?}"),

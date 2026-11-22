@@ -80,14 +80,15 @@ parking_lot = "0.12"
 tokio = { version = "1", features = ["rt", "macros", "sync", "net"] }
 flate2 = { version = "1", optional = true }
 zstd = { version = "0.13", optional = true }
+# The backfill import's context digest (#1026); the shared redaction fixture's pin
+# (tests/redaction_conformance.rs) uses it too.
+sha2 = "0.11"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 insta = { version = "1", features = ["yaml", "redactions"] }
 proptest = "1"
-# The shared redaction fixture is pinned by its SHA-256 (tests/redaction_conformance.rs).
-sha2 = "0.11"
 # Force these leaf crates' `test-util` feature ON for every `cargo test` of this
 # crate, regardless of whether `--features test-util` was passed explicitly
 # (Wave 2 #816, me-backend-sqlite carve, Commit 2): `crate::test_utils` re-exports
@@ -185,6 +186,10 @@ path = "../../tests/roundtrip_test.rs"
 [[test]]
 name = "lifecycle_capture_test"
 path = "../../tests/lifecycle_capture_test.rs"
+
+[[test]]
+name = "backfill_import_test"
+path = "../../tests/backfill_import_test.rs"
 
 [[test]]
 name = "all_features_store"

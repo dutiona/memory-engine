@@ -15,6 +15,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
+# The preview digest of a backfill upload (#1026), computed by the store and checked by the
+# engine, so both depend on one definition here.
+sha2 = "0.11"
 # Only pulled in by the `test-util` feature's `new_fact_hashed` helper
 # (content-hash factory); not a production dependency otherwise.
 blake3 = { version = "1", optional = true }

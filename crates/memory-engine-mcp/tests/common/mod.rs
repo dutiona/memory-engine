@@ -99,6 +99,8 @@ struct Setup {
     input_limit: Option<usize>,
     /// The store's directory is made inside this one, which a test picks to sit on a disk.
     store_in: Option<PathBuf>,
+    /// The author denylist the backfill route redacts with; `None` refuses every upload.
+    denylist: Option<Vec<String>>,
 }
 
 /// llama-server's `/tokenize`, counting one token per two bytes of `content`.
@@ -296,6 +298,7 @@ pub struct TestServer {
     pub embedder: MockServer,
     pub dir: TempDir,
     allowed_hosts: Vec<String>,
+    denylist: Option<Vec<String>>,
     closed_port: Option<u16>,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<std::io::Result<()>>>,
@@ -337,6 +340,37 @@ impl TestServer {
     pub async fn start_with_query_instruction(instruction: &str) -> Self {
         Self::start_with(Setup {
             instruction: Some(instruction.to_owned()),
+            ..Setup::default()
+        })
+        .await
+    }
+
+    /// A server whose backfill route redacts with `literals` (an empty list is an explicit
+    /// "none"), injected as `main` would load `ME_REDACT_DENYLIST_FILE`.
+    pub async fn start_with_denylist(literals: &[&str]) -> Self {
+        Self::start_with(Setup {
+            denylist: Some(literals.iter().map(|l| (*l).to_owned()).collect()),
+            ..Setup::default()
+        })
+        .await
+    }
+
+    /// [`start_with_denylist`](Self::start_with_denylist), with the embedder's port closed.
+    pub async fn start_unreachable_with_denylist(literals: &[&str]) -> Self {
+        Self::start_with(Setup {
+            unreachable: true,
+            denylist: Some(literals.iter().map(|l| (*l).to_owned()).collect()),
+            ..Setup::default()
+        })
+        .await
+    }
+
+    /// [`start_with_denylist`](Self::start_with_denylist), its store in a new directory inside
+    /// `parent`.
+    pub async fn start_with_denylist_in(literals: &[&str], parent: &Path) -> Self {
+        Self::start_with(Setup {
+            denylist: Some(literals.iter().map(|l| (*l).to_owned()).collect()),
+            store_in: Some(parent.to_owned()),
             ..Setup::default()
         })
         .await
@@ -407,6 +441,7 @@ impl TestServer {
             instruction,
             timeout_secs,
             input_limit,
+            denylist,
             ..
         } = setup;
         // The blocking reqwest client inside the provider must not be built on the runtime.
@@ -452,6 +487,7 @@ impl TestServer {
             embedder,
             dir,
             allowed_hosts,
+            denylist,
             closed_port,
             shutdown: None,
             task: None,
@@ -463,12 +499,15 @@ impl TestServer {
     /// Run `http::serve` over the engine on a fresh loopback port.
     async fn serve(&mut self) {
         let tokens = TokenTable::load(&write_token_file(self.dir.path(), &MACHINES)).unwrap();
-        let server = MemoryMcpServer::new(
+        let mut server = MemoryMcpServer::new(
             Arc::clone(&self.engine),
             self.provider.clone(),
             User::parse("alice").unwrap(),
         )
         .with_embed_backoff(BACKOFF);
+        if let Some(denylist) = &self.denylist {
+            server = server.with_denylist(denylist.clone());
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         self.url = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = oneshot::channel();
@@ -483,6 +522,12 @@ impl TestServer {
             },
         )));
         self.shutdown = Some(tx);
+    }
+
+    /// Stop the server, then serve the same store again under `denylist`.
+    pub async fn restart_with_denylist(&mut self, denylist: Option<Vec<String>>) {
+        self.denylist = denylist;
+        self.restart().await;
     }
 
     /// Stop the server, then serve the same store again from a fresh engine.

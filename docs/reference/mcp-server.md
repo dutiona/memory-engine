@@ -4,7 +4,8 @@
 
 An MCP server binary that serves memory-engine over streamable HTTP (stateless `POST /mcp`, JSON responses), behind
 per-machine Bearer tokens, and gives the model four tools: `recall`, `remember`, `forget` and `set_level` (ADR-0020 §8). It also
-receives each Claude Code session's events on `POST /lifecycle/events` ([Lifecycle events](#lifecycle-events)). Part of
+receives each Claude Code session's events on `POST /lifecycle/events` ([Lifecycle events](#lifecycle-events)), and a
+machine's past history, one copied file at a time, on `POST /backfill/uploads` ([Backfill uploads](#backfill-uploads)). Part of
 the four-layer cognitive architecture (Knowledge → Memory → Wisdom → Intelligence): this crate bridges Memory to
 Intelligence via the Model Context Protocol.
 
@@ -162,8 +163,8 @@ printf 'Authorization: Bearer %s\n' "$(cat /path/to/token)" | curl -sS -H @- \
 
 ### Shutdown and health
 
-SIGTERM or SIGINT stops accepting connections, gives open connections 5 s to finish, waits for every tool call and
-lifecycle event already started, stops the embedding drain and the idle-segment sweep, flushes the `<db>.snapshot` sidecar and exits 0. The drain and the sweep stop at the
+SIGTERM or SIGINT stops accepting connections, gives open connections 5 s to finish, waits for every tool call,
+lifecycle event and backfill upload already started, stops the embedding drain and the idle-segment sweep, flushes the `<db>.snapshot` sidecar and exits 0. The drain and the sweep stop at the
 same fence as the tool calls: a settle or a sweep in progress commits first and none starts after it. A lifecycle event that
 arrives once the stop has begun is answered 503 before it touches the store, and its client retries; one already
 being applied runs to its commit, even if its client hung up. An embed call still in
@@ -496,6 +497,129 @@ machine's receipts, quarantine records, segments and captured activities with it
 `export`/`import` carries the receipts and segments, so a restored store still answers a resend with `duplicate`
 ([CLI reference](cli-inspector.md)).
 
+### Backfill uploads
+
+`POST /backfill/uploads` imports one source file per request from a machine that holds copies of its own history (#1026):
+a Claude Code session transcript, one of its `subagents/agent-<id>.jsonl` files, or one native auto-memory file. It sits
+behind the same Bearer layer, and the machine is the one the token names, so each source host uploads with its own
+token. The supervised procedure that drives it is [Backfill](../backfill.md). An upload is a **dry run**, which runs the
+whole import in one store transaction and rolls it back, or the **write** of a reviewed dry run, which runs the same code
+and commits only when its effects are the ones that dry run reported. There is no upload client in this repository.
+
+**Headers.** The body is read as raw bytes, `Content-Type` is ignored, and each header is present at most once and at
+most 4,096 bytes:
+
+| Header | Required | Value |
+|---|---|---|
+| `ME-Harness` | yes | `[a-z0-9-]{1,32}`; `claude-code` |
+| `ME-Backfill-Kind` | yes | `[a-z0-9-]{1,32}`; for `claude-code`, `transcript` or `memory-file` |
+| `ME-Backfill-Mode` | yes | `dry-run` or `write`; there is no default, so nothing writes by omission |
+| `ME-Backfill-Source` | yes | The file's path under the bundle root, percent-encoded like a project fact; decoded, it is relative, holds no `.` or `..` segment and no control character |
+| `ME-Backfill-Mtime` | `memory-file` | The copy's modification time, `YYYY-MM-DDTHH:MM:SSZ`; checked whenever sent |
+| `ME-Backfill-Preview` | `write` | The 64 lowercase hex digits of the reviewed dry run's `preview` |
+| `ME-Client-Version` | yes | `[0-9A-Za-z.+-]{1,64}`, stored as sent |
+| `ME-Project-*` | no | The five project facts of [Project facts](#project-facts-and-the-project-key), one set for the whole upload |
+
+**Checks and statuses.** The route checks in this order and answers the first that fails. Nothing is written on any
+answer but a 200 to a write:
+
+| Step | Answer | When |
+|---|---|---|
+| 1 | 401 | The Bearer layer |
+| 2 | 400 | A required header is missing, repeated, too long or off its grammar; a write without a well-formed preview |
+| 3 | 422 | No reader for the harness and kind |
+| 4 | 503 | The server holds no author denylist (below), dry runs included |
+| 5 | 413 | `Content-Length` is over 256 MiB (268,435,456 bytes, `BACKFILL_BODY_BYTES`) |
+| 6 | 503 | Another upload is in flight: there is one slot, taken before the body is read |
+| 7 | 413, 408, 400 | The body grows past 256 MiB; no byte arrives for 60 s; the body is broken |
+| 8 | 503 | The server is stopping |
+| 9 | 422 | The reader cannot read the body at all: no line with a session, a transcript over 1,000,000 entries (refused whole, never imported as its first entries), or a memory file that is not UTF-8 |
+| 10 | 409 | A write only: an item's key is held with another digest; the answer is the report |
+| 11 | 412 | A write only: its preview is not the one its effects now give (the file, the denylist or the store changed since the dry run) |
+| 12 | 503, 422 | The store cannot take the write now; any other failure |
+| 13 | 200 | The report: committed (a write) or rolled back (a dry run, its collisions listed) |
+
+Every answer but a 401 is JSON: the report, or `{"error": "<fixed phrase>"}` naming a header or a reason, never a value
+or a byte of the body. A 5xx always means the same request can work later, after the configuration is fixed for step 4.
+A file over 256 MiB is refused whole, never truncated.
+
+**The author denylist.** The route redacts with the literals of `ME_REDACT_DENYLIST_FILE`, read once at start: harvested
+history is the input most likely to hold the author's names, hosts and paths. Set and readable, the file's literals
+apply (an empty or comments-only file is an explicit "none"); unset or unreadable, the server starts, logs which, and
+answers every upload 503, so no dry run is reviewed under weaker redaction than its write would get. Every report
+states `denylist_literals`. Live capture does not use the denylist.
+
+**What a transcript stores.** The reader reads each line as a JSON object by field name, so one field of an unexpected
+type drops the field, never the line, and maps each entry by the table of
+`crates/memory-engine-mcp/tests/fixtures/claude-code-transcripts/README.md`: a prompt, a finished tool call with its
+result and outcome, a main or subagent final message (a message with `stop_reason` `end_turn` or `stop_sequence`), an
+API error, and a compaction summary with its trigger each become one neutral record, applied by the engine through the
+same capture path as [lifecycle events](#lifecycle-events): the same payload, redaction (with the denylist), 512-byte
+tool excerpts, sensitive-path stubs and memories. An imported event has `source` and `origin_node_id` `backfill`, its
+entry's time as `timestamp`, the upload's receipt as `created_at`, and its `harness_version` from the entry; its memory
+is dated by its event. Thinking, meta entries, interrupt markers, Claude Code's own `<synthetic>` messages and every
+other entry type are skipped and counted. A tool call whose result is not in the file yet is `pending`, and a turn with
+no completed message is an `incomplete_turn`: a later upload of the grown file brings them. A transcript records no
+session start or end, so its events open segments by the rules of ADR-0020 §5 and the idle sweep ends them.
+
+**What a memory file stores.** `MEMORY.md` (the index) and a frontmatter-only stub are skipped with a 200 and write
+nothing. Any other file is one fact by ADR-0009's memory-file rules: `feedback` Procedural, `project` Episodic, any
+other type Semantic (`reference` tagged `route: knowledge-base`), importance 0.6, dated by its frontmatter, else its file
+name, else `ME-Backfill-Mtime`, with its frontmatter as metadata plus `machine`. It is filed at the upload's Home, its
+project or the machine's bucket, whatever its type; a `user` memory carries the report hint `set_level`. One
+`SystemEvent` records it and is its `source_event_id`. A forget's tombstone of its text blocks it, even beside an
+active twin; otherwise it reinforces an active twin in its Home, or it is queued without a vector.
+
+**Keys, order and idempotency.** Every row hangs off a receipt keyed `(machine, event ID)`. A transcript record's ID is
+`bf.<entry uuid>.<tag>` (`p` prompt, `s` stop, `c` compaction, `t<k>` the `k`-th `tool_use` block of its entry, from 0),
+its digest the SHA-256 of its canonical JSON without its session ID and working directory; a memory file's ID is `bf.m.`
+and 24 hex digits of the SHA-256 of its Home, its file name and its body, its digest the body's SHA-256. So the same file
+re-sent is all duplicates and writes nothing, a grown transcript adds only its new entries, a forked session file's
+repeated entries meet them as duplicates, and the same body under two names or two projects is two memories. A
+record's order key is its entry's time to the second, with `seq` its millisecond × 1,000 plus its rank among the file's
+records of that millisecond; the 1,001st record of one millisecond is refused and counted. A session the plugin
+captured live is authoritative from its first live event of that machine: imported events at or after it are
+`live_overlap` and write nothing, earlier ones import as late events. That event is read inside the import's
+transaction, so a live capture that commits while an upload is being prepared still wins.
+
+**One transaction.** The engine redacts and maps the whole upload outside any lock, then applies it in one
+`BEGIN IMMEDIATE`, in order-key order. The **preview** is a SHA-256 over every effect the upload would write (the
+items' keys, digests, Homes, event columns but the receipt time, payloads and facts, the kind, the redacted source, the
+provenance and the denylist's digest), over what the report shows beside them (the body's SHA-256, the reader's census,
+the refused items), and over the store's outcome for each item, never a row id. An edit to a line no item reads still
+changes it. A dry run returns it;
+a write commits only when no item collided and its own preview equals `ME-Backfill-Preview`. A change of the file, of a
+header such as `ME-Backfill-Mtime` or a project fact, of the denylist, or of the store's outcomes (a live capture of the
+session, a forget) since the dry run gives a 412 and writes nothing. Nothing is embedded: every memory is queued for the
+[drain](#embedding-queue), so an upload stores with the embedder down, full-text `recall` finds its memories at once,
+and `status` shows them waiting. The scope cache, the drain's wake and the redaction counters move only after a commit.
+Live captures wait on the server's one write connection while an upload's insert phase runs.
+
+**The report.** One JSON schema for both modes and for a 409, for an operator to read with `jq`:
+
+| Member | Holds |
+|---|---|
+| `mode`, `committed`, `preview` | The mode, whether the import committed, and the preview a write must carry |
+| `machine`, `harness`, `kind`, `client_version` | As the token and the headers name them |
+| `source` | `ME-Backfill-Source` as stored: redacted with every rule and the denylist |
+| `body` | `{bytes, sha256}` of the body |
+| `denylist_literals` | How many literals the server holds |
+| `project` | `{home, key, rules, dropped}`: the Home every item is filed at and how the facts gave it |
+| `census` | `{lines, malformed, skipped, incomplete_turn}`, `skipped` by reason |
+| `sessions` | `[{id, first, last, events, live_since}]` |
+| `events` | `{stored, duplicate, collision, live_overlap, pending, refused, by_kind, by_actor}`, `refused` by reason |
+| `tool_events` | Stored tool calls, per tool and per outcome |
+| `stubs` | `[{tool, path, time}]` of the sensitive-path stubs |
+| `redaction` | `{found, stubbed, placeholders}`, the placeholders counted by rule in the stored texts |
+| `facts` | `{created, reinforced, blocked, items}`, each item `{event_id, capture, fact_type, home, t_created, outcome, hint, preview}`, `preview` the stored text cut to 512 bytes |
+| `collisions` | `[{event_id, line}]` |
+
+Every string is a count, a digest, a fixed phrase, an identifier that passed the machine-token rule, or text exactly as
+the store would hold it: the report never holds a byte the store would not. A refused item is counted by its reason
+only. The project facts in `project` and in each payload's provenance keep the machine-token rule alone, as for a live
+event, so a denylisted name in a project path stays there. The log names the machine, the kind, the mode, the status
+and the error class, never a byte of the body.
+
 ### Embedding queue
 
 Each memory `remember` stores, and each memory a session's final message or compaction summary becomes, waits in the store's `embed_queue` table (schema v17) for its vector. One drain, started
@@ -547,10 +671,13 @@ timer runs them, and the crate's `clippy.toml` refuses any server code path that
 ```
 Agent (Claude, etc.) → HTTP POST /mcp → auth layer → rmcp (stateless) → MemoryEngine (SQLite)
 Claude Code plugin → HTTP POST /lifecycle/events → auth layer → adapters/claude_code → MemoryEngine
+Backfill driver → HTTP POST /backfill/uploads → auth layer → adapters/claude_code/{transcript,memory} → MemoryEngine
                                          ├── auth.rs (token-hash file, Bearer check)
                                          ├── http.rs (router, auth layer, drain + sweep + flush)
                                          ├── lifecycle.rs (POST /lifecycle/events: envelope, body reader, statuses, the seam, the idle sweep)
-                                         ├── adapters/ (one per harness; claude_code.rs: a hook input in, a neutral record out)
+                                         ├── backfill.rs (POST /backfill/uploads: headers, the upload slot, statuses, the seam, the report)
+                                         ├── adapters/ (one per harness; claude_code.rs: a hook input in, a neutral record out;
+                                         │             claude_code/transcript.rs and memory.rs: the backfill readers)
                                          ├── config.rs (TOML + env + CLI)
                                          ├── server.rs (ServerHandler, calling machine, instructions)
                                          ├── project.rs (project facts, key rules version 1)

@@ -91,6 +91,21 @@ pub trait ConformanceBackend: Send + Sync + 'static {
         be: &Arc<dyn StorageBackend>,
     ) -> me_types::error::Result<()>;
 
+    /// Make the insert of a lifecycle receipt fail once `held` receipts exist, so an upload's
+    /// batch faults at item `held + 1`, after that item's event, segment step and memory (the
+    /// crash-injection seam for the batch's all-or-nothing proof). Required, with no default
+    /// body: the fault is a trigger.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever the backend's `raw_exec` returns on a SQL/backend failure.
+    #[cfg(feature = "test-util")]
+    async fn refuse_receipts_after(
+        &self,
+        be: &Arc<dyn StorageBackend>,
+        held: usize,
+    ) -> me_types::error::Result<()>;
+
     /// A writable, file-backed backend whose store another writer holds locked, with the guard
     /// that holds it: dropping the guard releases the lock. The backend waits only briefly for
     /// the lock before it answers that the store is busy.
@@ -200,6 +215,20 @@ impl ConformanceBackend for SqliteFactory {
     }
 
     #[cfg(feature = "test-util")]
+    async fn refuse_receipts_after(
+        &self,
+        be: &Arc<dyn StorageBackend>,
+        held: usize,
+    ) -> me_types::error::Result<()> {
+        be.raw_exec(&format!(
+            "CREATE TRIGGER refuse_receipts_after BEFORE INSERT ON lifecycle_receipts \
+             WHEN (SELECT COUNT(*) FROM lifecycle_receipts) >= {held} \
+             BEGIN SELECT RAISE(ABORT, 'receipt inserts refused by the conformance battery'); END;"
+        ))
+        .await
+    }
+
+    #[cfg(feature = "test-util")]
     async fn make_contended(&self) -> (Arc<dyn StorageBackend>, Box<dyn Send>) {
         use me_backend_sqlite::pool::ConnectionPool;
 
@@ -283,6 +312,15 @@ impl ConformanceBackend for PgFactory {
         _be: &Arc<dyn StorageBackend>,
     ) -> me_types::error::Result<()> {
         todo!("#634: a PG trigger that refuses lifecycle segment inserts")
+    }
+
+    #[cfg(feature = "test-util")]
+    async fn refuse_receipts_after(
+        &self,
+        _be: &Arc<dyn StorageBackend>,
+        _held: usize,
+    ) -> me_types::error::Result<()> {
+        todo!("#634: a PG trigger that refuses lifecycle receipt inserts")
     }
 
     #[cfg(feature = "test-util")]

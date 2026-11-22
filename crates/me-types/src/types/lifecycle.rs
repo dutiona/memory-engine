@@ -3,11 +3,15 @@
 //! A harness adapter turns one hook body into one [`NeutralRecord`](crate::types::lifecycle::NeutralRecord);
 //! the engine applies it. Nothing here names a tool or a harness field (ADR-0020 §1).
 
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
 use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
-use serde_json::Value;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::types::{NewActivity, NewEvent, NewFact, ScopeNode};
+use crate::types::{FactType, NewActivity, NewEvent, NewFact, ScopeNode};
 
 /// The idle threshold of ADR-0020 §5: a client gap longer than this, or a session the server heard
 /// nothing of for this long, ends a segment.
@@ -213,8 +217,27 @@ pub struct NeutralRecord {
     pub actor: Actor,
     /// The working directory the harness reported; provenance, and a base for relative paths.
     pub cwd: Option<String>,
+    /// The harness's own version, when the adapter can read one from the body (ADR-0020 §3):
+    /// a transcript entry carries it, a hook input does not.
+    pub harness_version: Option<String>,
     /// The kind's own content.
     pub content: Content,
+}
+
+/// One native memory file as read, before any redaction (ADR-0009): the text it becomes, its
+/// type, importance, date and metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryItem {
+    /// The body, trimmed.
+    pub text: String,
+    /// The fact type its memory type routes to.
+    pub fact_type: FactType,
+    /// The base importance of a hand-authored memory.
+    pub importance: f64,
+    /// Its date: the frontmatter's, else the file name's, else the caller's fallback.
+    pub time: DateTime<Utc>,
+    /// Where it came from and what its frontmatter says.
+    pub metadata: Value,
 }
 
 /// How a body failed to parse.
@@ -308,6 +331,128 @@ pub enum DeliveryWrite {
     Quarantine(Value),
     /// A captured event and its effects.
     Capture(Box<CaptureWrite>),
+    /// An imported memory and its event (#1026).
+    Memory(Box<MemoryWrite>),
+}
+
+impl DeliveryWrite {
+    /// Whether the write would make a memory, were no tombstone to block it.
+    fn carries_fact(&self) -> bool {
+        match self {
+            Self::Capture(capture) => capture.fact.is_some(),
+            Self::Memory(_) => true,
+            Self::Check | Self::Quarantine(_) => false,
+        }
+    }
+}
+
+/// One imported memory and its event, committed together (#1026).
+///
+/// The store files both under the leaf of `home`, created when missing, sets the fact's
+/// `source_event_id` to the event's row, and steps no segment. A tombstone of the text blocks
+/// the fact; otherwise an active twin in the home is reinforced, or the fact is queued for its
+/// vector.
+#[derive(Debug, Clone)]
+pub struct MemoryWrite {
+    /// The scope path both are filed under.
+    pub home: String,
+    /// The event that records the import, already redacted.
+    pub event: NewEvent,
+    /// The memory, already redacted, without a vector.
+    pub fact: NewFact,
+}
+
+/// One item of a batch: the event ID of its `(machine, event ID)` key, the SHA-256 of what it
+/// was made from, and what it writes.
+#[derive(Debug, Clone)]
+pub struct Keyed {
+    /// The event ID of the key.
+    pub event_id: String,
+    /// The digest a later delivery of the key is compared with.
+    pub body_sha256: [u8; 32],
+    /// What the item writes.
+    pub write: DeliveryWrite,
+}
+
+/// Whether a batch is a dry run or a write (#1026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchMode {
+    /// Apply every item in one transaction, then roll it back.
+    DryRun,
+    /// Apply every item and commit only when no item collided and the batch's preview is this
+    /// one, the preview of the dry run that was reviewed.
+    Write {
+        /// The reviewed dry run's preview.
+        preview: [u8; 32],
+    },
+}
+
+/// What the store did with a batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Batch {
+    /// Whether it committed; otherwise the store is unchanged.
+    pub committed: bool,
+    /// [`preview_digest`] of the batch's outcomes, as computed inside its transaction.
+    pub preview: [u8; 32],
+    /// Each item's outcome, in item order, a collision included.
+    pub applied: Vec<Applied>,
+    /// The order key of the first live event of each session of the batch that has one, read
+    /// inside the transaction: the items at or after it are [`Applied::LiveOverlap`].
+    pub live_since: BTreeMap<String, OrderKey>,
+}
+
+/// The preview of a batch (#1026): what a reviewer approves and a write must reproduce.
+///
+/// It is the SHA-256 of `context`, the digest of every effect the batch would write, and of
+/// each item's outcome (its event ID, what the store did with it, and what became of its
+/// memory), never a row ID. A dry run and its write agree when nothing changed; any change of
+/// the effects or of the store's outcomes changes it.
+///
+/// # Examples
+///
+/// ```
+/// use me_types::types::lifecycle::{Applied, DeliveryWrite, Keyed, preview_digest};
+///
+/// let item = Keyed { event_id: "e".into(), body_sha256: [1; 32], write: DeliveryWrite::Check };
+/// let fresh = preview_digest(&[0; 32], std::slice::from_ref(&item), &[Applied::Absent]);
+/// let held = preview_digest(&[0; 32], std::slice::from_ref(&item), &[Applied::Duplicate]);
+/// assert_ne!(fresh, held);
+/// assert_ne!(fresh, preview_digest(&[1; 32], &[item], &[Applied::Absent]));
+/// ```
+#[must_use]
+pub fn preview_digest(context: &[u8; 32], items: &[Keyed], applied: &[Applied]) -> [u8; 32] {
+    let outcomes: Vec<Value> = items
+        .iter()
+        .zip(applied)
+        .map(|(item, applied)| {
+            let (outcome, fact) = match applied {
+                Applied::Absent => ("absent", "none"),
+                Applied::Duplicate => ("duplicate", "none"),
+                Applied::Collision => ("collision", "none"),
+                Applied::Quarantined => ("quarantined", "none"),
+                Applied::LiveOverlap => ("live_overlap", "none"),
+                Applied::Stored {
+                    fact: Some(_),
+                    reinforced,
+                    ..
+                } => ("stored", if *reinforced { "reinforced" } else { "created" }),
+                Applied::Stored { fact: None, .. } => (
+                    "stored",
+                    if item.write.carries_fact() {
+                        "blocked"
+                    } else {
+                        "none"
+                    },
+                ),
+            };
+            json!([item.event_id, outcome, fact])
+        })
+        .collect();
+    let hex = context.iter().fold(String::new(), |mut hex, b| {
+        let _ = write!(hex, "{b:02x}");
+        hex
+    });
+    Sha256::digest(json!([hex, outcomes]).to_string().as_bytes()).into()
 }
 
 /// One captured event and everything that commits with it. The store replaces the `scope_id` of
@@ -355,11 +500,173 @@ pub enum Applied {
     Stored {
         /// The event's row.
         event: i64,
-        /// The fact it became, if one was stored.
+        /// The fact it became, if one was stored or reinforced.
         fact: Option<i64>,
+        /// Whether `fact` is an active twin an imported memory reinforced; never for a capture.
+        reinforced: bool,
         /// The scope nodes from the home up to the root's child, for the in-memory tree.
         chain: Vec<ScopeNode>,
     },
+    /// A batch's capture at or after the first live event of its session and machine: the
+    /// session was captured live from there, so nothing was written (#1026).
+    LiveOverlap,
+}
+
+/// One upload to the backfill route (#1026): what the route knows of it before the engine
+/// imports its items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upload {
+    /// The machine the token names: the host whose history it is.
+    pub machine: String,
+    /// `ME-Harness`.
+    pub harness: String,
+    /// `ME-Client-Version`, as sent.
+    pub client_version: String,
+    /// `ME-Backfill-Kind`.
+    pub kind: String,
+    /// `ME-Backfill-Source`, decoded: the file's path under the bundle root. Content, so the
+    /// engine redacts it before it stores or reports it.
+    pub source: String,
+    /// When the server received it.
+    pub received_at: DateTime<Utc>,
+    /// The scope path every item is filed under.
+    pub home: String,
+    /// The project facts as decoded, with the resolved key and the rules version.
+    pub provenance: Value,
+    /// The SHA-256 of the uploaded body: the preview binds the whole file, what no item reads
+    /// included.
+    pub body_sha256: [u8; 32],
+    /// What the reader counted and did not import, as the report shows it; bound into the
+    /// preview too.
+    pub census: Value,
+}
+
+/// One item a harness reader made of an upload.
+#[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a transcript's items are all events and a memory upload holds one item"
+)]
+pub enum ImportItem {
+    /// A harness event, applied under the capture contract as if captured live.
+    Event(ImportEvent),
+    /// A native memory, stored as one fact recorded by one event.
+    Memory(ImportMemory),
+}
+
+/// One harness event of an upload, with the key and order a reader gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportEvent {
+    /// The event ID of its `(machine, event ID)` key, stable across uploads.
+    pub event_id: String,
+    /// Its time, to the second.
+    pub time: DateTime<Utc>,
+    /// The tie-break within that second.
+    pub seq: u32,
+    /// The digest a later upload of the same key is compared with.
+    pub body_sha256: [u8; 32],
+    /// The size of what it was read from, in bytes.
+    pub body_size: u64,
+    /// The 1-based line of the upload it was read from.
+    pub line: usize,
+    /// The event.
+    pub record: NeutralRecord,
+}
+
+/// One native memory of an upload, with its key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportMemory {
+    /// The event ID of its key.
+    pub event_id: String,
+    /// The digest a later upload of the same key is compared with.
+    pub body_sha256: [u8; 32],
+    /// The size of the file, in bytes.
+    pub body_size: u64,
+    /// The memory, unredacted.
+    pub item: MemoryItem,
+}
+
+/// What became of one item of an import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// Stored, or stored by a commit.
+    Stored,
+    /// The key is held with this item's digest: nothing written.
+    Duplicate,
+    /// The key is held with another digest: nothing written, and a write refused.
+    Collision,
+    /// The session was captured live from before this item: nothing written.
+    LiveOverlap,
+    /// The engine cannot apply it (a fixed phrase): skipped, no key held.
+    Refused(&'static str),
+}
+
+/// What an imported item is, read from what the store would hold of it: every text redacted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemSummary {
+    /// The event ID of its key.
+    pub event_id: String,
+    /// The upload's line it was read from, when it has one.
+    pub line: Option<usize>,
+    /// Its kind: a neutral kind's name, or `memory`.
+    pub kind: &'static str,
+    /// `main` or `subagent`; `None` for a memory.
+    pub actor: Option<&'static str>,
+    /// Its session; `None` for a memory.
+    pub session_id: Option<String>,
+    /// Its time.
+    pub time: DateTime<Utc>,
+    /// A tool call's tool, redacted.
+    pub tool: Option<String>,
+    /// A tool call's or a stop's outcome.
+    pub outcome: Option<String>,
+    /// A sensitive-path stub's path, redacted.
+    pub stub: Option<String>,
+    /// The redaction placeholders its stored texts hold, by rule.
+    pub placeholders: BTreeMap<String, u64>,
+}
+
+/// A memory an import made, or a commit would make.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FactPreview {
+    /// The event ID of the item it comes from.
+    pub event_id: String,
+    /// What it was made of: `final_message`, `compaction_summary` or `memory`.
+    pub capture: &'static str,
+    /// Its fact type.
+    pub fact_type: FactType,
+    /// The scope path it is filed under.
+    pub home: String,
+    /// Its creation time: its event's.
+    pub t_created: DateTime<Utc>,
+    /// `created`, `reinforced` (an active twin) or `blocked` (a forget's tombstone).
+    pub outcome: &'static str,
+    /// What its reviewer may want to do: `set_level` for a `user` memory, which the default
+    /// placement files at the project.
+    pub hint: Option<&'static str>,
+    /// Its text as stored, cut to 512 bytes.
+    pub preview: String,
+}
+
+/// What an import did, or what its write would do (#1026).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Imported {
+    /// Whether the import committed; a dry run never does.
+    pub committed: bool,
+    /// The preview a write of the same upload must carry.
+    pub preview: [u8; 32],
+    /// The upload's source as stored: redacted with every rule and the denylist.
+    pub source: String,
+    /// Each item's outcome and summary, in order-key order.
+    pub items: Vec<(ImportOutcome, ItemSummary)>,
+    /// Every memory made, or a commit would make.
+    pub facts: Vec<FactPreview>,
+    /// The order key of the first live event of each session the upload holds that has one.
+    pub live_since: BTreeMap<String, OrderKey>,
+    /// The secrets redaction removed from the stored items.
+    pub found: u64,
+    /// The stored items that are sensitive-path stubs.
+    pub stubbed: u64,
 }
 
 /// The state of a segment that [`step`] needs.

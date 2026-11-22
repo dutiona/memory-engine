@@ -123,7 +123,7 @@ fn logged(event_id: &str) -> String {
 
 /// The one value of header `name` when it is present once, short enough, visible ASCII and
 /// accepted by `grammar`.
-fn field<'a>(
+pub(crate) fn field<'a>(
     headers: &'a HeaderMap,
     name: &'static str,
     grammar: impl Fn(&str) -> bool,
@@ -148,7 +148,7 @@ fn is_event_id(s: &str) -> bool {
 
 /// `YYYY-MM-DDTHH:MM:SSZ`, UTC, whole seconds. The shape is checked before chrono reads it, so
 /// nothing chrono tolerates beyond the grammar gets in.
-fn event_time(s: &str) -> Option<DateTime<Utc>> {
+pub(crate) fn event_time(s: &str) -> Option<DateTime<Utc>> {
     let b = s.as_bytes();
     let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
     let shaped = b.len() == 20
@@ -295,7 +295,7 @@ pub const fn status_of(error: &MemoryError) -> StatusCode {
 }
 
 /// What an error is, for the log: never its message, which may quote the event.
-const fn error_class(error: &MemoryError) -> &'static str {
+pub(crate) const fn error_class(error: &MemoryError) -> &'static str {
     match error {
         MemoryError::Storage(StorageError::Unavailable(_)) => "storage unavailable",
         MemoryError::Storage(_) => "storage",

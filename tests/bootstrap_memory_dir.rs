@@ -386,3 +386,37 @@ async fn a_failed_run_still_counts_the_files_it_committed() {
         1
     );
 }
+
+/// The metadata names the importer writes are its schema (ADR-0009 D5 queries them): a denylist
+/// literal equal to one rewrites its value, never the name.
+#[tokio::test]
+async fn the_denylist_never_renames_a_metadata_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(
+        root,
+        "feedback_rule.md",
+        "---\nname: rule\ndescription: a rule for the memory_type field\nmetadata:\n  type: feedback\n---\nKeep the rule.\n",
+    );
+    let engine = MemoryEngine::builder(4).build().unwrap();
+    let config = BootstrapConfig {
+        denylist: vec!["memory_type".to_owned()],
+        ..BootstrapConfig::default()
+    };
+    engine
+        .bootstrap_memory_directory(
+            root,
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let fact = &engine.list_active_facts(None).await.unwrap()[0];
+    assert_eq!(fact.metadata["memory_type"], "feedback");
+    assert_eq!(
+        fact.metadata["description"],
+        "a rule for the [REDACTED:denylist] field"
+    );
+}

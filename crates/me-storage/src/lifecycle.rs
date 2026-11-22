@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use me_types::error::Result;
-use me_types::types::lifecycle::{Applied, DeliveryWrite};
+use me_types::types::lifecycle::{Applied, Batch, BatchMode, DeliveryWrite, Keyed};
 
 /// Idempotent delivery of harness events.
 ///
@@ -39,6 +39,38 @@ pub trait Lifecycle: Send + Sync {
         received_at: DateTime<Utc>,
         write: DeliveryWrite,
     ) -> Result<Applied>;
+
+    /// Record an upload's `items` for `machine`, received at `received_at`, in one transaction
+    /// (#1026).
+    ///
+    /// The transaction takes the write lock first, then reads, once per session of the batch's
+    /// captures, the first live event of that session and `machine` (an event whose `source` is
+    /// `lifecycle`, by order key). Each item is then applied as [`record_delivery`] applies one,
+    /// in item order: its key first, a key an earlier item of the batch wrote included
+    /// ([`Applied::Duplicate`] or [`Applied::Collision`]); then a capture at or after its
+    /// session's first live event is [`Applied::LiveOverlap`] and writes nothing; otherwise the
+    /// item is stored. A memory is filed under its home with its event, blocked by a tombstone
+    /// of its text, reinforcing an active twin in its home, or queued for its vector.
+    ///
+    /// The batch's preview is [`preview_digest`](me_types::types::lifecycle::preview_digest) of
+    /// `context` and the outcomes. A [`BatchMode::DryRun`] rolls back; a [`BatchMode::Write`]
+    /// commits only when no item collided and its preview is the batch's, and rolls back
+    /// otherwise. Every time written is `received_at`, never the backend's clock.
+    ///
+    /// [`record_delivery`]: Lifecycle::record_delivery
+    ///
+    /// # Contract
+    ///
+    /// `Ok` with `committed` ⟹ committed whole; any other answer ⟹ store unchanged. Every item
+    /// has its outcome, a collision included.
+    async fn record_deliveries(
+        &self,
+        machine: &str,
+        received_at: DateTime<Utc>,
+        items: Vec<Keyed>,
+        context: [u8; 32],
+        mode: BatchMode,
+    ) -> Result<Batch>;
 
     /// End, as idle, every open segment whose latest event was received before `idle_before`,
     /// in one transaction; returns how many. A second call ends none of them again.
