@@ -13,6 +13,9 @@ use serde_json::{Map, Value};
 pub mod memory;
 pub mod transcript;
 
+/// The text Claude Code puts at the start of what an interruption leaves.
+pub(super) const INTERRUPTED: &str = "[Request interrupted by user";
+
 /// Tools whose calls are formatting or lint fixes: stored as events, kept out of the activity
 /// stream. A case-insensitive substring of the tool name.
 const IGNORED: [&str; 4] = ["prettier", "eslint_fix", "ruff_format", "clang_format"];
