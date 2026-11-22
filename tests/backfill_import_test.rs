@@ -702,6 +702,46 @@ async fn a_tool_input_key_is_redacted_in_the_event_and_the_activity() {
     assert!(stored.contains("[REDACTED:aws-access-key]"), "{stored}");
 }
 
+/// A memory's metadata is the caller's beside the importer's own names: only those names, at
+/// the top level, keep their key; any other key, nested ones included, is redacted like text.
+#[tokio::test]
+async fn a_memory_metadata_key_is_redacted_unless_it_is_the_importers() {
+    let s = Store::new();
+    let aws = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("source".into(), json!("memory-dir"));
+    metadata.insert("description".into(), json!("on fixturehost"));
+    metadata.insert(aws.clone(), json!("a secret key"));
+    metadata.insert("extra".into(), json!({ "fixturehost-note": "y" }));
+    let items = vec![ImportItem::Memory(ImportMemory {
+        event_id: "bf.m.1".into(),
+        body_sha256: digest("a rule"),
+        body_size: 6,
+        item: MemoryItem {
+            text: "a rule".into(),
+            fact_type: FactType::Procedural,
+            importance: 0.6,
+            time: at(1),
+            metadata: Value::Object(metadata),
+        },
+    })];
+
+    s.write(&upload(HOME), &items, &["fixturehost".to_owned()])
+        .await;
+
+    let fact = &s.engine.list_active_facts(None).await.unwrap()[0];
+    assert_eq!(
+        fact.metadata,
+        json!({
+            "source": "memory-dir",
+            "description": "on [REDACTED:denylist]",
+            "[REDACTED:aws-access-key]": "a secret key",
+            "extra": { "[REDACTED:denylist]-note": "y" },
+            "machine": "laptop",
+        })
+    );
+}
+
 /// A key the core writes is the record's schema: the stub's `sensitive_path` and a memory's
 /// metadata names are never rewritten, whatever the denylist holds, while their values lose it.
 #[tokio::test]

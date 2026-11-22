@@ -70,8 +70,9 @@ other out.
 denylist included where the path applies it): a key is content too. Keys that redact to one text keep every member,
 the later ones in key order renamed `~1`, `~2`, …. A key the core writes itself is the record's schema and is never
 rewritten, only its value: an event payload's own member names (they take every rule but the denylist), a stub's
-`sensitive_path`, and a memory file's metadata names (`source`, `file`, `name`, `description`, `memory_type`,
-`route`). A tool input's own keys are scrubbed when the call is captured.
+`sensitive_path`, and a memory file's metadata names at its top level (`source`, `file`, `name`, `description`,
+`memory_type`, `route`); any other metadata key, nested ones included, is the caller's and is redacted. A tool input's
+own keys are scrubbed when the call is captured.
 
 ## Write paths
 

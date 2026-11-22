@@ -283,6 +283,17 @@ pub fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<(
     Ok(())
 }
 
+/// The metadata names [`build_metadata`] writes: the importer's schema, which redaction never
+/// renames (ADR-0009 D5's queries read them).
+pub const METADATA_NAMES: &[&str] = &[
+    "source",
+    "file",
+    "name",
+    "description",
+    "memory_type",
+    "route",
+];
+
 /// Build the provenance metadata object for a memory-dir fact.
 fn build_metadata(file: &str, parsed: &ParsedMemory, route_kb: bool) -> serde_json::Value {
     let mut metadata = serde_json::json!({
@@ -435,8 +446,12 @@ fn prepare_one_memory(
     // free-text and can carry a secret (e.g. a memory quoting a leaked token).
     // Scrub the whole metadata object so the stored row holds no unredacted
     // secret anywhere, not just in the body content.
-    redactions += usize::try_from(redact::scrub_values(&mut metadata, &config.denylist)?)
-        .unwrap_or(usize::MAX);
+    redactions += usize::try_from(redact::scrub_metadata(
+        &mut metadata,
+        &config.denylist,
+        METADATA_NAMES,
+    )?)
+    .unwrap_or(usize::MAX);
 
     // Classifiers read only content/fact_type/base_importance/metadata — build the
     // owned `ClassifierInput` view, not a 20-field synthetic `Fact` cloning the

@@ -831,11 +831,21 @@ pub(crate) fn scrub_json(value: &mut Value, denylist: &[String]) -> Result<u64> 
     scrub_tree(value, denylist, Keys::Scrub)
 }
 
-/// As [`scrub_json`], but every object key is kept: for a tree whose member names the core
-/// writes itself (a memory file's metadata), its schema, which a denylist literal must never
-/// rename. Only the values are content.
-pub(crate) fn scrub_values(value: &mut Value, denylist: &[String]) -> Result<u64> {
-    scrub_tree(value, denylist, Keys::Keep)
+/// As [`scrub_json`], but the top-level member names in `schema`, which the core writes itself
+/// (a memory file's metadata names), keep their key: a denylist literal must never rename them.
+/// Their values are scrubbed, and every other key, nested ones included, is the caller's and is
+/// redacted.
+pub(crate) fn scrub_metadata(
+    value: &mut Value,
+    denylist: &[String],
+    schema: &[&str],
+) -> Result<u64> {
+    let Value::Object(map) = value else {
+        return scrub_json(value, denylist);
+    };
+    scrub_members(map, denylist, schema, |k, v| {
+        scrub_member(k, v, denylist, Keys::Scrub)
+    })
 }
 
 fn scrub_tree(value: &mut Value, denylist: &[String], keys: Keys) -> Result<u64> {
@@ -851,9 +861,9 @@ fn scrub_tree(value: &mut Value, denylist: &[String], keys: Keys) -> Result<u64>
             .iter_mut()
             .map(|v| scrub_tree(v, denylist, keys))
             .sum(),
-        Value::Object(map) if keys == Keys::Scrub => {
-            scrub_members(map, denylist, |k, v| scrub_member(k, v, denylist, keys))
-        }
+        Value::Object(map) if keys == Keys::Scrub => scrub_members(map, denylist, &[], |k, v| {
+            scrub_member(k, v, denylist, keys)
+        }),
         Value::Object(map) => map
             .iter_mut()
             .map(|(k, v)| scrub_member(k, v, denylist, keys))
@@ -862,19 +872,25 @@ fn scrub_tree(value: &mut Value, denylist: &[String], keys: Keys) -> Result<u64>
     }
 }
 
-/// Rebuild `map` with each value scrubbed by `member`, given its original key, and each key
-/// scrubbed like a string with `key_denylist`. A key that scrubs to one already taken gets the
-/// first free `~1`, `~2`, … suffix, in key order, so no member is lost. Returns the findings.
+/// Rebuild `map` with each value scrubbed by `member`, given its original key, and each key but
+/// those in `kept` scrubbed like a string with `key_denylist`. A key that scrubs to one already
+/// taken gets the first free `~1`, `~2`, … suffix, in key order, so no member is lost. Returns
+/// the findings.
 fn scrub_members(
     map: &mut Map<String, Value>,
     key_denylist: &[String],
+    kept: &[&str],
     mut member: impl FnMut(&str, &mut Value) -> Result<u64>,
 ) -> Result<u64> {
     let mut found = 0;
     let mut scrubbed = Map::new();
     for (key, mut value) in std::mem::take(map) {
         found += member(&key, &mut value)?;
-        let (clean, n) = scrub_with(&key, key_denylist)?;
+        let (clean, n) = if kept.contains(&key.as_str()) {
+            (key, 0)
+        } else {
+            scrub_with(&key, key_denylist)?
+        };
         found += n;
         let clean = if scrubbed.contains_key(&clean) {
             // The map holds fewer members than this range has suffixes, so one is free.
@@ -971,7 +987,7 @@ fn scrub_event_payload(
     let Value::Object(map) = payload else {
         return scrub_tree(payload, denylist, nested);
     };
-    scrub_members(map, &[], |k, v| {
+    scrub_members(map, &[], &[], |k, v| {
         Ok(
             if (k == PROVENANCE_KEY && is_provenance(v)) || identifiers.contains(&k) {
                 scrub_provenance_value(v)

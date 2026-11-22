@@ -12,6 +12,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::bootstrap::memory_dir::METADATA_NAMES;
 use crate::error::{ConflictError, MemoryError, Result};
 use crate::limits::{check_json_size, check_str_size};
 use crate::redact;
@@ -392,9 +393,9 @@ fn prepare_memory(
         ));
     }
     let mut metadata = item.metadata;
-    let scrubbed = redact::scrub_with(&item.text, denylist).and_then(|(text, found)| {
-        Ok((text, found + redact::scrub_values(&mut metadata, denylist)?))
-    });
+    let scrub_metadata = |m: &mut Value| redact::scrub_metadata(m, denylist, METADATA_NAMES);
+    let scrubbed = redact::scrub_with(&item.text, denylist)
+        .and_then(|(text, found)| Ok((text, found + scrub_metadata(&mut metadata)?)));
     let (text, found) = match scrubbed {
         Ok(scrubbed) => scrubbed,
         Err(MemoryError::Conflict(ConflictError::Redaction(_))) => {
