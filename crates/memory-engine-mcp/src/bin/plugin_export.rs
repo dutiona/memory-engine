@@ -56,7 +56,9 @@ enum Refusal {
     )]
     WalMissing(PathBuf),
     #[error("the store cannot be read: {0}")]
-    Io(#[from] std::io::Error),
+    Read(std::io::Error),
+    #[error("{0} cannot be written: {1}")]
+    Write(PathBuf, std::io::Error),
     #[error(transparent)]
     Export(#[from] ExportError),
 }
@@ -81,7 +83,7 @@ fn slices(kind: Kind, store: &Path, out: &Path) -> Result<Vec<Slice>, Refusal> {
         return Err(Refusal::Used(out.to_owned()));
     }
     let wal = wal_of(store);
-    if in_wal_mode(store)? && wal.symlink_metadata().is_err() {
+    if in_wal_mode(store).map_err(Refusal::Read)? && wal.symlink_metadata().is_err() {
         return Err(Refusal::WalMissing(wal));
     }
     // Never `immutable=1`: SQLite must apply the `-wal`'s committed frames.
@@ -115,20 +117,24 @@ fn file_name(kind: Kind, project: Option<&str>) -> String {
     format!("{}-{tag}.jsonl", kind.name())
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
+fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Refusal> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(path)?
-        .write_all(bytes)
+        .open(path)
+        .and_then(|mut file| file.write_all(bytes))
+        .map_err(|e| Refusal::Write(path.to_owned(), e))
 }
 
 /// Export `args.store` into `args.out`: the slices' files and `index.tsv`. Returns the files
 /// and the rows written.
 fn run(args: &Args) -> Result<(usize, usize), Refusal> {
     let slices = slices(args.kind, &args.store, &args.out)?;
-    DirBuilder::new().mode(0o700).create(&args.out)?;
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&args.out)
+        .map_err(|e| Refusal::Write(args.out.clone(), e))?;
     let mut index = String::from("file\tproject\tsessions\trows\tbytes\n");
     let mut rows = 0;
     for slice in &slices {

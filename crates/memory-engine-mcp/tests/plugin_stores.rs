@@ -261,8 +261,9 @@ fn the_exporter_reads_the_wal_and_refuses_a_copy_without_it() {
     assert_eq!(files(&checkpointed).len(), want.len() + 1);
 }
 
-/// An output directory that exists is refused, and so is a store missing a column the export
-/// reads, by its name; neither writes anything.
+/// An output directory that exists is refused, one that cannot be created is named as the write
+/// that failed, and a store missing a column the export reads is refused by its name; none
+/// writes anything.
 #[test]
 fn the_exporter_refuses_a_used_directory_and_names_a_missing_column() {
     let dir = tempfile::tempdir().unwrap();
@@ -272,6 +273,14 @@ fn the_exporter_refuses_a_used_directory_and_names_a_missing_column() {
     std::fs::create_dir(&used).unwrap();
     let run = export("claude-memory", &path, &used);
     assert_eq!(run.status.code(), Some(1));
+    let orphan = dir.path().join("missing").join("out");
+    let run = export("claude-memory", &path, &orphan);
+    assert_eq!(run.status.code(), Some(1));
+    assert!(
+        stderr(&run).contains("cannot be written"),
+        "{}",
+        stderr(&run)
+    );
     assert_eq!(files(&used), Vec::new());
 
     let old = dir.path().join("old.db");
