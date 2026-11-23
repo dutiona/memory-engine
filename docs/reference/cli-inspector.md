@@ -163,7 +163,7 @@ memory-engine-cli --db new-agent.db import backup.json
 memory-engine-cli --db new-agent.db import backup.json.gz --embed-dim 384
 ```
 
-Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots. The first `consolidate` afterwards compares every fact for duplicates: the snapshot's dedup watermark is not imported.
+Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots. A snapshot with id marks (`sequences`) keeps its dedup watermark, so the first `consolidate` afterwards compares only the facts added since the export; with an older snapshot that run compares every fact.
 
 A JSON snapshot carries the lifecycle route's two tables, `lifecycle_receipts` and `lifecycle_segments` (#1025), so a
 restored store keeps its idempotency keys (a client's resend of an event the old store had stored is still a

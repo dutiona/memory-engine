@@ -1261,6 +1261,59 @@ async fn dedup_compares_a_reused_id_after_a_restore() {
     assert_eq!(duplicates_removed(&restored).await, 1);
 }
 
+/// #1144: a current export carries its id marks, so its restore keeps dedup's watermark and
+/// generation: a duplicate pair at or below the watermark is not compared again. Without the
+/// marks (a pre-#1131 snapshot) both reset and the pair is compared.
+#[tokio::test]
+async fn dedup_keeps_its_watermark_through_a_restore_of_a_current_export() {
+    use crate::store::facts::{CONSOLIDATION_GENERATION, DEDUP_WATERMARK};
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let cats = add_animal(&engine, "cats purr", None).await;
+    add_animal(&engine, "dogs bark", None).await;
+    engine.pin_fact(cats).await.unwrap();
+    engine.unpin_fact(cats).await.unwrap();
+    assert_eq!(duplicates_removed(&engine).await, 0);
+    let source = (
+        engine.get_config(DEDUP_WATERMARK).await.unwrap(),
+        engine.get_config(CONSOLIDATION_GENERATION).await.unwrap(),
+    );
+    assert!(source.0.is_some() && source.1.is_some(), "{source:?}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("dump.json");
+    engine
+        .dump_state(&crate::inspect::DumpFormat::Json(dump.clone()))
+        .await
+        .unwrap();
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&dump).unwrap()).unwrap();
+    // The dogs fact takes the cats fact's vector: a duplicate pair below the watermark.
+    let facts = snapshot["facts"].as_array_mut().unwrap();
+    let cats_vector = facts[0]["embedding"].clone();
+    facts[1]["embedding"] = cats_vector;
+    std::fs::write(&dump, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+    let restored = MemoryEngine::restore_json_memory(&dump).unwrap();
+    assert_eq!(
+        (
+            restored.get_config(DEDUP_WATERMARK).await.unwrap(),
+            restored.get_config(CONSOLIDATION_GENERATION).await.unwrap(),
+        ),
+        source
+    );
+    assert_eq!(duplicates_removed(&restored).await, 0);
+
+    snapshot
+        .as_object_mut()
+        .unwrap()
+        .remove("sequences")
+        .unwrap();
+    std::fs::write(&dump, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let restored = MemoryEngine::restore_json_memory(&dump).unwrap();
+    assert_eq!(restored.get_config(DEDUP_WATERMARK).await.unwrap(), None);
+    assert_eq!(duplicates_removed(&restored).await, 1);
+}
+
 /// A `SummaryGenerator` that performs an engine WRITE from inside `summarize`.
 /// Used to prove the consumer callbacks run without the engine holding its write
 /// lock (#409): the write only succeeds if `consolidate` is *not* holding
