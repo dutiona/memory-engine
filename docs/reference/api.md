@@ -105,6 +105,9 @@ The two steps of a deferred-embedding drain (#1021); the drain loop is the consu
 - `pinned_only: bool` -- return only pinned facts.
 - `limit: Option<usize>` -- max results (default: 50).
 - `valid_at: Option<DateTime<Utc>>` -- point-in-time filter (mutually exclusive with period).
+- `include_expired_probe: bool` -- also count expired facts matching the FTS query (one extra SQL count; needs `text`).
+- `include_archives: bool` -- also brute-force search the archived `.pak` files, merged and re-ranked by score; a slow
+  fallback (`archive` feature).
 
 `SearchResult` fields:
 
