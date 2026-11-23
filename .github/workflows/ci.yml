@@ -116,6 +116,8 @@ jobs:
           workspaces: "fuzz -> target"
       - name: install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+      - name: the fuzz lock is current (#1093)
+        run: cargo +nightly fetch --locked --manifest-path fuzz/Cargo.toml
       - name: cargo +nightly fuzz build
         run: cargo +nightly fuzz build
       - name: bounded fuzz run of the backfill upload route (#1120)

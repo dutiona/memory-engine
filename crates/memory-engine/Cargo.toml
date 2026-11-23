@@ -89,6 +89,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 insta = { version = "1", features = ["yaml", "redactions"] }
 proptest = "1"
+# tests/api_doc_parity.rs parses api.md's signatures and the facade's (#1092)
+syn = { version = "2", features = ["full", "visit-mut"] }
+quote = "1"
 # Force these leaf crates' `test-util` feature ON for every `cargo test` of this
 # crate, regardless of whether `--features test-util` was passed explicitly
 # (Wave 2 #816, me-backend-sqlite carve, Commit 2): `crate::test_utils` re-exports
@@ -201,6 +204,12 @@ path = "../../tests/all_features_store.rs"
 [[test]]
 name = "gate_matrix_parity"
 path = "../../tests/gate_matrix_parity.rs"
+
+# #1092: every signature docs/reference/api.md documents is the code's. Runs inside
+# cargo test --workspace --all-features; registered by hand (autotests off).
+[[test]]
+name = "api_doc_parity"
+path = "../../tests/api_doc_parity.rs"
 
 # --- examples (top-level ../../examples/) ---
 [[example]]

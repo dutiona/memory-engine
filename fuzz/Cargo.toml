@@ -11,6 +11,21 @@
 #
 # The seam they drive (`fuzz_seam` in memory-engine / memory-engine-embed) is
 # `#[cfg(fuzzing)]`-gated, so it exists only under cargo-fuzz's `--cfg fuzzing`.
+#
+# `fuzz/Cargo.lock` is committed (#1093), so the fuzz build never floats to fresh releases.
+# cargo-fuzz has no `--locked`, so the gate runs, BEFORE `fuzz build` (which would rewrite a
+# stale lock silently):
+#
+#     cargo +nightly fetch --locked --manifest-path fuzz/Cargo.toml
+#
+# It fails whenever a manifest fuzz/ reaches changes: every workspace version bump (each
+# release) and every dependency added, removed or moved in the facade, -embed or -mcp. Then
+# re-seed from the workspace lock, so the crates both graphs share keep the versions the
+# workspace tests, and commit fuzz/Cargo.lock with the change:
+#
+#     cp Cargo.lock fuzz/Cargo.lock && cargo +nightly fetch --manifest-path fuzz/Cargo.toml
+#
+# `cargo deny check` audits the root lock only, not this one.
 [package]
 name = "memory-engine-fuzz"
 version = "0.0.0"
