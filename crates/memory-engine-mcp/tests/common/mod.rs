@@ -944,8 +944,7 @@ pub const LISTENING: &str = "listening on";
 /// [`wait_ready`](Self::wait_ready) has returned `Ok`.
 ///
 /// Readiness reads the child's own [`LISTENING`] line, which is logged at `info`: a test that sets
-/// `RUST_LOG` must keep `memory_engine_mcp` at `info` or finer, and must name the crate, since
-/// `main` replaces a bare level with WARN (#1149).
+/// `RUST_LOG` must keep `memory_engine_mcp` at `info` or finer (a bare `info` does).
 pub struct ServerProcess {
     pub child: Child,
     port: Option<u16>,

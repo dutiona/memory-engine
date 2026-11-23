@@ -26,7 +26,7 @@ new input to the first directory it is given, so naming the seeds first would gr
 generated files.
 
 ```sh
-cargo +nightly fuzz run read_pak fuzz/corpus/read_pak fuzz/seeds/read_pak
+cargo +nightly fuzz run read_pak fuzz/corpus/read_pak fuzz/seeds/read_pak -- -create_missing_dirs=1
 ```
 
 (or copy `fuzz/seeds/read_pak/*.pak` into `fuzz/corpus/read_pak/` once before a

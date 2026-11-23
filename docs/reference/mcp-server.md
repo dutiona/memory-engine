@@ -53,6 +53,7 @@ MEMORY_MCP_LISTEN=127.0.0.1:<port> MEMORY_MCP_TOKEN_FILE=/path/to/tokens MEMORY_
 | `--embed-url`, `--embed-model`, `--embed-api-key`, `--embed-provider` | `MEMORY_MCP_EMBED_URL`, `_MODEL`, `_API_KEY`, `_PROVIDER` | Override the `[embedding]` keys of the same meaning |
 | `--embed-query-instruction` | `MEMORY_MCP_EMBED_QUERY_INSTRUCTION` | Overrides `query_instruction`; `''` for a symmetric model |
 | `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`, `--embed-max-input-tokens` | `MEMORY_MCP_EMBED_ARTIFACT_SHA256`, `_POOLING`, `_NORMALIZATION`, `_MAX_INPUT_TOKENS` | Override the served-artifact keys (below) |
+| — | `RUST_LOG` | The log filter, on stderr. Unset: WARN for every crate. A bare level (`RUST_LOG=debug`) applies to every crate, dependencies included (hyper, rusqlite, tokio). A crate directive (`RUST_LOG=memory_engine_mcp=debug`) raises that crate only; every other crate stays at WARN |
 
 ### Configuration
 
@@ -364,7 +365,7 @@ A move that loses a race with another answers `error: memory 412 changed while i
 changed`. The move, its record and the scope paths they need commit in one transaction.
 
 **Call records.** Each call appends one `MemoryOp` record to the event log (ADR-0021 §12): the call ID, the tool, the
-machine and `project`, the request's facts as decoded with the dropped ones, the key and the rules version:
+machine (as the token file writes it, never redacted, so `erase --machine` finds the record, #1136) and `project`, the request's facts as decoded with the dropped ones, the key and the rules version:
 
 ```json
 {"call":"9f1c2b7a40d3e6f5","tool":"set_level","machine":"laptop","fact_ids":[412],"level":"user","from":"user:alice/project:github.com%2Fexample%2Fproject","to":"user:alice","project":{"facts":{"root":"/home/alice/perso/dev/project","dev_root":"/home/alice/perso/dev","origin_url":"github.com:example/project.git"},"dropped":{},"key":"github.com/example/project","rules":1}}
@@ -550,7 +551,9 @@ A file over 256 MiB is refused whole, never truncated.
 history is the input most likely to hold the author's names, hosts and paths. Set and readable, the file's literals
 apply (an empty or comments-only file is an explicit "none"); unset or unreadable, the server starts, logs which, and
 answers every upload 503, so no dry run is reviewed under weaker redaction than its write would get. Every report
-states `denylist_literals`. Live capture does not use the denylist.
+states `denylist_literals`. Live capture ([lifecycle events](#lifecycle-events)) redacts its content with the same
+literals when they are loaded, never an identifier (#1121), and applies signatures only without them: it never answers
+503 for the denylist.
 
 **What a transcript stores.** The reader reads each line as a JSON object by field name, so one field of an unexpected
 type drops the field, never the line, and maps each entry by the table of

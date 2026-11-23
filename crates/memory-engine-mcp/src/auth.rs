@@ -100,6 +100,25 @@ impl TokenTable {
         Ok(Self { entries })
     }
 
+    /// The machines the file admits, in file order: the names the engine keeps as written in
+    /// its records' and memories' `machine` (#1136).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use memory_engine_mcp::auth::TokenTable;
+    ///
+    /// let dir = tempfile::tempdir()?;
+    /// let file = dir.path().join("tokens");
+    /// std::fs::write(&file, format!("laptop {}\n", "0".repeat(64)))?;
+    /// let table = TokenTable::load(&file)?;
+    /// assert_eq!(table.machines().map(|m| m.as_str()).collect::<Vec<_>>(), ["laptop"]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn machines(&self) -> impl Iterator<Item = &Machine> {
+        self.entries.iter().map(|(_, machine)| machine)
+    }
+
     /// The machine whose token is presented in an `Authorization` header value, if any.
     ///
     /// A value off the token shape is refused before it is hashed; otherwise every entry

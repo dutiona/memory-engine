@@ -287,8 +287,8 @@ impl MemoryMcpServer {
     /// and their Home, the reader the harness and kind select, the engine's import, and the
     /// answer with its report.
     ///
-    /// This is the seam the route calls: total, every input answers 200, 409, 412, 422 or 503
-    /// with a JSON body, and none panics.
+    /// This is the seam the route calls and the `backfill_upload` fuzz target drives: total,
+    /// every input answers 200, 409, 412, 422 or 503 with a JSON body, and none panics.
     pub async fn import_upload(
         &self,
         machine: &Machine,

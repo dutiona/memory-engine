@@ -11,7 +11,7 @@ overlap.
 
 | Priority | Rule | Matches |
 |---|---|---|
-| 0 | `denylist` | A literal of 4 bytes or more from the author's denylist file (`ME_REDACT_DENYLIST_FILE`). Bootstrap and the server's backfill uploads only; every other server path applies signatures only. |
+| 0 | `denylist` | A literal of 4 bytes or more from the author's denylist file (`ME_REDACT_DENYLIST_FILE`). Bootstrap, the server's backfill uploads and its live capture (#1121); every other server path applies signatures only. |
 | 1 | `machine-token` | `me_` and exactly 32 base62 characters, with no `[0-9A-Za-z_]` on either side (ADR-0020 §4). `me_types::Fact` is untouched. |
 | 2 | provider prefixes | A prefix below at a token boundary, 20 bytes or more in all. |
 | 3 | `connection-string-password` | The password of a `user:pass@` URL authority. |
@@ -56,6 +56,11 @@ Never redacted:
   its strings get the machine-token rule only, because the other rules misread ordinary paths (a dot-free root holding
   a UUID, a checkout named `sk-learn-tutorial-2024`) and scrubbing a fact the project key is derived from would merge
   distinct projects. Any other shape under that key is scrubbed normally.
+- A declared machine's name (#1136): the top-level `machine` member of an event payload or of a fact's metadata,
+  when it equals a name the engine was built with (`MemoryEngineBuilder::machines`; the MCP server passes its token
+  file's). It is that machine's identifier, which `erase --machine` matches, so a long random-looking name (which
+  reads as high-entropy) is kept as written and never counted. The same name anywhere else, a `machine` nested
+  deeper, or a `machine` no deployment declared, is content and takes every rule.
 
 **The fixpoint.** One pass can leave a remainder the next one catches, so write paths call `scrub`, which repeats
 passes until one changes nothing, at most 8. A text that does not settle is refused with
@@ -119,6 +124,8 @@ refuses to store them.
   first 512 bytes. The cap applies to the decoded text; its JSON encoding may be longer. A promotion is built from the
   scrubbed result, so its own 200-byte cut also follows redaction. An `OutcomeClass::Other` text is redacted, then
   cut, like the result, on a stub too.
+- **The tool name** is redacted too, never cut, on a stub as well (#1135): two calls whose names differ only by a secret
+  merge, as their inputs do. A name over the 1 MiB write limit is refused, and nothing is written.
 - **Deduplication** hashes the scrubbed, uncut input: two calls that differ only by a secret merge, and two long inputs
   that share their first 512 bytes stay two rows.
 - **Over 1 MiB.** A raw input, result or `Other` outcome over the write limit keeps a redacted excerpt: its first
@@ -166,7 +173,7 @@ client's own session.
   delivery whose `body_size`, or a record whose texts, exceed it is refused, and nothing is written. A memory made from
   such a text is embedded in chunks like any other, and a text over the embedder's input size is marked failed by the
   drain and stays found by full-text search.
-- **Tool calls.** The input and the result are redacted, then cut to 512 bytes, as for `record_activity`
+- **Tool calls.** The tool name is redacted (a name over the 1 MiB write limit refuses the record), and the input and the result are redacted, then cut to 512 bytes, as for `record_activity`
   ([Tool calls](#tool-calls)): a call touching a sensitive path is a stub, and a text over the 1 MiB write limit keeps an
   excerpt of its first 1 MiB.
 - **The payload.** It takes the event payload scrub: its `project` provenance block, when it has exactly the shape the
@@ -174,6 +181,12 @@ client's own session.
   `harness_version`, `kind`, `actor`, `agent_id`, `agent_type`) get the machine-token rule only; every other member
   gets every rule, `cwd` included. A directory name that looks high-entropy may therefore be over-redacted in the
   payload, which no key is derived from.
+- **The author denylist.** When the server has loaded `ME_REDACT_DENYLIST_FILE`, every content member of a captured
+  event loses its literals, as an upload's does ([Backfill uploads](#backfill-uploads)): the prompt, the final message
+  and its memory, the summary, the tool name, input and result (before the cut), `cwd` and a stub's path. Identifiers
+  and the provenance block never do. Without the file, capture applies signatures only (the upload route refuses
+  instead). A capture stored before the file was loaded or changed is not rewritten, and a redelivery of the same body
+  is a duplicate.
 - **Identifiers.** The event ID, the session ID and the agent ID are stored as sent, in columns and in the payload,
   never redacted; one the machine-token rule would change is refused with a 422, so no key and no column holds a token. The server's log names
   an event ID only after the machine-token rule too, on every path, so a token pasted into `ME-Event-Id` is not logged.
@@ -187,9 +200,9 @@ client's own session.
 
 `POST /backfill/uploads` ([MCP server](mcp-server.md#backfill-uploads)) imports a machine's copied history through
 `MemoryEngine::import_backfill`, gated like `record_lifecycle_event`. Its events take exactly the
-[captured events](#captured-events) rules, through the same code, with one difference: the **author denylist** applies
-too. The server reads `ME_REDACT_DENYLIST_FILE` once at start and refuses every upload, dry runs included, when it is
-unset or unreadable, so no dry run is reviewed under weaker redaction than its write would get. The `claude-mem` and
+[captured events](#captured-events) rules, through the same code, the **author denylist** included, with one
+difference: the server reads `ME_REDACT_DENYLIST_FILE` once at start and refuses every upload, dry runs included, when
+it is unset or unreadable, so no dry run is reviewed under weaker redaction than its write would get. The `claude-mem` and
 `claude-memory` plugin-store kinds take the same path: every row redacted with every rule and the denylist, a memory's
 text and metadata with `scrub_metadata`, and their session IDs identifiers.
 
@@ -253,4 +266,6 @@ them.
 
 - Rows stored before this release are not rewritten; today they are smoke data only.
 - A caller can write the capture-context shape itself; its strings then get the machine-token rule only.
+- Rows stored before #1136 keep a `machine` that a rule rewrote: `erase --machine` does not find them by machine
+  (`erase --fact` does).
 - A provider token typed into a project path or branch is stored, as one in a link is.

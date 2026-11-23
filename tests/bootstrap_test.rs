@@ -99,6 +99,32 @@ async fn bootstrap_success_session() {
 }
 
 #[tokio::test]
+async fn the_reference_transcript_loses_only_its_cut_line() {
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../memory-engine-mcp/tests/fixtures/claude-code-transcripts/-work-fixture-p/52c6c7b7-c890-43ec-81a5-a1cf99d3cc84.jsonl"
+    ))
+    .unwrap();
+    let engine = engine();
+    let config = BootstrapConfig::default();
+
+    let report = engine
+        .bootstrap_session(
+            Cursor::new(bytes),
+            std::sync::Arc::new(TestEmbedder),
+            std::sync::Arc::new(KeywordExtractor),
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        report.entries_malformed, 1,
+        "only the fixture's cut line (README line 41) is malformed"
+    );
+}
+
+#[tokio::test]
 async fn bootstrap_leaves_t_valid_none_visible_but_unscheduled() {
     // #521: bootstrap intentionally leaves t_valid = None (valid-time is not externally
     // asserted for retro-observed facts; t_created carries the recency signal). Pin the

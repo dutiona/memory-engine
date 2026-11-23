@@ -395,7 +395,7 @@ async fn events_from_a_sessions_live_start_on_are_dropped() {
     };
     let recorded = s
         .engine
-        .record_lifecycle_event(&live, Ok(record(SESSION, Actor::Main, prompt("live"))))
+        .record_lifecycle_event(&live, Ok(record(SESSION, Actor::Main, prompt("live"))), &[])
         .await
         .unwrap();
     assert!(matches!(recorded, Recorded::Stored { .. }));

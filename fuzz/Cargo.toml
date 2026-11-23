@@ -35,10 +35,11 @@ tokio = { version = "1", features = ["rt"] }
 memory-engine = { path = "../crates/memory-engine", features = ["ann", "compress-gzip", "compress-zstd", "archive"] }
 memory-engine-embed = { path = "../crates/memory-engine-embed" }
 # Drives the MCP tool dispatcher (`MemoryMcpServer::dispatch`), the server's primary
-# untrusted-input entry point (#321), and the lifecycle route's seam
-# (`MemoryMcpServer::record_lifecycle`, #1025).
+# untrusted-input entry point (#321), the lifecycle route's seam
+# (`MemoryMcpServer::record_lifecycle`, #1025), and the backfill upload seam
+# (`MemoryMcpServer::import_upload`, #1120).
 memory-engine-mcp = { path = "../crates/memory-engine-mcp" }
-# The header map the dispatch and lifecycle_event targets build their headers from; the version
+# The header map the dispatch, lifecycle_event and backfill_upload targets build their headers from; the version
 # axum 0.8 uses, so `ProjectFacts::from_headers` and `Envelope::from_headers` take it as is.
 http = "1"
 
@@ -122,6 +123,13 @@ bench = false
 [[bin]]
 name = "lifecycle_event"
 path = "fuzz_targets/lifecycle_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "backfill_upload"
+path = "fuzz_targets/backfill_upload.rs"
 test = false
 doc = false
 bench = false

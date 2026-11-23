@@ -798,4 +798,53 @@ mod capture {
         assert!(cut.len() <= 512 && holds_no_fragment(cut, &token), "{cut}");
         assert!(cut.contains("[REDACTED:github-pat]"), "{cut}");
     }
+
+    /// #1135: the tool name is stored redacted, as its input and result are; a duplicate's name
+    /// only matched its row, so its findings count once.
+    #[tokio::test]
+    async fn a_secret_shaped_tool_name_is_stored_redacted() {
+        let s = store();
+        let config = ActivityFilterConfig::new(300, [] as [&str; 0], [] as [&str; 0]);
+        let call = request(
+            &format!("run {}", aws()),
+            json!({ "command": "ls" }),
+            Some("ok".into()),
+        );
+        let first = s
+            .engine
+            .record_activity(&call, None, &config)
+            .await
+            .unwrap();
+        let second = s
+            .engine
+            .record_activity(&call, None, &config)
+            .await
+            .unwrap();
+        assert!(second.was_deduplicated, "{second:?}");
+        assert_eq!(second.activity_id, first.activity_id);
+        assert_eq!(
+            activities(&s.engine).await[0].tool_name,
+            "run [REDACTED:aws-access-key]"
+        );
+        assert_eq!(counts(s).await, (1, 0));
+    }
+
+    /// A tool name over the 1 MiB write limit is refused before anything scans or stores it.
+    #[tokio::test]
+    async fn an_oversized_tool_name_is_refused() {
+        let s = store();
+        let config = ActivityFilterConfig::new(300, [] as [&str; 0], [] as [&str; 0]);
+        let call = request(&"x".repeat(1024 * 1024 + 1), json!({}), None);
+        let refused = s.engine.record_activity(&call, None, &config).await;
+        assert!(
+            matches!(
+                refused,
+                Err(memory_engine::MemoryError::Conflict(
+                    memory_engine::error::ConflictError::PayloadTooLarge { .. }
+                ))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(counts(s).await, (0, 0), "nothing scanned, nothing stored");
+    }
 }

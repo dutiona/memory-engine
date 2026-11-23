@@ -13,7 +13,7 @@ new input to the first directory it is given, so naming the seeds first would gr
 generated files.
 
 ```sh
-cargo +nightly fuzz run lifecycle_event fuzz/corpus/lifecycle_event fuzz/seeds/lifecycle_event
+cargo +nightly fuzz run lifecycle_event fuzz/corpus/lifecycle_event fuzz/seeds/lifecycle_event -- -create_missing_dirs=1
 ```
 
 Regenerating, from the repository root, after a fixture changes:

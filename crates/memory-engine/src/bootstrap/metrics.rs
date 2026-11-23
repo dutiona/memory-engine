@@ -74,8 +74,8 @@ pub struct BootstrapReport {
     pub secrets_redacted: usize,
     /// Native `.md` memory files parsed (the `--memory-dir` path only).
     pub memory_files_parsed: usize,
-    /// Native `.md` memory files skipped — unreadable or no parseable body
-    /// (the `--memory-dir` path only).
+    /// Native `.md` memory files skipped — unreadable, the `MEMORY.md` index, or no
+    /// parseable body (the `--memory-dir` path only).
     pub memory_files_skipped: usize,
     pub events_ingested: usize,
     pub outcome_counts: OutcomeCounts,

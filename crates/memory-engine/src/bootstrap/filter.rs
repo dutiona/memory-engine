@@ -111,18 +111,41 @@ const LEARNING_KEYWORDS: &[&str] = &["discovered", "til", "turns out", "reason i
 // Turn reconstruction
 // ---------------------------------------------------------------------------
 
+/// The prefix Claude Code writes when the user interrupts a turn; both
+/// transcript readers use it.
+pub const INTERRUPTED: &str = "[Request interrupted by user";
+
+/// Whether `entry` takes part in a turn: a user or assistant entry, except a user entry without
+/// a tool result that is no prompt (an `isMeta` or `isCompactSummary` row, or one whose text
+/// starts with [`INTERRUPTED`]). A row with a tool result always does, so dropping the others
+/// never shifts the positional pairing of results with calls.
+fn takes_part(entry: &SessionEntry) -> bool {
+    let flagged = |flag: &Option<serde_json::Value>| *flag == Some(serde_json::Value::Bool(true));
+    match entry.entry_type {
+        EntryType::Assistant => true,
+        EntryType::User => {
+            entry.tool_use_result.is_some()
+                || !(flagged(&entry.is_meta)
+                    || flagged(&entry.is_compact_summary)
+                    || extract_text(entry).starts_with(INTERRUPTED))
+        }
+        _ => false,
+    }
+}
+
 /// Reconstruct [`ConversationTurn`]s from a raw `SessionEntry` sequence.
 ///
 /// Progress, queue-operation, file-history-snapshot, last-prompt, and unknown
 /// entries are filtered out. User + assistant entries are paired first by
 /// UUID/parent-UUID linkage, then by sequential fallback.
+///
+/// Three kinds of user entry are also dropped: `isMeta` and `isCompactSummary`
+/// rows (harness metadata, not prompts), and rows whose text starts with
+/// [`INTERRUPTED`] (an interrupted turn, not a prompt). None of them carries a
+/// `tool_use_result`, and an entry with one is never dropped.
 #[must_use]
 pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
-    // Keep only user/assistant entries.
-    let relevant: Vec<&SessionEntry> = entries
-        .iter()
-        .filter(|e| matches!(e.entry_type, EntryType::User | EntryType::Assistant))
-        .collect();
+    let relevant: Vec<&SessionEntry> = entries.iter().filter(|e| takes_part(e)).collect();
 
     if relevant.is_empty() {
         return Vec::new();
@@ -525,7 +548,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::bootstrap::parse::{EntryType, MessagePayload, SessionEntry, ToolUseResult};
+    use crate::bootstrap::parse::{
+        EntryType, MessagePayload, SessionEntry, ToolUseResult, parse_session_file,
+    };
 
     // -- helpers --
 
@@ -551,6 +576,8 @@ mod tests {
                 content: Some(json!([{"type": "text", "text": text}])),
             }),
             tool_use_result: None,
+            is_meta: None,
+            is_compact_summary: None,
             data: None,
         }
     }
@@ -569,6 +596,8 @@ mod tests {
                 content: Some(json!([{"type": "text", "text": text}])),
             }),
             tool_use_result: None,
+            is_meta: None,
+            is_compact_summary: None,
             data: None,
         }
     }
@@ -596,6 +625,8 @@ mod tests {
                 ])),
             }),
             tool_use_result: None,
+            is_meta: None,
+            is_compact_summary: None,
             data: None,
         }
     }
@@ -611,6 +642,8 @@ mod tests {
             git_branch: None,
             message: None,
             tool_use_result: None,
+            is_meta: None,
+            is_compact_summary: None,
             data: None,
         }
     }
@@ -642,6 +675,8 @@ mod tests {
                 interrupted: Some(false),
                 is_error: Some(is_error),
             }),
+            is_meta: None,
+            is_compact_summary: None,
             data: None,
         }
     }
@@ -665,6 +700,8 @@ mod tests {
                 interrupted: Some(true),
                 is_error: Some(false),
             }),
+            is_meta: None,
+            is_compact_summary: None,
             data: None,
         }
     }
@@ -734,6 +771,66 @@ mod tests {
     }
 
     #[test]
+    fn meta_summary_and_interrupt_lines_are_not_prompts() {
+        let jsonl = [
+            r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-03-19T10:00:00Z","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"run ls"}}"#,
+            r#"{"type":"assistant","sessionId":"sess-1","timestamp":"2026-03-19T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"cmd":"ls"}}]}}"#,
+            r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-03-19T10:00:02Z","uuid":"u2","parentUuid":"a1","isMeta":true,"message":{"role":"user","content":"tool output"},"toolUseResult":"ok, ls ran"}"#,
+            r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-03-19T10:01:00Z","uuid":"u3","parentUuid":null,"isMeta":true,"message":{"role":"user","content":"isMeta text"}}"#,
+            r#"{"type":"assistant","sessionId":"sess-1","timestamp":"2026-03-19T10:01:01Z","uuid":"a2","parentUuid":"u3","message":{"role":"assistant","content":"reply to meta"}}"#,
+            r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-03-19T10:02:00Z","uuid":"u4","parentUuid":null,"isCompactSummary":true,"message":{"role":"user","content":"summary text"}}"#,
+            r#"{"type":"assistant","sessionId":"sess-1","timestamp":"2026-03-19T10:02:01Z","uuid":"a3","parentUuid":"u4","message":{"role":"assistant","content":"reply to summary"}}"#,
+            r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-03-19T10:03:00Z","uuid":"u5","parentUuid":null,"message":{"role":"user","content":"[Request interrupted by user for tool use]"}}"#,
+            r#"{"type":"assistant","sessionId":"sess-1","timestamp":"2026-03-19T10:03:01Z","uuid":"a4","parentUuid":"u5","message":{"role":"assistant","content":"reply to interrupt"}}"#,
+        ]
+        .join("\n");
+        let (entries, malformed) = parse_session_file(jsonl.as_bytes(), 0, 0);
+        assert_eq!(malformed, 0);
+        let turns = reconstruct_turns(&entries);
+
+        for turn in &turns {
+            assert!(!turn.user_text.contains("isMeta text"));
+            assert!(!turn.user_text.contains("summary text"));
+            assert!(!turn.user_text.contains("[Request interrupted"));
+        }
+        assert!(turns.iter().any(|t| t.user_text == "run ls"));
+        let turn = turns.iter().find(|t| t.user_text == "run ls").unwrap();
+        // The tool-result row is flagged `isMeta` too: a row with a result is never dropped.
+        assert_eq!(turn.tool_calls[0].stdout.as_deref(), Some("ok, ls ran"));
+    }
+
+    /// The reference transcript's interrupt (README line 21), `isMeta` caveat (line 30) and
+    /// compaction summary (line 32) reach no turn as a prompt, while its real prompts do.
+    #[test]
+    fn the_reference_transcript_makes_no_prompt_of_its_non_prompts() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../memory-engine-mcp/tests/fixtures/claude-code-transcripts/-work-fixture-p/",
+            "52c6c7b7-c890-43ec-81a5-a1cf99d3cc84.jsonl"
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let (entries, _) = parse_session_file(bytes.as_slice(), 0, 0);
+        let turns = reconstruct_turns(&entries);
+        assert!(
+            turns.iter().any(|t| !t.user_text.is_empty()),
+            "its prompts make turns"
+        );
+        for turn in &turns {
+            for not_a_prompt in [
+                INTERRUPTED,
+                "Caveat: The messages below",
+                "This session is being continued",
+            ] {
+                assert!(
+                    !turn.user_text.contains(not_a_prompt),
+                    "{not_a_prompt}: {}",
+                    turn.user_text
+                );
+            }
+        }
+    }
+
+    #[test]
     fn reconstruct_interrupted_false_by_default() {
         let entries = vec![
             user_entry("u1", "", "run ls", 100),
@@ -767,6 +864,8 @@ mod tests {
                 ])),
             }),
             tool_use_result: None,
+            is_meta: None,
+            is_compact_summary: None,
             data: None,
         };
         let entries = vec![

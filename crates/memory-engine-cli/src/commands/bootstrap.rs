@@ -3,7 +3,7 @@
 //!
 //! Two source kinds, either or both per invocation:
 //!   - `--jsonl-dir` — Claude/Codex/Gemini session `.jsonl` transcripts (AAP #53).
-//!   - `--memory-dir` — native `.md` memory files (`MEMORY.md` + fact files).
+//!   - `--memory-dir` — native `.md` memory files (each `MEMORY.md` index skipped).
 //!
 //! Both paths are **redaction-gated** (#45/#51 — runs before any write, no
 //! bypass flag), **dedup-with-reinforced** (#520), and **backdated** (#521).
@@ -31,7 +31,8 @@ pub struct BootstrapArgs {
     #[arg(long)]
     jsonl_dir: Option<PathBuf>,
 
-    /// Directory of native `.md` memory files to import (recursive).
+    /// Directory of native `.md` memory files to import (recursive; each `MEMORY.md` index is
+    /// skipped, and one an older release imported stays a fact until `erase --fact` removes it).
     #[arg(long)]
     memory_dir: Option<PathBuf>,
 

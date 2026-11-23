@@ -11,7 +11,7 @@ use chrono::SecondsFormat;
 use serde_json::{Map, Value, json};
 
 use crate::error::{MemoryError, Result, StorageError};
-use crate::limits::LIFECYCLE_BODY_BYTES;
+use crate::limits::{LIFECYCLE_BODY_BYTES, MAX_PAYLOAD_BYTES};
 use crate::redact;
 use crate::types::lifecycle::{
     Actor, Applied, BodyFault, CaptureWrite, Content, Delivery, DeliveryWrite, IDLE, Kind,
@@ -29,19 +29,11 @@ const MAX_SESSION_ID_BYTES: usize = 256;
 /// The start sources that begin a new run (ADR-0020 §5, rule 2).
 const BOUNDARY_SOURCES: [&str; 4] = ["startup", "resume", "clear", "fork"];
 
-/// What separates an imported capture from a live one (#1026): the author's denylist, which
-/// live capture does not take, and where the event came from.
+/// How one capture is redacted and labelled: the author's denylist its content loses (live
+/// capture and imports alike, #1121; empty for signatures only), and where the event came from.
 pub(super) struct Capture<'a> {
     pub(super) denylist: &'a [String],
     pub(super) origin: Origin<'a>,
-}
-
-impl Capture<'static> {
-    /// Live capture: signatures only, labelled `lifecycle`, its memory dated by its receipt.
-    pub(super) const LIVE: Self = Self {
-        denylist: &[],
-        origin: Origin::Live,
-    };
 }
 
 /// Where a captured event came from.
@@ -99,12 +91,14 @@ impl MemoryEngine {
     ///   ([`Recorded::Quarantined`]);
     /// - a body the adapter cannot map ([`BodyFault::Unmappable`]), an identifier holding a
     ///   machine token, or a record off the engine's invariants (a session ID of 0 or over 256
-    ///   bytes, an empty compaction summary, a delivery or a text over
-    ///   [`LIFECYCLE_BODY_BYTES`]) is [`Recorded::Refused`], and leaves no key;
-    /// - a record is redacted, bounded and stored: its event, the activity of a tool call the
-    ///   adapter did not ignore, the memory a main final message or compaction summary becomes
-    ///   (queued for its vector, so capture succeeds with the embedder down; skipped when a
-    ///   tombstone blocks its text), and its session's segment step.
+    ///   bytes, an empty compaction summary, a tool name over the 1 MiB write limit, a delivery or
+    ///   a text over [`LIFECYCLE_BODY_BYTES`]) is [`Recorded::Refused`], and leaves no key;
+    /// - a record is redacted (every signature rule, and the author `denylist` on every content
+    ///   member, never on an identifier: `&[]` applies signatures only), bounded and stored: its
+    ///   event, the activity of a tool call the adapter did not ignore, the memory a main final
+    ///   message or compaction summary becomes (queued for its vector, so capture succeeds with
+    ///   the embedder down; skipped when a tombstone blocks its text), and its session's segment
+    ///   step.
     ///
     /// Prompts, final messages and summaries are kept in full after redaction: the body limit
     /// of the route is the one size bound. Tool inputs and results are cut to 512 bytes, and a
@@ -145,11 +139,11 @@ impl MemoryEngine {
     ///     content: Content::Prompt { text: Some("hello".into()) },
     /// };
     /// assert_eq!(
-    ///     engine.record_lifecycle_event(&delivery, Ok(record.clone())).await?,
+    ///     engine.record_lifecycle_event(&delivery, Ok(record.clone()), &[]).await?,
     ///     Recorded::Stored { fact: None }
     /// );
     /// assert_eq!(
-    ///     engine.record_lifecycle_event(&delivery, Ok(record)).await?,
+    ///     engine.record_lifecycle_event(&delivery, Ok(record), &[]).await?,
     ///     Recorded::Duplicate
     /// );
     /// # Ok::<(), memory_engine::MemoryError>(())
@@ -159,10 +153,11 @@ impl MemoryEngine {
         &self,
         delivery: &Delivery,
         body: std::result::Result<NeutralRecord, BodyFault>,
+        denylist: &[String],
     ) -> Result<Recorded> {
         self.ensure_open()?;
         self.ensure_writable()?;
-        let plan = plan(delivery, body).await?;
+        let plan = plan(delivery, body, denylist).await?;
         let (write, refusal, found, stubbed) = match plan {
             Plan::Refuse(reason) => (DeliveryWrite::Check, Some(reason), 0, 0),
             Plan::Write {
@@ -266,6 +261,7 @@ pub fn read_quarantined(db: &Path) -> Result<u64> {
 async fn plan(
     delivery: &Delivery,
     body: std::result::Result<NeutralRecord, BodyFault>,
+    denylist: &[String],
 ) -> Result<Plan> {
     if let Some(reason) = delivery_off_invariants(delivery) {
         return Ok(Plan::Refuse(reason));
@@ -290,10 +286,16 @@ async fn plan(
             if let Some(reason) = record_off_invariants(&record) {
                 return Ok(Plan::Refuse(reason));
             }
-            let delivery = delivery.clone();
-            tokio::task::spawn_blocking(move || prepare(&delivery, record, &Capture::LIVE))
-                .await
-                .map_err(spawn_join_err)?
+            let (delivery, denylist) = (delivery.clone(), denylist.to_vec());
+            tokio::task::spawn_blocking(move || {
+                let capture = Capture {
+                    denylist: &denylist,
+                    origin: Origin::Live,
+                };
+                prepare(&delivery, record, &capture)
+            })
+            .await
+            .map_err(spawn_join_err)?
         }
     }
 }
@@ -333,6 +335,11 @@ pub(super) fn record_off_invariants(record: &NeutralRecord) -> Option<&'static s
     }
     if matches!(&record.content, Content::Compact { summary, .. } if summary.is_empty()) {
         return Some("the compaction summary is empty");
+    }
+    // `capture_tool_use` refuses such a name too; here it is one refused item, never an error
+    // that would fail a whole upload (#1135).
+    if matches!(&record.content, Content::ToolUse { tool, .. } if tool.len() > MAX_PAYLOAD_BYTES) {
+        return Some("the tool name is over the write limit");
     }
     (text_len(record) > LIFECYCLE_BODY_BYTES).then_some("the text is over the lifecycle limit")
 }
@@ -432,6 +439,7 @@ fn content_members(
                 ToolOutcome::Interrupted => OutcomeClass::Other("interrupted".to_owned()),
             };
             let capture = redact::capture_tool_use(
+                tool,
                 input,
                 result.as_deref(),
                 class,
@@ -441,9 +449,7 @@ fn content_members(
             )?;
             extras.found = capture.input_found + capture.result_found;
             extras.stubbed = u64::from(capture.stub);
-            // A tool name is content: the payload's copy is scrubbed below, the activity's here.
-            let (tool_name, _) = redact::scrub_with(tool, denylist)?;
-            payload.insert("tool".to_owned(), json!(tool));
+            payload.insert("tool".to_owned(), json!(capture.tool));
             payload.insert("input".to_owned(), capture.args.clone());
             payload.insert("result".to_owned(), json!(capture.result));
             payload.insert("outcome".to_owned(), json!(tool_outcome(*outcome)));
@@ -451,7 +457,7 @@ fn content_members(
             extras.activity = dedup_window_secs.map(|window| {
                 let activity = NewActivity {
                     session_id: record.session_id.clone(),
-                    tool_name: tool_name.clone(),
+                    tool_name: capture.tool.clone(),
                     args_hash: args_hash(&capture.hash_input),
                     args: capture.args,
                     result_summary: capture.result,
@@ -652,7 +658,11 @@ mod tests {
         assert_eq!(fact.last_accessed, delivery.time);
         assert_eq!(fact.t_valid, Some(delivery.time));
 
-        let live = captured(&delivery, final_message(None), &Capture::LIVE);
+        let live = Capture {
+            denylist: &[],
+            origin: Origin::Live,
+        };
+        let live = captured(&delivery, final_message(None), &live);
         assert_eq!(
             (
                 live.event.source.as_str(),

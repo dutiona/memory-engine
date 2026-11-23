@@ -287,7 +287,7 @@ async fn status_counts_quarantined_events() {
             column: 1,
         });
         engine
-            .record_lifecycle_event(&delivery, Err(fault))
+            .record_lifecycle_event(&delivery, Err(fault), &[])
             .await
             .unwrap();
     }

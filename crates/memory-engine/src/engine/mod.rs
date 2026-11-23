@@ -245,6 +245,9 @@ pub struct MemoryEngine {
     /// [`embed_work_arrived`](Self::embed_work_arrived). `notify_one` stores a permit, so
     /// a drain not yet waiting still wakes.
     embed_work: tokio::sync::Notify,
+    /// The deployment's machine names ([`MemoryEngineBuilder::machines`], #1136): the write
+    /// gates keep a top-level `machine` member naming one as written.
+    machines: Box<[String]>,
 }
 
 impl std::fmt::Debug for MemoryEngine {
@@ -393,6 +396,7 @@ impl MemoryEngine {
             closed: AtomicBool::new(false),
             reopen_required: AtomicUsize::new(0),
             embed_work: tokio::sync::Notify::new(),
+            machines: Box::default(),
         })
     }
 
@@ -768,7 +772,9 @@ impl MemoryEngine {
         let (content, mut found) = redact::scrub_with(&req.content, &[])?;
         req.content = content;
         if let Some(metadata) = req.opts.as_mut().and_then(|o| o.metadata.as_mut()) {
+            let machine = self.take_declared_machine(metadata);
             found += redact::scrub_json(metadata, &[])?;
+            restore_machine(metadata, machine);
         }
         Ok((req, found))
     }
@@ -780,9 +786,27 @@ impl MemoryEngine {
         self.ensure_writable()?;
         check_json_size(&event.payload, "event payload")?;
         let mut event = event.clone();
+        let machine = self.take_declared_machine(&mut event.payload);
         let found = redact::scrub_payload(&mut event.payload)?;
+        restore_machine(&mut event.payload, machine);
         check_json_size(&event.payload, "event payload")?;
         Ok((event, found))
+    }
+
+    /// Take out of `value` a top-level `machine` member that names a declared machine (#1136),
+    /// so the scrub neither rewrites nor counts it: it is that machine's identifier, which
+    /// `erase --machine` matches. Any other `machine` stays, as content.
+    fn take_declared_machine(&self, value: &mut serde_json::Value) -> Option<serde_json::Value> {
+        let map = value.as_object_mut()?;
+        let declared = map
+            .get("machine")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|m| self.machines.iter().any(|d| d == m));
+        if declared {
+            map.remove("machine")
+        } else {
+            None
+        }
     }
 
     /// Raise the store's redaction totals once a write has committed (#1024). The write
@@ -923,6 +947,13 @@ impl MemoryEngine {
             }
             None => Ok(vec![ScopeTree::root_id()]),
         }
+    }
+}
+
+/// Put back the `machine` member [`MemoryEngine::take_declared_machine`] took out.
+fn restore_machine(value: &mut serde_json::Value, machine: Option<serde_json::Value>) {
+    if let (Some(machine), Some(map)) = (machine, value.as_object_mut()) {
+        map.insert("machine".to_owned(), machine);
     }
 }
 

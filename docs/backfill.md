@@ -31,7 +31,8 @@ and it needs the store lock the running server holds.
    shows, and restart the server, which reads the token file at start only.
 3. **The author denylist.** Set `ME_REDACT_DENYLIST_FILE` in the server's unit to a mounted file of literals, one per
    line (the names, hosts and paths the history may hold), and restart. Without it every upload answers 503. Check the
-   first dry run's `denylist_literals`: it is the number of literals the server loaded.
+   first dry run's `denylist_literals`: it is the number of literals the server loaded. From that restart on, live
+   capture redacts the same literals from what it stores.
 4. **The allowlist**, from the copy, never from the host's live directory.
 
 ## Per file

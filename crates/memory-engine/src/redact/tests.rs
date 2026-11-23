@@ -247,7 +247,7 @@ fn content_cannot_hide_under_the_provenance_key() {
 // ── The author denylist on the capture path (#1026) ─────────────────────────
 
 /// The backfill route's denylist reaches every content member a capture stores: a prompt, a tool
-/// input, a result and a stub token lose the literal, while the provenance and the identifiers
+/// name, input and result, and a stub token lose the literal, while the provenance and the identifiers
 /// keep it, so a host name in the denylist never hides its own rows.
 #[test]
 fn the_capture_path_takes_the_denylist() {
@@ -272,6 +272,7 @@ fn the_capture_path_takes_the_denylist() {
     );
 
     let call = capture_tool_use(
+        &format!("deploy-{host}"),
         &json!({ "command": format!("ssh {host} uptime") }),
         Some(&format!("{host}: up 3 days")),
         OutcomeClass::Success,
@@ -288,10 +289,15 @@ fn the_capture_path_takes_the_denylist() {
         call.result.as_deref(),
         Some("[REDACTED:denylist]: up 3 days")
     );
-    assert_eq!((call.input_found, call.result_found), (1, 1));
+    assert_eq!(
+        call.tool, "deploy-[REDACTED:denylist]",
+        "the tool name too (#1135)"
+    );
+    assert_eq!((call.input_found, call.result_found), (2, 1));
 
     let path = format!("/srv/{host}/.env");
     let stub = capture_tool_use(
+        &format!("read-{host}"),
         &json!({ "file_path": path }),
         Some("X=1"),
         OutcomeClass::Success,
@@ -301,6 +307,10 @@ fn the_capture_path_takes_the_denylist() {
     )
     .unwrap();
     assert!(stub.stub);
+    assert_eq!(
+        stub.tool, "read-[REDACTED:denylist]",
+        "a stub keeps its name, redacted"
+    );
     assert_eq!(
         stub.args,
         json!({ "sensitive_path": "/srv/[REDACTED:denylist]/.env" })
@@ -326,7 +336,7 @@ fn the_capture_path_takes_the_denylist() {
     assert_eq!(
         scrub_capture_payload(&mut live, &[]).unwrap(),
         0,
-        "live capture passes none"
+        "an empty denylist removes nothing"
     );
 }
 

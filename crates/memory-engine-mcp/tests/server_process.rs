@@ -248,11 +248,19 @@ fn a_key_and_a_key_file_at_once_stop_startup_before_the_store_opens() {
     );
 }
 
-/// #1101: a key read from a file is held like a key given directly: never logged.
+/// #1101: a key read from a file is held like a key given directly: never logged. Every crate
+/// logs at trace while the key is sent to the embedder and a machine token authenticates a call
+/// (#1149), so neither may reach the log through a dependency's trace output.
 #[test]
 fn a_key_file_never_reaches_the_log() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mock = runtime.block_on(wiremock::MockServer::start());
+    runtime.block_on(
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/embeddings"))
+            .respond_with(common::an_embedding())
+            .mount(&mock),
+    );
     let dir = tempfile::tempdir().unwrap();
     let key_file = dir.path().join("embed-key");
     let key = format!("file-key-{}", std::process::id());
@@ -268,17 +276,40 @@ fn a_key_file_never_reaches_the_log() {
             "--embed-api-key-file",
             key_file.to_str().unwrap(),
         ],
-        // The crate named: `main` replaces a bare level with WARN (#1149), and readiness needs
-        // this crate's `listening on` line.
-        &[("RUST_LOG", "trace,memory_engine_mcp=trace")],
+        &[("RUST_LOG", "trace")],
     );
     assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
-    assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
+    // An authenticated call that embeds its query with the key.
+    let recalled = answer(&server.tool("laptop", "recall", &json!({ "query": "kestrel" })));
+    assert!(recalled.starts_with('{'), "{recalled}");
+    let sent = runtime.block_on(mock.received_requests()).unwrap();
     assert!(
-        !server.stderr().contains(&key),
-        "stderr:\n{}",
-        server.stderr()
+        sent.iter().any(|r| r
+            .headers
+            .get("authorization")
+            .is_some_and(|v| v.as_bytes() == format!("Bearer {key}").as_bytes())),
+        "the key reached the embedder"
     );
+    assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
+    let log = server.stderr();
+    assert!(
+        log.contains(" TRACE "),
+        "nothing was logged at trace:\n{log}"
+    );
+    assert!(!log.contains(&key), "the key is in the log:\n{log}");
+    assert!(
+        !log.contains(&common::token("laptop")),
+        "a machine token is in the log:\n{log}"
+    );
+}
+
+/// #1149: a bare level applies to every crate, so readiness' `listening on` line is logged.
+#[test]
+fn a_bare_rust_log_level_logs_the_listening_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[("RUST_LOG", "info")]);
+    assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
+    assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
 }
 
 /// The text of a model tool's answer, its call line removed.
