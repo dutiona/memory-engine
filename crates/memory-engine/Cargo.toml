@@ -1,6 +1,6 @@
 [package]
 name = "memory-engine"
-version = "0.2.0-rc.3"
+version = "0.2.0-rc.4"
 edition = "2024"
 rust-version.workspace = true
 description = "Embedded memory engine for autonomous AI agents — hybrid search, bi-temporal facts, event-sourced"
