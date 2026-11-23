@@ -11,7 +11,7 @@ use chrono::SecondsFormat;
 use serde_json::{Map, Value, json};
 
 use crate::error::{MemoryError, Result, StorageError};
-use crate::limits::LIFECYCLE_BODY_BYTES;
+use crate::limits::{LIFECYCLE_BODY_BYTES, MAX_PAYLOAD_BYTES};
 use crate::redact;
 use crate::types::lifecycle::{
     Actor, Applied, BodyFault, CaptureWrite, Content, Delivery, DeliveryWrite, IDLE, Kind,
@@ -91,8 +91,8 @@ impl MemoryEngine {
     ///   ([`Recorded::Quarantined`]);
     /// - a body the adapter cannot map ([`BodyFault::Unmappable`]), an identifier holding a
     ///   machine token, or a record off the engine's invariants (a session ID of 0 or over 256
-    ///   bytes, an empty compaction summary, a delivery or a text over
-    ///   [`LIFECYCLE_BODY_BYTES`]) is [`Recorded::Refused`], and leaves no key;
+    ///   bytes, an empty compaction summary, a tool name over the 1 MiB write limit, a delivery or
+    ///   a text over [`LIFECYCLE_BODY_BYTES`]) is [`Recorded::Refused`], and leaves no key;
     /// - a record is redacted (every signature rule, and the author `denylist` on every content
     ///   member, never on an identifier: `&[]` applies signatures only), bounded and stored: its
     ///   event, the activity of a tool call the adapter did not ignore, the memory a main final
@@ -335,6 +335,11 @@ pub(super) fn record_off_invariants(record: &NeutralRecord) -> Option<&'static s
     }
     if matches!(&record.content, Content::Compact { summary, .. } if summary.is_empty()) {
         return Some("the compaction summary is empty");
+    }
+    // `capture_tool_use` refuses such a name too; here it is one refused item, never an error
+    // that would fail a whole upload (#1135).
+    if matches!(&record.content, Content::ToolUse { tool, .. } if tool.len() > MAX_PAYLOAD_BYTES) {
+        return Some("the tool name is over the write limit");
     }
     (text_len(record) > LIFECYCLE_BODY_BYTES).then_some("the text is over the lifecycle limit")
 }

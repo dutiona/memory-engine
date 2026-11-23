@@ -283,11 +283,17 @@ async fn the_engine_refuses_a_record_off_its_invariants() {
         record("s", Actor::Main, prompt(&"x".repeat(BODY_LIMIT + 1))),
     )
     .await;
+    // A tool name over the 1 MiB write limit is refused as an item, never an error (#1135).
+    let (mut long_tool, _) = tool(&[], None);
+    if let Content::ToolUse { tool: name, .. } = &mut long_tool {
+        *name = "x".repeat(1024 * 1024 + 1);
+    }
+    refuse(delivery("f", 0), record("s", Actor::Main, long_tool)).await;
 
     assert!(s.events().await.is_empty(), "nothing was written");
     assert!(s.facts().await.is_empty(), "no memory was made");
     // No key was taken: the same events are stored once they are valid.
-    for id in ["a", "b", "c", "d", "e"] {
+    for id in ["a", "b", "c", "d", "e", "f"] {
         let again = s
             .engine
             .record_lifecycle_event(&delivery(id, 0), Ok(ok()), &[])

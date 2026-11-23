@@ -173,7 +173,7 @@ client's own session.
   delivery whose `body_size`, or a record whose texts, exceed it is refused, and nothing is written. A memory made from
   such a text is embedded in chunks like any other, and a text over the embedder's input size is marked failed by the
   drain and stays found by full-text search.
-- **Tool calls.** The tool name is redacted, and the input and the result are redacted, then cut to 512 bytes, as for `record_activity`
+- **Tool calls.** The tool name is redacted (a name over the 1 MiB write limit refuses the record), and the input and the result are redacted, then cut to 512 bytes, as for `record_activity`
   ([Tool calls](#tool-calls)): a call touching a sensitive path is a stub, and a text over the 1 MiB write limit keeps an
   excerpt of its first 1 MiB.
 - **The payload.** It takes the event payload scrub: its `project` provenance block, when it has exactly the shape the
