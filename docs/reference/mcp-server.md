@@ -551,7 +551,9 @@ A file over 256 MiB is refused whole, never truncated.
 history is the input most likely to hold the author's names, hosts and paths. Set and readable, the file's literals
 apply (an empty or comments-only file is an explicit "none"); unset or unreadable, the server starts, logs which, and
 answers every upload 503, so no dry run is reviewed under weaker redaction than its write would get. Every report
-states `denylist_literals`. Live capture does not use the denylist.
+states `denylist_literals`. Live capture ([lifecycle events](#lifecycle-events)) redacts its content with the same
+literals when they are loaded, never an identifier (#1121), and applies signatures only without them: it never answers
+503 for the denylist.
 
 **What a transcript stores.** The reader reads each line as a JSON object by field name, so one field of an unexpected
 type drops the field, never the line, and maps each entry by the table of

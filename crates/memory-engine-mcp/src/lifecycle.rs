@@ -488,7 +488,12 @@ impl MemoryMcpServer {
         let Ok(read) = tokio::task::spawn_blocking(move || claude_code::read(&owned)).await else {
             return Answer::status(StatusCode::UNPROCESSABLE_ENTITY);
         };
-        match self.engine.record_lifecycle_event(&delivery, read).await {
+        let denylist = self.denylist.as_deref().unwrap_or_default();
+        match self
+            .engine
+            .record_lifecycle_event(&delivery, read, denylist)
+            .await
+        {
             Ok(Recorded::Stored { .. }) => Answer::done("stored"),
             Ok(Recorded::Duplicate) => Answer::done("duplicate"),
             Ok(Recorded::Quarantined) => Answer::done("quarantined"),

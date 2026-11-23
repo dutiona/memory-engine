@@ -160,8 +160,8 @@ async fn run() -> Result<(), BoxError> {
     let engine = Arc::new(engine);
 
     // 6. Construct and serve. The author denylist is read once: the backfill route requires
-    //    it, live capture does not use it, so the server starts without it and the route
-    //    refuses every upload.
+    //    it and live capture redacts with it when loaded, so the server starts without it, the
+    //    route refuses every upload and live capture applies signatures only.
     let mut mcp_server = server::MemoryMcpServer::new(engine, embedder, cli.user.clone());
     if let Some(literals) = load_denylist() {
         mcp_server = mcp_server.with_denylist(literals);
@@ -196,19 +196,24 @@ fn log_filter(rust_log: &str) -> EnvFilter {
 fn load_denylist() -> Option<Vec<String>> {
     use memory_engine::bootstrap::{DENYLIST_ENV_VAR, load_secret_denylist};
     if std::env::var_os(DENYLIST_ENV_VAR).is_none() {
-        tracing::warn!("{DENYLIST_ENV_VAR} is unset: backfill uploads answer 503");
+        tracing::warn!(
+            "{DENYLIST_ENV_VAR} is unset: backfill uploads answer 503, live capture applies signatures only"
+        );
         return None;
     }
     match load_secret_denylist() {
         Ok(literals) => {
             tracing::info!(
                 literals = literals.len(),
-                "author denylist loaded for backfill uploads"
+                "author denylist loaded for backfill uploads and live capture"
             );
             Some(literals)
         }
         Err(error) => {
-            tracing::warn!(%error, "the author denylist is unreadable: backfill uploads answer 503");
+            tracing::warn!(
+                %error,
+                "the author denylist is unreadable: backfill uploads answer 503, live capture applies signatures only"
+            );
             None
         }
     }

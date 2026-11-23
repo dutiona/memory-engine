@@ -326,7 +326,7 @@ fn the_capture_path_takes_the_denylist() {
     assert_eq!(
         scrub_capture_payload(&mut live, &[]).unwrap(),
         0,
-        "live capture passes none"
+        "an empty denylist removes nothing"
     );
 }
 

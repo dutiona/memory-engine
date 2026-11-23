@@ -1589,7 +1589,7 @@ async fn a_captured_event_redacts_its_texts() {
         let engine = &store.engine;
         async move {
             engine
-                .record_lifecycle_event(&delivery, Ok(record))
+                .record_lifecycle_event(&delivery, Ok(record), &[])
                 .await
                 .unwrap()
         }

@@ -32,8 +32,8 @@ pub struct MemoryMcpServer {
     pub(crate) in_flight: Arc<tokio::sync::RwLock<()>>,
     /// The embedding drain's retry schedule.
     pub(crate) embed_backoff: Backoff,
-    /// The author denylist the backfill route redacts with (#1026); without one, the route
-    /// refuses every upload.
+    /// The author denylist the backfill route (#1026) and live capture (#1121) redact content
+    /// with; without one, the route refuses every upload and live capture applies signatures only.
     pub(crate) denylist: Option<Arc<[String]>>,
     /// The one backfill upload slot: an upload holds it from before its body is read.
     pub(crate) uploads: Arc<tokio::sync::Semaphore>,
@@ -58,9 +58,10 @@ impl MemoryMcpServer {
         }
     }
 
-    /// The author denylist the backfill route redacts with (#1026), as `main` loads it from
-    /// `ME_REDACT_DENYLIST_FILE`; an empty list is an explicit "none". Without this, the route
-    /// answers 503 to every upload. Live capture never uses it.
+    /// The author denylist the backfill route (#1026) and live capture (#1121) redact content
+    /// with, never an identifier, as `main` loads it from `ME_REDACT_DENYLIST_FILE`; an empty list
+    /// is an explicit "none". Without this, the route answers 503 to every upload and live capture
+    /// applies signatures only.
     ///
     /// # Examples
     ///

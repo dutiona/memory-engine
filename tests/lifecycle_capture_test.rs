@@ -70,7 +70,7 @@ impl Store {
         let delivery = delivery(event_id, secs);
         let record = record("s", actor, content);
         self.engine
-            .record_lifecycle_event(&delivery, Ok(record))
+            .record_lifecycle_event(&delivery, Ok(record), &[])
             .await
             .unwrap()
     }
@@ -258,7 +258,7 @@ async fn the_engine_refuses_a_record_off_its_invariants() {
         let engine = &s.engine;
         async move {
             let got = engine
-                .record_lifecycle_event(&delivery, Ok(record))
+                .record_lifecycle_event(&delivery, Ok(record), &[])
                 .await
                 .unwrap();
             assert!(matches!(got, Recorded::Refused(_)), "{got:?}");
@@ -290,7 +290,7 @@ async fn the_engine_refuses_a_record_off_its_invariants() {
     for id in ["a", "b", "c", "d", "e"] {
         let again = s
             .engine
-            .record_lifecycle_event(&delivery(id, 0), Ok(ok()))
+            .record_lifecycle_event(&delivery(id, 0), Ok(ok()), &[])
             .await
             .unwrap();
         assert!(matches!(again, Recorded::Stored { .. }), "{id}: {again:?}");
@@ -315,7 +315,7 @@ async fn a_text_at_the_body_limit_is_kept_whole_after_expansion() {
 
     let recorded = s
         .engine
-        .record_lifecycle_event(&delivery, Ok(record("s", Actor::Main, prompt(&text))))
+        .record_lifecycle_event(&delivery, Ok(record("s", Actor::Main, prompt(&text))), &[])
         .await
         .unwrap();
 
@@ -369,7 +369,7 @@ async fn a_sensitive_path_makes_a_stub() {
             ..record("s", Actor::Main, content)
         };
         s.engine
-            .record_lifecycle_event(&delivery, Ok(record))
+            .record_lifecycle_event(&delivery, Ok(record), &[])
             .await
             .unwrap_or_else(|e| panic!("{name}: {e}"));
     }
@@ -406,14 +406,14 @@ async fn a_quarantine_holds_metadata_only() {
     };
     let recorded = s
         .engine
-        .record_lifecycle_event(&delivery("q1", 0), Err(BodyFault::Parse(failure)))
+        .record_lifecycle_event(&delivery("q1", 0), Err(BodyFault::Parse(failure)), &[])
         .await
         .unwrap();
     assert_eq!(recorded, Recorded::Quarantined);
 
     let again = s
         .engine
-        .record_lifecycle_event(&delivery("q1", 0), Err(BodyFault::Parse(failure)))
+        .record_lifecycle_event(&delivery("q1", 0), Err(BodyFault::Parse(failure)), &[])
         .await
         .unwrap();
     assert_eq!(again, Recorded::Duplicate);
@@ -451,6 +451,7 @@ async fn an_identifier_holding_a_machine_token_is_refused() {
             .record_lifecycle_event(
                 &delivery(&held, 0),
                 Ok(record("s", Actor::Main, prompt("x"))),
+                &[],
             )
             .await
             .unwrap(),
@@ -460,6 +461,7 @@ async fn an_identifier_holding_a_machine_token_is_refused() {
             .record_lifecycle_event(
                 &delivery("b", 0),
                 Ok(record(&held, Actor::Main, prompt("x"))),
+                &[],
             )
             .await
             .unwrap(),
@@ -470,7 +472,7 @@ async fn an_identifier_holding_a_machine_token_is_refused() {
     };
     refused(
         s.engine
-            .record_lifecycle_event(&delivery("c", 0), Ok(record("s", agent, prompt("x"))))
+            .record_lifecycle_event(&delivery("c", 0), Ok(record("s", agent, prompt("x"))), &[])
             .await
             .unwrap(),
     );
@@ -483,6 +485,7 @@ async fn an_identifier_holding_a_machine_token_is_refused() {
                     line: 1,
                     column: 1,
                 })),
+                &[],
             )
             .await
             .unwrap(),
@@ -513,7 +516,7 @@ async fn a_resend_after_reopen_has_no_second_effect() {
     let (call, _) = tool(&["/work/fixture/main.rs"], None);
     for (id, content) in [("a", stop(StopOutcome::Completed, "answer")), ("b", call)] {
         let again = engine
-            .record_lifecycle_event(&delivery(id, 0), Ok(record("s", Actor::Main, content)))
+            .record_lifecycle_event(&delivery(id, 0), Ok(record("s", Actor::Main, content)), &[])
             .await
             .unwrap();
         assert_eq!(again, Recorded::Duplicate, "{id}");

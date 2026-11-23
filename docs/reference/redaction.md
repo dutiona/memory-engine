@@ -11,7 +11,7 @@ overlap.
 
 | Priority | Rule | Matches |
 |---|---|---|
-| 0 | `denylist` | A literal of 4 bytes or more from the author's denylist file (`ME_REDACT_DENYLIST_FILE`). Bootstrap and the server's backfill uploads only; every other server path applies signatures only. |
+| 0 | `denylist` | A literal of 4 bytes or more from the author's denylist file (`ME_REDACT_DENYLIST_FILE`). Bootstrap, the server's backfill uploads and its live capture (#1121); every other server path applies signatures only. |
 | 1 | `machine-token` | `me_` and exactly 32 base62 characters, with no `[0-9A-Za-z_]` on either side (ADR-0020 §4). `me_types::Fact` is untouched. |
 | 2 | provider prefixes | A prefix below at a token boundary, 20 bytes or more in all. |
 | 3 | `connection-string-password` | The password of a `user:pass@` URL authority. |
@@ -179,6 +179,12 @@ client's own session.
   `harness_version`, `kind`, `actor`, `agent_id`, `agent_type`) get the machine-token rule only; every other member
   gets every rule, `cwd` included. A directory name that looks high-entropy may therefore be over-redacted in the
   payload, which no key is derived from.
+- **The author denylist.** When the server has loaded `ME_REDACT_DENYLIST_FILE`, every content member of a captured
+  event loses its literals, as an upload's does ([Backfill uploads](#backfill-uploads)): the prompt, the final message
+  and its memory, the summary, the tool name, input and result (before the cut), `cwd` and a stub's path. Identifiers
+  and the provenance block never do. Without the file, capture applies signatures only (the upload route refuses
+  instead). A capture stored before the file was loaded or changed is not rewritten, and a redelivery of the same body
+  is a duplicate.
 - **Identifiers.** The event ID, the session ID and the agent ID are stored as sent, in columns and in the payload,
   never redacted; one the machine-token rule would change is refused with a 422, so no key and no column holds a token. The server's log names
   an event ID only after the machine-token rule too, on every path, so a token pasted into `ME-Event-Id` is not logged.
@@ -192,9 +198,9 @@ client's own session.
 
 `POST /backfill/uploads` ([MCP server](mcp-server.md#backfill-uploads)) imports a machine's copied history through
 `MemoryEngine::import_backfill`, gated like `record_lifecycle_event`. Its events take exactly the
-[captured events](#captured-events) rules, through the same code, with one difference: the **author denylist** applies
-too. The server reads `ME_REDACT_DENYLIST_FILE` once at start and refuses every upload, dry runs included, when it is
-unset or unreadable, so no dry run is reviewed under weaker redaction than its write would get. The `claude-mem` and
+[captured events](#captured-events) rules, through the same code, the **author denylist** included, with one
+difference: the server reads `ME_REDACT_DENYLIST_FILE` once at start and refuses every upload, dry runs included, when
+it is unset or unreadable, so no dry run is reviewed under weaker redaction than its write would get. The `claude-mem` and
 `claude-memory` plugin-store kinds take the same path: every row redacted with every rule and the denylist, a memory's
 text and metadata with `scrub_metadata`, and their session IDs identifiers.
 

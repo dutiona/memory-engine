@@ -2989,7 +2989,7 @@ mod tests {
             content,
         };
         let recorded = engine
-            .record_lifecycle_event(&delivery, Ok(record))
+            .record_lifecycle_event(&delivery, Ok(record), &[])
             .await
             .unwrap();
         assert!(
@@ -3051,6 +3051,7 @@ mod tests {
                     line: 1,
                     column: 2,
                 })),
+                &[],
             )
             .await
             .unwrap();
@@ -3138,6 +3139,7 @@ mod tests {
                     ..quarantined_delivery()
                 },
                 Err(BodyFault::Unmappable("resent")),
+                &[],
             )
             .await
             .unwrap();

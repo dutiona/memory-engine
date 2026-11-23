@@ -1277,3 +1277,88 @@ async fn a_bash_command_of_many_short_words_is_stored_truncated() {
     assert!(input.len() <= 512, "{}", input.len());
     assert!(input.contains("abcdefgh"), "{input}");
 }
+
+/// #1121: live capture redacts the author denylist from its content (a prompt, a tool call's
+/// input and result, a final message and its memory) with the upload route's rules, and never
+/// from an identifier: the machine, the receipts and the project key keep the listed names.
+#[tokio::test]
+async fn live_capture_redacts_the_author_denylist_never_an_identifier() {
+    let mut server = TestServer::start_with_denylist(&["fixturehost", "laptop"]).await;
+    let origin = |fixture: common::Fixture| {
+        fixture.header(
+            "ME-Project-Origin-Url",
+            "https://example.com/fixturehost/proj.git",
+        )
+    };
+    stored(
+        &server,
+        &origin(saying(
+            event("user-prompt-submit", "a", 0, 1),
+            "prompt",
+            "deploy to fixturehost now",
+        )),
+    )
+    .await;
+    stored(
+        &server,
+        &origin(event("post-tool-use-bash", "b", 1, 1).json(|v| {
+            v["tool_input"]["command"] = json!("ssh fixturehost uptime");
+            v["tool_response"]["stdout"] = json!("fixturehost: up");
+        })),
+    )
+    .await;
+    stored(
+        &server,
+        &origin(saying(
+            event("stop", "c", 2, 1),
+            "last_assistant_message",
+            "fixturehost is up",
+        )),
+    )
+    .await;
+
+    assert_eq!(
+        payload_of(&server, "a")["prompt"],
+        "deploy to [REDACTED:denylist] now"
+    );
+    assert_eq!(
+        payload_of(&server, "c")["message"],
+        "[REDACTED:denylist] is up"
+    );
+    for id in ["a", "b", "c"] {
+        let mut payload = payload_of(&server, id);
+        assert_eq!(payload["machine"], "laptop", "{id}: {payload}");
+        assert_eq!(
+            payload["project"]["key"], "example.com/fixturehost/proj",
+            "{id}: {payload}"
+        );
+        payload.as_object_mut().unwrap().remove("project");
+        let content = payload.to_string();
+        assert!(!content.contains("fixturehost"), "{id}: {content}");
+    }
+    assert!(
+        payload_of(&server, "b")
+            .to_string()
+            .contains("[REDACTED:denylist]"),
+        "the tool excerpt loses the literal"
+    );
+    let memory = server.engine.get_fact(fact_of(&server, "c")).await.unwrap();
+    assert_eq!(memory.content, "[REDACTED:denylist] is up");
+    assert_eq!(memory.metadata["machine"], "laptop");
+    assert_eq!(
+        server.number("SELECT COUNT(*) FROM activities WHERE machine = 'laptop'"),
+        1
+    );
+    assert_eq!(
+        server.number(
+            "SELECT COUNT(*) FROM activities \
+             WHERE args LIKE '%fixturehost%' OR result_summary LIKE '%fixturehost%'"
+        ),
+        0
+    );
+    assert_eq!(
+        server.number("SELECT COUNT(*) FROM lifecycle_receipts WHERE machine = 'laptop'"),
+        3
+    );
+    server.stop().await;
+}
