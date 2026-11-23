@@ -48,8 +48,12 @@ pub struct SessionEntry {
     pub git_branch: Option<String>,
     #[serde(default)]
     pub message: Option<MessagePayload>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "tool_use_result")]
     pub tool_use_result: Option<ToolUseResult>,
+    #[serde(default)]
+    pub is_meta: Option<serde_json::Value>,
+    #[serde(default)]
+    pub is_compact_summary: Option<serde_json::Value>,
     #[serde(default)]
     #[allow(dead_code)] // schema field, parsed but not yet consumed
     pub data: Option<serde_json::Value>,
@@ -64,13 +68,51 @@ pub struct MessagePayload {
 }
 
 /// Result of a tool invocation, carried on user-type entries.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
+///
+/// Not `Deserialize`-derived: the wire field is a `toolUseResult` of any JSON
+/// shape (a string, an array, a number, an object), so the field carries its
+/// own `deserialize_with` (see [`tool_use_result`]).
+#[derive(Debug, Clone, Default)]
 pub struct ToolUseResult {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
     pub interrupted: Option<bool>,
     pub is_error: Option<bool>,
+}
+
+/// Deserialize a `toolUseResult` of any JSON shape into an `Option<ToolUseResult>`.
+///
+/// Every non-null value is `Some`: a `None` would turn a tool-result row into a
+/// prompt and shift `extract_tool_calls`' positional pairing. An object keeps
+/// its fields when they are typed (a string `stdout`/`stderr`, a bool
+/// `interrupted`/`isError`); a wrong-typed field is dropped, never an error. A
+/// string becomes `stdout`; any other value (array, number, bool) is the
+/// default. An array is not put in `stdout` on purpose: `outcome.rs`
+/// `has_short_sha` would read an MCP call ID in it as a commit.
+fn tool_use_result<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<ToolUseResult>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::Object(map) => Some(ToolUseResult {
+            stdout: map
+                .get("stdout")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from),
+            stderr: map
+                .get("stderr")
+                .and_then(serde_json::Value::as_str)
+                .map(String::from),
+            interrupted: map.get("interrupted").and_then(serde_json::Value::as_bool),
+            is_error: map.get("isError").and_then(serde_json::Value::as_bool),
+        }),
+        serde_json::Value::String(s) => Some(ToolUseResult {
+            stdout: Some(s),
+            ..Default::default()
+        }),
+        _ => Some(ToolUseResult::default()),
+    })
 }
 
 /// Parsed content block from `message.content` array.
@@ -379,12 +421,15 @@ fn read_lines<T>(
 
 /// Parse the content blocks from a [`MessagePayload`]'s `content` field.
 ///
-/// Returns an empty vec if `content` is `None` or not a JSON array.
+/// A string is one text block; any other non-array none.
 pub fn parse_content_blocks(content: &serde_json::Value) -> Vec<ContentBlock> {
-    let Some(arr) = content.as_array() else {
-        return Vec::new();
-    };
-    arr.iter().map(parse_single_block).collect()
+    if let Some(arr) = content.as_array() {
+        return arr.iter().map(parse_single_block).collect();
+    }
+    if let Some(s) = content.as_str() {
+        return vec![ContentBlock::Text(s.to_owned())];
+    }
+    Vec::new()
 }
 
 fn parse_single_block(obj: &serde_json::Value) -> ContentBlock {
@@ -817,5 +862,52 @@ mod tests {
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_content_blocks_reads_a_string_as_one_text_block() {
+        let blocks = parse_content_blocks(&serde_json::json!("hello"));
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(&blocks[0], ContentBlock::Text(t) if t == "hello"));
+        assert!(parse_content_blocks(&serde_json::json!(7)).is_empty());
+    }
+
+    #[test]
+    fn a_tool_use_result_of_any_shape_keeps_its_line() {
+        let input = [
+            r#"{"type":"user","toolUseResult":"Error: File does not exist."}"#,
+            r#"{"type":"user","toolUseResult":[{"type":"text","text":"call 0123456789abcdef"}]}"#,
+            r#"{"type":"user","toolUseResult":{"stdout":7,"isError":true}}"#,
+            r#"{"type":"user","toolUseResult":null}"#,
+        ]
+        .join("\n");
+        let (entries, malformed) = parse_all(input.as_bytes());
+        assert_eq!(entries.len(), 4);
+        assert_eq!(malformed, 0, "no shape of toolUseResult may fail the line");
+        assert_eq!(
+            entries[0]
+                .tool_use_result
+                .as_ref()
+                .unwrap()
+                .stdout
+                .as_deref(),
+            Some("Error: File does not exist.")
+        );
+        let array = entries[1].tool_use_result.as_ref().unwrap();
+        assert!(array.stdout.is_none() && array.stderr.is_none());
+        assert!(array.interrupted.is_none() && array.is_error.is_none());
+        assert_eq!(
+            entries[2].tool_use_result.as_ref().unwrap().is_error,
+            Some(true)
+        );
+        assert!(
+            entries[2]
+                .tool_use_result
+                .as_ref()
+                .unwrap()
+                .stdout
+                .is_none()
+        );
+        assert!(entries[3].tool_use_result.is_none());
     }
 }

@@ -13,7 +13,7 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(data) {
         let blocks = memory_engine::fuzz_seam::parse_content_blocks(&value);
-        // A non-array `content` yields an empty vec; never a panic.
+        // A string is one text block, any other non-array none; never a panic.
         let _ = blocks.len();
     }
 });
