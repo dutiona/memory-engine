@@ -797,7 +797,7 @@ mod tests {
     #[test]
     fn parse_timestamp_naive_no_timezone_fallback() {
         // No timezone suffix: RFC 3339 parse fails, the naive fallback
-        // (parse.rs:185-188) takes over and interprets it as UTC.
+        // in `parse_timestamp` takes over and interprets it as UTC.
         let dt = parse_timestamp("2026-03-19T10:30:45").unwrap();
         assert_eq!(dt.year(), 2026);
         assert_eq!(dt.month(), 3);
@@ -812,7 +812,7 @@ mod tests {
     #[test]
     fn parse_content_blocks_tool_result_string_content() {
         // String content + is_error=true exercises the `v.is_string()` arm
-        // and the explicit is_error read (parse.rs:152-163).
+        // of `parse_single_block`'s `tool_result` case and its explicit is_error read.
         let content = serde_json::json!([{
             "type": "tool_result",
             "content": "command output",
