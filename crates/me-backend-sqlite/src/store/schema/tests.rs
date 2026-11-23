@@ -3140,3 +3140,21 @@ fn load_recorded_reads_a_dimension_or_nothing() {
         "{err:?}"
     );
 }
+
+/// #1133: the first init is one transaction, so a failure midway leaves no engine table behind
+/// (a writable open would refuse such a file as foreign).
+#[test]
+fn a_failed_first_init_leaves_no_table() {
+    let conn = open_memory().unwrap();
+    conn.execute_batch("CREATE TABLE x(a); CREATE INDEX config ON x(a);")
+        .unwrap();
+    init_schema(&conn).expect_err("the index named config blocks the config table");
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(tables, ["x"]);
+}

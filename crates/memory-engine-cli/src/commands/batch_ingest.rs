@@ -10,9 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::embedding_args::EmbeddingArgs;
 use crate::commands::types::deserialize_fact_type;
-use crate::db::{
-    create_engine, ensure_store_absent, open_engine_writable, open_engine_writable_with_dim,
-};
+use crate::db::{create_engine, ensure_store_absent, open_engine_writable_with_embedder};
 use crate::output::{OutputFormat, print_json};
 
 // ---------------------------------------------------------------------------
@@ -400,14 +398,27 @@ pub async fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> any
         args.batch_size,
     );
 
+    // Open the input first, before the store lock: a run refused for its input must not have
+    // migrated an older store or created a new one. Bind stdin here to extend its lifetime.
+    let stdin = std::io::stdin();
+    let reader: Box<dyn Read> = if args.file.as_os_str() == "-" {
+        Box::new(stdin.lock())
+    } else {
+        Box::new(
+            std::fs::File::open(&args.file)
+                .map_err(|e| anyhow::anyhow!("cannot open {}: {e}", args.file.display()))?,
+        )
+    };
+
     // Open or create the engine, plus its embedding provider (shared config —
     // provider/MRL identity per #619).
     //
     // On --create the embed dim is known up front (--embed-dim), so the embedder is
     // validated BEFORE the DB file is created: a misconfigured embedder must not
-    // leave an orphan empty database behind (#681). On the open paths the dim is
-    // only known after opening, but opening does not create a file, so building the
-    // embedder afterwards carries no orphan risk.
+    // leave an orphan empty database behind (#681). On an existing store the embedder is
+    // built before the open too, at --embed-dim (a never-embedded store, #613) or the
+    // recorded dimension, and the open declares its identity: a store that records another
+    // one is refused before it migrates (#1132).
     let (mut engine, embedder) = if args.create {
         let embed_dim = args
             .embed_dim
@@ -417,30 +428,7 @@ pub async fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> any
         let engine = create_engine(db, embed_dim)?;
         (engine, embedder)
     } else {
-        let engine = if let Some(dim) = args.embed_dim {
-            // Existing DB: accept an explicit --embed-dim so a never-embedded store (no
-            // recorded identity yet under #613) is still writable. The engine's open path
-            // rejects a mismatch against any recorded identity.
-            open_engine_writable_with_dim(db, dim, None)?
-        } else {
-            open_engine_writable(db)?
-        };
-        let embedder = args
-            .embed
-            .build_required_blocking(engine.embed_dim())
-            .await?;
-        (engine, embedder)
-    };
-
-    // Open input — bind stdin before locking to extend lifetime
-    let stdin = std::io::stdin();
-    let reader: Box<dyn Read> = if args.file.as_os_str() == "-" {
-        Box::new(stdin.lock())
-    } else {
-        Box::new(
-            std::fs::File::open(&args.file)
-                .map_err(|e| anyhow::anyhow!("cannot open {}: {e}", args.file.display()))?,
-        )
+        open_engine_writable_with_embedder(db, args.embed_dim, &args.embed).await?
     };
 
     let summary = ingest_from_reader(

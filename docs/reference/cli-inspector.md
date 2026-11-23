@@ -163,7 +163,7 @@ memory-engine-cli --db new-agent.db import backup.json
 memory-engine-cli --db new-agent.db import backup.json.gz --embed-dim 384
 ```
 
-Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots. The first `consolidate` afterwards compares every fact for duplicates: the snapshot's dedup watermark is not imported.
+Restores a JSON snapshot into a **new** database (refuses to overwrite existing). Auto-detects `embed_dim` from plain JSON; use `--embed-dim` for compressed snapshots. A snapshot with id marks (`sequences`) keeps its dedup watermark, so the first `consolidate` afterwards compares only the facts added since the export; with an older snapshot that run compares every fact.
 
 A JSON snapshot carries the lifecycle route's two tables, `lifecycle_receipts` and `lifecycle_segments` (#1025), so a
 restored store keeps its idempotency keys (a client's resend of an event the old store had stored is still a
@@ -243,6 +243,10 @@ Bulk-ingests facts from a JSONL file (or stdin with `--file -`). Each line is a 
 | `--create`        | false                                      | Create new database                  |
 | `--embed-dim`     | —                                          | Required with `--create`             |
 | `--scope`         | —                                          | Default scope for all facts          |
+
+**Input first:** the input (`--file`, or `bootstrap`'s directories and denylist) is checked before the store lock, so a run refused for its input leaves an older store unmigrated and creates no store; a bad input against a held store reports the input, not the lock.
+
+**Embedding identity:** on an existing store the embedder is built under the store lock and its identity checked read-only before the store opens: one that differs from the identity the store records exits 1 with `embedding identity check failed`, and an older store stays unmigrated (#1132). `bootstrap` does the same.
 
 **Error handling:** Malformed lines are skipped with a warning on stderr. Failed batches (embedding/DB errors) are skipped. Progress is reported on stderr. Exit code is non-zero only if zero facts were ingested.
 
@@ -374,9 +378,9 @@ prints a machine-readable JSON result:
 
 The `--backend llm` path requires all four `--llm-*` / `--embed-*` flags (the LLM backend
 embeds its own summaries). The embedder flags (`--embed-model`, `--embed-provider`, the MRL
-and served-artifact flags) must name the identity the store records: it is checked before
-the LLM is called, and a mismatch exits 1 with `embedding identity check failed` and no JSON
-(#1062). A store that records no identity yet (for example, every fact still waits for its vector) passes
+and served-artifact flags) must name the identity the store records: it is checked read-only
+before the store opens, so a refused run neither migrates the store nor calls the LLM, and a
+mismatch exits 1 with `embedding identity check failed` and no JSON (#1062, #1132). A store that records no identity yet (for example, every fact still waits for its vector) passes
 that check; the apply then refuses the summaries (#613), after the LLM calls, and the JSON says
 `failed`. The #209 guard defers a cycle that follows a caller write; the command retries a
 deferred cycle up to 8 times in one invocation, so one call runs, and it reports

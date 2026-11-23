@@ -1,7 +1,7 @@
 use me_types::error::StorageError;
 use std::path::Path;
 
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use me_types::error::{MemoryError, MigrationError, Result};
 
@@ -91,7 +91,10 @@ pub fn open_memory() -> Result<Connection> {
 /// Initialize schema for a database.
 ///
 /// **Fresh database (no config table):** Creates the full latest schema and sets
-/// `schema_version` to `CURRENT_SCHEMA_VERSION`.
+/// `schema_version` to `CURRENT_SCHEMA_VERSION`, in one transaction: a first open that fails
+/// or dies midway leaves no partial schema, which a writable open would refuse as foreign
+/// ([`refuse_foreign_file`]). The freshness test runs inside that write transaction, so two
+/// openers cannot both create the schema.
 ///
 /// **Existing database:** Returns immediately — all DDL evolution happens through
 /// [`migrate`]. This avoids running v2-only DDL against a v1 schema where new
@@ -101,7 +104,9 @@ pub fn open_memory() -> Result<Connection> {
 ///
 /// Returns `MemoryError::Storage` if any DDL statement fails.
 pub fn init_schema(conn: &Connection) -> Result<()> {
-    let is_fresh: bool = conn
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(StorageError::backend)?;
+    let is_fresh: bool = tx
         .query_row(
             "SELECT COUNT(*) = 0 FROM sqlite_master WHERE type='table' AND name='config'",
             [],
@@ -112,19 +117,57 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         return Ok(()); // existing DB — let migrate() handle evolution
     }
     // Fresh DB: create full latest schema
-    conn.execute_batch(TABLES_DDL)
-        .map_err(StorageError::backend)?;
-    conn.execute_batch(SCOPES_DDL)
-        .map_err(StorageError::backend)?;
-    conn.execute_batch(FTS5_DDL)
-        .map_err(StorageError::backend)?;
-    conn.execute_batch(TRIGGERS_DDL)
-        .map_err(StorageError::backend)?;
-    conn.execute_batch(INDEXES_DDL)
-        .map_err(StorageError::backend)?;
-    set_config(conn, "schema_version", &CURRENT_SCHEMA_VERSION.to_string())?;
-    set_config(conn, "storage_epoch", &STORAGE_EPOCH.to_string())?;
+    for ddl in [TABLES_DDL, SCOPES_DDL, FTS5_DDL, TRIGGERS_DDL, INDEXES_DDL] {
+        tx.execute_batch(ddl).map_err(StorageError::backend)?;
+    }
+    set_config(&tx, "schema_version", &CURRENT_SCHEMA_VERSION.to_string())?;
+    set_config(&tx, "storage_epoch", &STORAGE_EPOCH.to_string())?;
+    tx.commit().map_err(StorageError::backend)?;
     Ok(())
+}
+
+/// Whether `conn` holds a memory-engine store: a `config(key, value)` table holding
+/// `schema_version`, which every store since the first records at init (#1133).
+///
+/// # Errors
+///
+/// Returns `MemoryError::Storage` on a query failure.
+pub fn holds_engine_schema(conn: &Connection) -> Result<bool> {
+    let columns: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('config') WHERE name IN ('key', 'value')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(StorageError::backend)?;
+    Ok(columns == 2 && get_config(conn, "schema_version")?.is_some())
+}
+
+/// Refuse to open writable an existing SQLite file that holds a schema but no memory-engine
+/// store (#1133): the writable open's first write (`journal_mode = WAL`) and its DDL would change
+/// another application's file. A missing path, a zero-length file and a database with no schema
+/// object are blank and accepted. The check reads through one read-only connection.
+///
+/// # Errors
+///
+/// `MemoryError::Migration` (`Incompatible`) for such a file; `MemoryError::Storage` when the file
+/// cannot be read (busy, I/O, not a database).
+pub(crate) fn refuse_foreign_file(path: &Path) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let conn = open_connection_read_only(&path.to_string_lossy())?;
+    let blank: bool = conn
+        .query_row("SELECT COUNT(*) = 0 FROM sqlite_master", [], |r| r.get(0))
+        .map_err(StorageError::backend)?;
+    if blank || holds_engine_schema(&conn)? {
+        return Ok(());
+    }
+    Err(MigrationError::Incompatible(format!(
+        "{} is not a memory-engine database: it holds a schema but no schema_version",
+        path.display()
+    ))
+    .into())
 }
 
 // --- Migration framework ---

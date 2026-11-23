@@ -27,7 +27,9 @@
 use rusqlite::{Connection, Transaction};
 
 use crate::store::classify;
-use crate::store::schema::{CURRENT_SCHEMA_VERSION, decode_v12_identity, get_config};
+use crate::store::schema::{
+    CURRENT_SCHEMA_VERSION, decode_v12_identity, get_config, holds_engine_schema,
+};
 use me_types::error::{MemoryError, MigrationError, Result, StorageError};
 use me_types::types::{EmbeddingFingerprint, RecordedEmbedding};
 
@@ -56,10 +58,11 @@ pub fn load(conn: &Connection) -> Result<Option<EmbeddingFingerprint>> {
 /// (#1049, #1065): the identity where its layout of that version keeps it, else the bare
 /// [`STORE_DIM`], else nothing.
 ///
-/// Dispatches on `schema_version` (absent reads as 1): 15 and later read the registry with its
-/// served columns, 13 and 14 the registry without them (`NULL`, as `migrate_v14_to_v15` sets
-/// them), 12 the `embedding_meta` config value through the migration's own decoder, 11 and
-/// earlier no identity. A connection with no `config` table records [`Nothing`]. The result
+/// Dispatches on `schema_version`: 15 and later read the registry with its served columns, 13
+/// and 14 the registry without them (`NULL`, as `migrate_v14_to_v15` sets them), 12 the
+/// `embedding_meta` config value through the migration's own decoder, 11 and earlier no
+/// identity. A connection that holds no memory-engine store ([`holds_engine_schema`]: a blank
+/// file, or another application's, which a writable open refuses) records [`Nothing`]. The result
 /// equals what [`load`] reads once the store is migrated (`schema::tests` pins it), so a check
 /// made on it before migrating is the check made after.
 ///
@@ -72,14 +75,7 @@ pub fn load(conn: &Connection) -> Result<Option<EmbeddingFingerprint>> {
 /// (`Incompatible`); `MemoryError::Storage` on a query failure; `MemoryError::Internal` for a
 /// corrupt registry row.
 pub fn load_recorded(conn: &Connection) -> Result<RecordedEmbedding> {
-    let has_config: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'config'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(StorageError::backend)?;
-    if !has_config {
+    if !holds_engine_schema(conn)? {
         return Ok(RecordedEmbedding::Nothing);
     }
     let raw = get_config(conn, "schema_version")?.unwrap_or_else(|| "1".into());

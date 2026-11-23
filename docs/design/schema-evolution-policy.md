@@ -37,6 +37,7 @@ To restore from backup, replace the database file with the backup file.
 
 All schema versions within the current epoch are supported by the migration chain. The library:
 
+0. Refuses to open writable an existing SQLite file that holds a schema but no `config` table with `schema_version` (another application's file), before anything writes to it (#1133). Every memory-engine store records `schema_version` from its first init, and that init is one transaction.
 1. Reads `storage_epoch` from the config table (defaults to 1 for pre-epoch databases).
 2. Rejects future epochs with `UnsupportedEpoch`.
 3. Rejects future schema versions with a clear "consider upgrading" error.

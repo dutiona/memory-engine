@@ -1261,6 +1261,59 @@ async fn dedup_compares_a_reused_id_after_a_restore() {
     assert_eq!(duplicates_removed(&restored).await, 1);
 }
 
+/// #1144: a current export carries its id marks, so its restore keeps dedup's watermark and
+/// generation: a duplicate pair at or below the watermark is not compared again. Without the
+/// marks (a pre-#1131 snapshot) both reset and the pair is compared.
+#[tokio::test]
+async fn dedup_keeps_its_watermark_through_a_restore_of_a_current_export() {
+    use crate::store::facts::{CONSOLIDATION_GENERATION, DEDUP_WATERMARK};
+    let engine = MemoryEngine::builder(DIM).build().unwrap();
+    let cats = add_animal(&engine, "cats purr", None).await;
+    add_animal(&engine, "dogs bark", None).await;
+    engine.pin_fact(cats).await.unwrap();
+    engine.unpin_fact(cats).await.unwrap();
+    assert_eq!(duplicates_removed(&engine).await, 0);
+    let source = (
+        engine.get_config(DEDUP_WATERMARK).await.unwrap(),
+        engine.get_config(CONSOLIDATION_GENERATION).await.unwrap(),
+    );
+    assert!(source.0.is_some() && source.1.is_some(), "{source:?}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("dump.json");
+    engine
+        .dump_state(&crate::inspect::DumpFormat::Json(dump.clone()))
+        .await
+        .unwrap();
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&dump).unwrap()).unwrap();
+    // The dogs fact takes the cats fact's vector: a duplicate pair below the watermark.
+    let facts = snapshot["facts"].as_array_mut().unwrap();
+    let cats_vector = facts[0]["embedding"].clone();
+    facts[1]["embedding"] = cats_vector;
+    std::fs::write(&dump, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+    let restored = MemoryEngine::restore_json_memory(&dump).unwrap();
+    assert_eq!(
+        (
+            restored.get_config(DEDUP_WATERMARK).await.unwrap(),
+            restored.get_config(CONSOLIDATION_GENERATION).await.unwrap(),
+        ),
+        source
+    );
+    assert_eq!(duplicates_removed(&restored).await, 0);
+
+    snapshot
+        .as_object_mut()
+        .unwrap()
+        .remove("sequences")
+        .unwrap();
+    std::fs::write(&dump, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    let restored = MemoryEngine::restore_json_memory(&dump).unwrap();
+    assert_eq!(restored.get_config(DEDUP_WATERMARK).await.unwrap(), None);
+    assert_eq!(duplicates_removed(&restored).await, 1);
+}
+
 /// A `SummaryGenerator` that performs an engine WRITE from inside `summarize`.
 /// Used to prove the consumer callbacks run without the engine holding its write
 /// lock (#409): the write only succeeds if `consolidate` is *not* holding
@@ -6505,6 +6558,61 @@ async fn an_open_at_another_dimension_never_migrates_an_older_store() {
         before,
         "the refused open changed the store"
     );
+}
+
+/// #1133: a writable open refuses a SQLite file that holds another application's schema before
+/// its first write, so the file keeps every byte; a zero-length file is still a blank store.
+#[test]
+fn a_foreign_sqlite_file_is_refused_and_left_byte_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases = [
+        (
+            "notes-delete",
+            "DELETE",
+            "CREATE TABLE notes(body TEXT); INSERT INTO notes VALUES ('hello');",
+        ),
+        (
+            "notes-wal",
+            "WAL",
+            "CREATE TABLE notes(body TEXT); INSERT INTO notes VALUES ('hello');",
+        ),
+        (
+            "config-without-version",
+            "DELETE",
+            "CREATE TABLE config(key TEXT PRIMARY KEY, value TEXT); INSERT INTO config VALUES ('theme', 'dark');",
+        ),
+        (
+            "config-other-columns",
+            "DELETE",
+            "CREATE TABLE config(k TEXT, v TEXT); INSERT INTO config VALUES ('schema_version', '1');",
+        ),
+    ];
+    for (name, journal, sql) in cases {
+        let db = dir.path().join(format!("{name}.db"));
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.query_row(&format!("PRAGMA journal_mode = {journal}"), [], |_| Ok(()))
+                .unwrap();
+            conn.execute_batch(sql).unwrap();
+        }
+        let before = std::fs::read(&db).unwrap();
+        let err = MemoryEngine::builder(DIM)
+            .path(&db)
+            .build()
+            .expect_err(name);
+        assert!(
+            matches!(&err, MemoryError::Migration(MigrationError::Incompatible(m)) if m.contains("not a memory-engine database")),
+            "{name}: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(&db).unwrap(),
+            before,
+            "{name}: the file changed"
+        );
+    }
+    let empty = dir.path().join("empty.db");
+    std::fs::write(&empty, b"").unwrap();
+    MemoryEngine::builder(DIM).path(&empty).build().unwrap();
 }
 
 #[tokio::test]

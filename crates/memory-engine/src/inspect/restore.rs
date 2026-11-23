@@ -24,10 +24,13 @@ use super::types::EngineSnapshot;
 /// copied back into `config`; an old snapshot's value is handled explicitly when restoring
 /// the registry (see the embedding-space restore step). The store's dimension
 /// ([`STORE_DIM`](crate::store::embedding_meta::STORE_DIM)) is recorded from the validated
-/// header instead, when restored facts wait for their vectors. A restore never imports
-/// dedup's watermark or generation (#1080): a snapshot taken before #1131 has no id marks,
-/// so its restore resets each id sequence to the highest surviving id and an erased id can
-/// be reused; the next consolidation compares every fact.
+/// header instead, when restored facts wait for their vectors. Dedup's watermark and
+/// generation (#1080) are imported apart, by [`restore_dedup_state`], and only when the
+/// snapshot's `facts` id mark (#1131) is at or above the watermark: every new fact id then
+/// starts above the mark, so none can sit at or below the watermark (#1144). A snapshot taken
+/// before #1131 has no id marks, so its restore resets each id sequence to the highest
+/// surviving id and an erased id can be reused: both keys reset, as for a mark below the
+/// watermark, and the next consolidation compares every fact.
 const MANAGED_CONFIG_KEYS: &[&str] = &[
     "schema_version",
     "storage_epoch",
@@ -841,8 +844,36 @@ pub fn restore_snapshot_into(conn: &Connection, snapshot: &EngineSnapshot) -> Re
         ),
     )?;
 
+    // 9b. Dedup's watermark and generation, now that the facts sequence starts above its mark.
+    restore_dedup_state(&tx, snapshot)?;
+
     // 10. Commit.
     tx.commit().map_err(StorageError::backend)?;
+    Ok(())
+}
+
+/// Import dedup's watermark and generation iff the snapshot's `facts` id mark bounds the
+/// watermark and both values parse (see [`MANAGED_CONFIG_KEYS`]); otherwise import neither,
+/// which is always safe: the next consolidation compares every fact.
+fn restore_dedup_state(tx: &Transaction, snapshot: &EngineSnapshot) -> Result<()> {
+    use crate::store::facts::{CONSOLIDATION_GENERATION, DEDUP_WATERMARK};
+    let Some(&mark) = snapshot.sequences.get("facts") else {
+        return Ok(());
+    };
+    let watermark = snapshot.config.get(DEDUP_WATERMARK);
+    let generation = snapshot.config.get(CONSOLIDATION_GENERATION);
+    let bounded = watermark.is_none_or(|w| w.parse::<i64>().is_ok_and(|w| w <= mark));
+    if !bounded || generation.is_some_and(|g| g.parse::<u64>().is_err()) {
+        return Ok(());
+    }
+    for (key, value) in [
+        (DEDUP_WATERMARK, watermark),
+        (CONSOLIDATION_GENERATION, generation),
+    ] {
+        if let Some(value) = value {
+            set_config(tx, key, value)?;
+        }
+    }
     Ok(())
 }
 
@@ -1780,6 +1811,39 @@ mod tests {
             "the highest restored row wins"
         );
         assert_eq!(restored.get("events"), Some(&0));
+    }
+
+    /// #1144: dedup's watermark and generation are restored only under the snapshot's `facts`
+    /// id mark, which every new fact id then exceeds.
+    #[test]
+    fn restore_carries_dedup_state_only_under_the_facts_mark() {
+        use crate::store::facts::{CONSOLIDATION_GENERATION, DEDUP_WATERMARK};
+        let restored = |facts_mark: Option<i64>, watermark: Option<&str>| {
+            let mut snapshot =
+                snapshot_with(vec![fact_with_embedding(1, vec![])], vec![], vec![], vec![]);
+            if let Some(mark) = facts_mark {
+                snapshot.sequences.insert("facts".into(), mark);
+            }
+            if let Some(w) = watermark {
+                snapshot.config.insert(DEDUP_WATERMARK.into(), w.into());
+            }
+            snapshot
+                .config
+                .insert(CONSOLIDATION_GENERATION.into(), "3".into());
+            let conn = open_memory().unwrap();
+            init_schema(&conn).unwrap();
+            migrate(&conn, None).unwrap();
+            restore_snapshot_into(&conn, &snapshot).unwrap();
+            (
+                get_config(&conn, DEDUP_WATERMARK).unwrap(),
+                get_config(&conn, CONSOLIDATION_GENERATION).unwrap(),
+            )
+        };
+        let some = |v: &str| Some(v.to_owned());
+        assert_eq!(restored(None, Some("5")), (None, None), "no id marks");
+        assert_eq!(restored(Some(5), Some("5")), (some("5"), some("3")));
+        assert_eq!(restored(Some(5), Some("6")), (None, None), "above its mark");
+        assert_eq!(restored(Some(5), None), (None, some("3")));
     }
 
     /// A restore whose facts all wait has no identity: the store records the validated
