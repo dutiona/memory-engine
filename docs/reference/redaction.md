@@ -52,7 +52,6 @@ Never redacted:
   2026-11-17). A token glued to a URL with no separator (`AKIA…https://`, `ghp_…/https://`) starts before the body,
   so it is redacted; its placeholder then keeps the link, so a later pass leaves the link's content alone (only a
   placeholder of a rule the engine emits does; any other bracketed text opens no link).
-- JSON keys: only string values are scanned.
 - An event's capture context (`redact::PROVENANCE_KEY`, `project`) when it has exactly the shape the MCP server writes:
   its strings get the machine-token rule only, because the other rules misread ordinary paths (a dot-free root holding
   a UUID, a checkout named `sk-learn-tutorial-2024`) and scrubbing a fact the project key is derived from would merge
@@ -246,7 +245,9 @@ apply then skips.
 reproduces every case, and both repositories carry the file byte for byte, each pinning its `sha256sum` in a test. A
 rule change is a pair of PRs, memory-engine first, both quoting the same digest; an edit of one copy alone fails that
 repository's pin. A case named `json-…` holds a JSON document: the JSON walk (`scrub_json`) must also turn it into its
-output, which pins the key-as-context rule for hex values (knowledge-base#626).
+output, which pins the key-as-context rule for hex values (knowledge-base#626) and the redaction of object keys
+(knowledge-base#652). Keys that redact to one text are each repository's own test, since one text pass cannot rename
+them.
 
 ## Residuals
 
