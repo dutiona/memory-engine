@@ -244,6 +244,8 @@ Bulk-ingests facts from a JSONL file (or stdin with `--file -`). Each line is a 
 | `--embed-dim`     | —                                          | Required with `--create`             |
 | `--scope`         | —                                          | Default scope for all facts          |
 
+**Input first:** the input (`--file`, or `bootstrap`'s directories and denylist) is checked before the store lock, so a run refused for its input leaves an older store unmigrated and creates no store; a bad input against a held store reports the input, not the lock.
+
 **Embedding identity:** on an existing store the embedder is built under the store lock and its identity checked read-only before the store opens: one that differs from the identity the store records exits 1 with `embedding identity check failed`, and an older store stays unmigrated (#1132). `bootstrap` does the same.
 
 **Error handling:** Malformed lines are skipped with a warning on stderr. Failed batches (embedding/DB errors) are skipped. Progress is reported on stderr. Exit code is non-zero only if zero facts were ingested.

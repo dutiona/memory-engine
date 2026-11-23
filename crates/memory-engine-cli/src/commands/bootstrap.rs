@@ -104,6 +104,21 @@ fn print_report(report: &BootstrapReport, format: OutputFormat) -> anyhow::Resul
 // Core logic (testable — accepts engine + embedder + config)
 // ---------------------------------------------------------------------------
 
+/// At least one source, and each one given a directory. `run` checks this before the store
+/// opens, so a run refused for its input leaves an older store unmigrated.
+fn ensure_sources(jsonl_dir: Option<&Path>, memory_dir: Option<&Path>) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        jsonl_dir.is_some() || memory_dir.is_some(),
+        "nothing to do: pass --jsonl-dir and/or --memory-dir"
+    );
+    for (flag, dir) in [("--jsonl-dir", jsonl_dir), ("--memory-dir", memory_dir)] {
+        if let Some(dir) = dir {
+            anyhow::ensure!(dir.is_dir(), "{flag} is not a directory: {}", dir.display());
+        }
+    }
+    Ok(())
+}
+
 /// Run the bootstrap import over whichever source dirs are provided, merging
 /// both reports. The `.jsonl` path uses the no-LLM [`KeywordExtractor`]; both
 /// paths share the redaction/dedup/backdating semantics in `config`.
@@ -119,19 +134,11 @@ pub async fn run_bootstrap(
     embedder: std::sync::Arc<dyn EmbeddingProvider>,
     config: &BootstrapConfig,
 ) -> anyhow::Result<BootstrapReport> {
-    anyhow::ensure!(
-        jsonl_dir.is_some() || memory_dir.is_some(),
-        "nothing to do: pass --jsonl-dir and/or --memory-dir"
-    );
+    ensure_sources(jsonl_dir, memory_dir)?;
 
     let mut report = BootstrapReport::default();
 
     if let Some(dir) = jsonl_dir {
-        anyhow::ensure!(
-            dir.is_dir(),
-            "--jsonl-dir is not a directory: {}",
-            dir.display()
-        );
         let sub = engine
             .bootstrap_directory(
                 dir,
@@ -146,11 +153,6 @@ pub async fn run_bootstrap(
     }
 
     if let Some(dir) = memory_dir {
-        anyhow::ensure!(
-            dir.is_dir(),
-            "--memory-dir is not a directory: {}",
-            dir.display()
-        );
         let sub = engine
             .bootstrap_memory_directory(dir, embedder.clone(), config, None)
             .await?;
@@ -165,9 +167,16 @@ pub async fn run_bootstrap(
 // ---------------------------------------------------------------------------
 
 pub async fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        args.jsonl_dir.is_some() || args.memory_dir.is_some(),
-        "pass --jsonl-dir and/or --memory-dir"
+    // The input first, before the store lock: a run refused for its input must not have
+    // migrated an older store or created a new one.
+    ensure_sources(args.jsonl_dir.as_deref(), args.memory_dir.as_deref())?;
+    // Author-seeded denylist (#51). Loud about how many literals loaded so an
+    // unset env var (→ signatures-only) is never silently mistaken for "active".
+    let denylist = load_secret_denylist()
+        .map_err(|e| anyhow::anyhow!("failed to load secret denylist: {e}"))?;
+    eprintln!(
+        "redaction: signatures + {} author-seeded denylist literal(s)",
+        denylist.len()
     );
 
     // Open or create the engine, plus its embedding provider (shared config —
@@ -190,15 +199,6 @@ pub async fn run(db: &Path, args: &BootstrapArgs, format: OutputFormat) -> anyho
     } else {
         open_engine_writable_with_embedder(db, args.embed_dim, &args.embed).await?
     };
-
-    // Author-seeded denylist (#51). Loud about how many literals loaded so an
-    // unset env var (→ signatures-only) is never silently mistaken for "active".
-    let denylist = load_secret_denylist()
-        .map_err(|e| anyhow::anyhow!("failed to load secret denylist: {e}"))?;
-    eprintln!(
-        "redaction: signatures + {} author-seeded denylist literal(s)",
-        denylist.len()
-    );
 
     let config = BootstrapConfig {
         scope: args.scope.clone(),

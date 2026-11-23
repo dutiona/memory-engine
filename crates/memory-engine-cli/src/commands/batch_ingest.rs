@@ -398,6 +398,18 @@ pub async fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> any
         args.batch_size,
     );
 
+    // Open the input first, before the store lock: a run refused for its input must not have
+    // migrated an older store or created a new one. Bind stdin here to extend its lifetime.
+    let stdin = std::io::stdin();
+    let reader: Box<dyn Read> = if args.file.as_os_str() == "-" {
+        Box::new(stdin.lock())
+    } else {
+        Box::new(
+            std::fs::File::open(&args.file)
+                .map_err(|e| anyhow::anyhow!("cannot open {}: {e}", args.file.display()))?,
+        )
+    };
+
     // Open or create the engine, plus its embedding provider (shared config —
     // provider/MRL identity per #619).
     //
@@ -417,17 +429,6 @@ pub async fn run(db: &Path, args: &BatchIngestArgs, format: OutputFormat) -> any
         (engine, embedder)
     } else {
         open_engine_writable_with_embedder(db, args.embed_dim, &args.embed).await?
-    };
-
-    // Open input — bind stdin before locking to extend lifetime
-    let stdin = std::io::stdin();
-    let reader: Box<dyn Read> = if args.file.as_os_str() == "-" {
-        Box::new(stdin.lock())
-    } else {
-        Box::new(
-            std::fs::File::open(&args.file)
-                .map_err(|e| anyhow::anyhow!("cannot open {}: {e}", args.file.display()))?,
-        )
     };
 
     let summary = ingest_from_reader(
