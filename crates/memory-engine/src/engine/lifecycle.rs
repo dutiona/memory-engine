@@ -434,6 +434,7 @@ fn content_members(
                 ToolOutcome::Interrupted => OutcomeClass::Other("interrupted".to_owned()),
             };
             let capture = redact::capture_tool_use(
+                tool,
                 input,
                 result.as_deref(),
                 class,
@@ -443,9 +444,7 @@ fn content_members(
             )?;
             extras.found = capture.input_found + capture.result_found;
             extras.stubbed = u64::from(capture.stub);
-            // A tool name is content: the payload's copy is scrubbed below, the activity's here.
-            let (tool_name, _) = redact::scrub_with(tool, denylist)?;
-            payload.insert("tool".to_owned(), json!(tool));
+            payload.insert("tool".to_owned(), json!(capture.tool));
             payload.insert("input".to_owned(), capture.args.clone());
             payload.insert("result".to_owned(), json!(capture.result));
             payload.insert("outcome".to_owned(), json!(tool_outcome(*outcome)));
@@ -453,7 +452,7 @@ fn content_members(
             extras.activity = dedup_window_secs.map(|window| {
                 let activity = NewActivity {
                     session_id: record.session_id.clone(),
-                    tool_name: tool_name.clone(),
+                    tool_name: capture.tool.clone(),
                     args_hash: args_hash(&capture.hash_input),
                     args: capture.args,
                     result_summary: capture.result,

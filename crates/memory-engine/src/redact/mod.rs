@@ -1074,6 +1074,8 @@ pub fn excerpt(text: &str) -> Result<String> {
 
 /// What of a tool call is stored, under the capture contract (#1024).
 pub(crate) struct ToolCapture {
+    /// The stored tool name: scrubbed, never cut (#1135).
+    pub tool: String,
     /// The stored input: scrubbed and cut, or a stub's path.
     pub args: Value,
     /// The stored result: scrubbed and cut; `None` for a stub.
@@ -1085,21 +1087,24 @@ pub(crate) struct ToolCapture {
     pub hash_input: String,
     /// The stored outcome: an `Other` text is scrubbed and cut like the result.
     pub outcome: OutcomeClass,
-    /// Secrets removed from the input (with the outcome) and from the result, apart: a
-    /// deduplicated call rewrites its row's result but its input and outcome only matched it.
+    /// Secrets removed from the input (with the tool name and the outcome) and from the result,
+    /// apart: a deduplicated call rewrites its row's result but its name, input and outcome only
+    /// matched it.
     pub input_found: u64,
     pub result_found: u64,
     /// Whether the call touched a sensitive path.
     pub stub: bool,
 }
 
-/// Apply the capture contract to one tool call: a call touching a sensitive path is a stub that
-/// keeps its token and outcome and nothing of its input or result; otherwise the input and
+/// Apply the capture contract to one tool call: its name is refused over the write limit, then
+/// scrubbed, on both branches (#1135). A call touching a sensitive path is a stub that keeps its
+/// name, token and outcome and nothing of its input or result; otherwise the input and
 /// result are scrubbed, then cut to [`CAPTURE_CAP`]. An `Other` outcome text is scrubbed and cut
 /// on both branches. A field over the write limit keeps an excerpt of its first window, scrubbed
 /// and cut the same way: the rest is never scanned, an input that large never deduplicates,
 /// and a result that large is never quoted. Every text also loses the author's `denylist`.
 pub(crate) fn capture_tool_use(
+    tool: &str,
     args: &Value,
     result: Option<&str>,
     outcome: OutcomeClass,
@@ -1107,6 +1112,8 @@ pub(crate) fn capture_tool_use(
     cwd: Option<&str>,
     denylist: &[String],
 ) -> Result<ToolCapture> {
+    crate::limits::check_str_size(tool, "tool name")?;
+    let (tool, tool_found) = scrub_with(tool, denylist)?;
     let (outcome, outcome_found) = match outcome {
         OutcomeClass::Other(text) => {
             let (text, found) = capture_text(&text, denylist)?;
@@ -1123,12 +1130,13 @@ pub(crate) fn capture_tool_use(
     if let Some(token) = touched_paths.iter().find(|t| sensitive(t)) {
         let (token, found) = scrub_with(token, denylist)?;
         return Ok(ToolCapture {
+            tool,
             args: serde_json::json!({ "sensitive_path": settled_cut(&token)? }),
             result: None,
             full_result: None,
             hash_input: format!("stub\0{token}"),
             outcome,
-            input_found: found + outcome_found,
+            input_found: found + tool_found + outcome_found,
             result_found: 0,
             stub: true,
         });
@@ -1165,12 +1173,13 @@ pub(crate) fn capture_tool_use(
         }
     };
     Ok(ToolCapture {
+        tool,
         args,
         result,
         full_result,
         hash_input,
         outcome,
-        input_found: input_found + outcome_found,
+        input_found: input_found + tool_found + outcome_found,
         result_found,
         stub: false,
     })

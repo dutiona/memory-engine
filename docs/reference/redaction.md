@@ -124,6 +124,8 @@ refuses to store them.
   first 512 bytes. The cap applies to the decoded text; its JSON encoding may be longer. A promotion is built from the
   scrubbed result, so its own 200-byte cut also follows redaction. An `OutcomeClass::Other` text is redacted, then
   cut, like the result, on a stub too.
+- **The tool name** is redacted too, never cut, on a stub as well (#1135): two calls whose names differ only by a secret
+  merge, as their inputs do. A name over the 1 MiB write limit is refused, and nothing is written.
 - **Deduplication** hashes the scrubbed, uncut input: two calls that differ only by a secret merge, and two long inputs
   that share their first 512 bytes stay two rows.
 - **Over 1 MiB.** A raw input, result or `Other` outcome over the write limit keeps a redacted excerpt: its first
@@ -171,7 +173,7 @@ client's own session.
   delivery whose `body_size`, or a record whose texts, exceed it is refused, and nothing is written. A memory made from
   such a text is embedded in chunks like any other, and a text over the embedder's input size is marked failed by the
   drain and stays found by full-text search.
-- **Tool calls.** The input and the result are redacted, then cut to 512 bytes, as for `record_activity`
+- **Tool calls.** The tool name is redacted, and the input and the result are redacted, then cut to 512 bytes, as for `record_activity`
   ([Tool calls](#tool-calls)): a call touching a sensitive path is a stub, and a text over the 1 MiB write limit keeps an
   excerpt of its first 1 MiB.
 - **The payload.** It takes the event payload scrub: its `project` provenance block, when it has exactly the shape the

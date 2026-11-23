@@ -32,8 +32,9 @@ impl MemoryEngine {
     ///
     /// Flow:
     /// 1. Apply the ignore/promote filter (pre-storage).
-    /// 2. Apply the capture contract (#1024, ADR-0020 §6): a call touching a sensitive path is
-    ///    a stub keeping only its path; otherwise input and result are redacted, then cut.
+    /// 2. Apply the capture contract (#1024, ADR-0020 §6): the tool name is redacted (#1135); a
+    ///    call touching a sensitive path is a stub keeping only its path; otherwise input and
+    ///    result are redacted, then cut.
     /// 3. Compute `args_hash` (blake3, 32 hex) over the redacted, uncut input.
     /// 4. Resolve scope if provided, then insert or dedup at the store layer.
     /// 5. If promote AND not deduplicated AND not a stub: create a fact from the redacted
@@ -63,6 +64,7 @@ impl MemoryEngine {
 
         // Step 2: the capture contract.
         let capture = crate::redact::capture_tool_use(
+            &req.tool_name,
             &req.args,
             req.result.as_deref(),
             // `None` defaults to `OutcomeClass::Success` (the DB column default).
@@ -93,7 +95,7 @@ impl MemoryEngine {
 
         let new_activity = NewActivity {
             session_id: req.session_id.clone(),
-            tool_name: req.tool_name.clone(),
+            tool_name: capture.tool.clone(),
             args_hash: hash,
             args: capture.args,
             result_summary: capture.result,
