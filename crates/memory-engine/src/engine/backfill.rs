@@ -615,6 +615,7 @@ fn effects(item: &Keyed) -> Result<Value> {
             // Not t_valid: the earlier of t_created and the receipt, and the preview never holds a
             // receipt time (#1153).
             "t_created": time(fact.t_created),
+            "importance": fact.base_importance,
             "metadata": fact.metadata,
         })),
     }))

@@ -1108,4 +1108,13 @@ async fn the_preview_changes_with_every_effect_bearing_input() {
         dated,
         "a memory's mtime"
     );
+    let mut weighted = memory("bf.m.1", "r", at(0));
+    if let ImportItem::Memory(m) = &mut weighted {
+        m.item.importance = 0.9;
+    }
+    assert_ne!(
+        preview(memory_upload(), vec![weighted], vec![]).await,
+        dated,
+        "a memory's importance, which the report shows"
+    );
 }
