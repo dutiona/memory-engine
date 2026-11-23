@@ -799,6 +799,37 @@ mod tests {
         assert_eq!(turn.tool_calls[0].stdout.as_deref(), Some("ok, ls ran"));
     }
 
+    /// The reference transcript's interrupt (README line 21), `isMeta` caveat (line 30) and
+    /// compaction summary (line 32) reach no turn as a prompt, while its real prompts do.
+    #[test]
+    fn the_reference_transcript_makes_no_prompt_of_its_non_prompts() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../memory-engine-mcp/tests/fixtures/claude-code-transcripts/-work-fixture-p/",
+            "52c6c7b7-c890-43ec-81a5-a1cf99d3cc84.jsonl"
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let (entries, _) = parse_session_file(bytes.as_slice(), 0, 0);
+        let turns = reconstruct_turns(&entries);
+        assert!(
+            turns.iter().any(|t| !t.user_text.is_empty()),
+            "its prompts make turns"
+        );
+        for turn in &turns {
+            for not_a_prompt in [
+                INTERRUPTED,
+                "Caveat: The messages below",
+                "This session is being continued",
+            ] {
+                assert!(
+                    !turn.user_text.contains(not_a_prompt),
+                    "{not_a_prompt}: {}",
+                    turn.user_text
+                );
+            }
+        }
+    }
+
     #[test]
     fn reconstruct_interrupted_false_by_default() {
         let entries = vec![
