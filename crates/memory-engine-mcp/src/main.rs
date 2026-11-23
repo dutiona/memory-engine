@@ -71,7 +71,7 @@ fn main() -> Result<(), BoxError> {
 async fn run() -> Result<(), BoxError> {
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(std::io::stderr).with_ansi(false))
-        .with(EnvFilter::from_default_env().add_directive(tracing::Level::WARN.into()))
+        .with(log_filter(&std::env::var("RUST_LOG").unwrap_or_default()))
         .init();
 
     let cli = Cli::parse();
@@ -175,6 +175,15 @@ async fn run() -> Result<(), BoxError> {
     .await?;
 
     Ok(())
+}
+
+/// The log filter for `RUST_LOG` (#1149): a bare level applies to every crate, a crate-only
+/// directive raises only that crate while every other crate stays at WARN, and no `RUST_LOG`
+/// gives WARN. The `warn` goes first: a later bare level replaces it, while a crate directive
+/// sits beside it. `with_default_directive` would not work: tracing-subscriber adds its default
+/// only when the filter holds no directive at all.
+fn log_filter(rust_log: &str) -> EnvFilter {
+    EnvFilter::builder().parse_lossy(format!("warn,{rust_log}"))
 }
 
 /// The author denylist of `ME_REDACT_DENYLIST_FILE` (#1026): its literals when the variable is
@@ -289,4 +298,43 @@ fn load_config(cli: &Cli) -> Result<config::McpConfig, BoxError> {
     // dimension is known.
 
     Ok(mcp_config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_filter;
+    use tracing_subscriber::prelude::*;
+
+    /// Each case's targets at WARN, INFO and DEBUG: `memory_engine_mcp`, then any other crate.
+    #[test]
+    fn log_filter_follows_the_three_rust_log_cases() {
+        for (rust_log, own, other) in [
+            ("info", [true, true, false], [true, true, false]),
+            (
+                "memory_engine_mcp=debug",
+                [true, true, true],
+                [true, false, false],
+            ),
+            ("", [true, false, false], [true, false, false]),
+        ] {
+            let subscriber = tracing_subscriber::registry().with(log_filter(rust_log));
+            tracing::subscriber::with_default(subscriber, || {
+                let seen_own = [
+                    tracing::enabled!(target: "memory_engine_mcp", tracing::Level::WARN),
+                    tracing::enabled!(target: "memory_engine_mcp", tracing::Level::INFO),
+                    tracing::enabled!(target: "memory_engine_mcp", tracing::Level::DEBUG),
+                ];
+                let seen_other = [
+                    tracing::enabled!(target: "other_crate", tracing::Level::WARN),
+                    tracing::enabled!(target: "other_crate", tracing::Level::INFO),
+                    tracing::enabled!(target: "other_crate", tracing::Level::DEBUG),
+                ];
+                assert_eq!(
+                    (seen_own, seen_other),
+                    (own, other),
+                    "RUST_LOG={rust_log:?}"
+                );
+            });
+        }
+    }
 }

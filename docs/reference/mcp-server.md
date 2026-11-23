@@ -53,6 +53,7 @@ MEMORY_MCP_LISTEN=127.0.0.1:<port> MEMORY_MCP_TOKEN_FILE=/path/to/tokens MEMORY_
 | `--embed-url`, `--embed-model`, `--embed-api-key`, `--embed-provider` | `MEMORY_MCP_EMBED_URL`, `_MODEL`, `_API_KEY`, `_PROVIDER` | Override the `[embedding]` keys of the same meaning |
 | `--embed-query-instruction` | `MEMORY_MCP_EMBED_QUERY_INSTRUCTION` | Overrides `query_instruction`; `''` for a symmetric model |
 | `--embed-artifact-sha256`, `--embed-pooling`, `--embed-normalization`, `--embed-max-input-tokens` | `MEMORY_MCP_EMBED_ARTIFACT_SHA256`, `_POOLING`, `_NORMALIZATION`, `_MAX_INPUT_TOKENS` | Override the served-artifact keys (below) |
+| — | `RUST_LOG` | The log filter, on stderr. Unset: WARN for every crate. A bare level (`RUST_LOG=debug`) applies to every crate, dependencies included (hyper, rusqlite, tokio). A crate directive (`RUST_LOG=memory_engine_mcp=debug`) raises that crate only; every other crate stays at WARN |
 
 ### Configuration
 

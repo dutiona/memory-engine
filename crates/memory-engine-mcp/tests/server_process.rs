@@ -268,9 +268,8 @@ fn a_key_file_never_reaches_the_log() {
             "--embed-api-key-file",
             key_file.to_str().unwrap(),
         ],
-        // The crate named: `main` replaces a bare level with WARN (#1149), and readiness needs
-        // this crate's `listening on` line.
-        &[("RUST_LOG", "trace,memory_engine_mcp=trace")],
+        // Every crate at trace: none may log the key.
+        &[("RUST_LOG", "trace")],
     );
     assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
     assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
@@ -279,6 +278,15 @@ fn a_key_file_never_reaches_the_log() {
         "stderr:\n{}",
         server.stderr()
     );
+}
+
+/// #1149: a bare level applies to every crate, so readiness' `listening on` line is logged.
+#[test]
+fn a_bare_rust_log_level_logs_the_listening_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = ServerProcess::spawn(dir.path(), &[], &[("RUST_LOG", "info")]);
+    assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
+    assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
 }
 
 /// The text of a model tool's answer, its call line removed.
