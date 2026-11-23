@@ -38,9 +38,10 @@ cargo doc --no-deps -p memory-engine --all-features                    # Docs, a
 cargo deny check                                                       # Supply-chain
 uv run --locked sphinx-build -b html -W --keep-going -E docs docs/_build  # Sphinx site: a warning fails it (#1046); local only, no CI job runs Sphinx
 cargo +nightly fuzz build                                              # Fuzz gate (#993) — detached fuzz/ consumes the facade API; needs nightly + cargo-fuzz
+cargo +nightly fuzz run backfill_upload fuzz/corpus/backfill_upload fuzz/seeds/backfill_upload -- -create_missing_dirs=1 -max_total_time=60 -timeout=10   # Bounded fuzz run (#1120): one minute of the backfill upload route from its seeds
 ```
 
-The last line is the **facade-API gate** (#993): `fuzz/` is a detached workspace that no `--workspace` command compiles, yet it consumes the facade public API by path — a removal or rename can break it silently. Needs nightly + cargo-fuzz (`just fuzz-build` wraps it); incremental (a seconds-long no-op when the facade is unchanged).
+The `fuzz build` line is the **facade-API gate** (#993): `fuzz/` is a detached workspace that no `--workspace` command compiles, yet it consumes the facade public API by path — a removal or rename can break it silently. Needs nightly + cargo-fuzz (`just fuzz-build` wraps it); incremental (a seconds-long no-op when the facade is unchanged). The `fuzz run` line after it is a one-minute bounded run of the backfill upload route and its four readers from the checked-in seeds (#1120), never a fuzzing campaign; it needs the same toolchain.
 
 The two facade-alone `cargo check`s are **not optional padding**: the `--workspace` builds cannot
 cover them, because feature unification turns `archive` on for the whole workspace. They are the

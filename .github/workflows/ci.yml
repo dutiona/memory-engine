@@ -118,6 +118,8 @@ jobs:
         run: cargo install cargo-fuzz --locked
       - name: cargo +nightly fuzz build
         run: cargo +nightly fuzz build
+      - name: bounded fuzz run of the backfill upload route (#1120)
+        run: cargo +nightly fuzz run backfill_upload fuzz/corpus/backfill_upload fuzz/seeds/backfill_upload -- -create_missing_dirs=1 -max_total_time=60 -timeout=10
 
   cargo-deny:
     name: Supply-chain (cargo-deny)
