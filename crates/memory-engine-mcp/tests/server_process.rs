@@ -268,7 +268,9 @@ fn a_key_file_never_reaches_the_log() {
             "--embed-api-key-file",
             key_file.to_str().unwrap(),
         ],
-        &[("RUST_LOG", "trace")],
+        // The crate named: `main` replaces a bare level with WARN (#1149), and readiness needs
+        // this crate's `listening on` line.
+        &[("RUST_LOG", "trace,memory_engine_mcp=trace")],
     );
     assert!(server.wait_ready().is_ok(), "stderr:\n{}", server.stderr());
     assert!(server.terminate().success(), "stderr:\n{}", server.stderr());

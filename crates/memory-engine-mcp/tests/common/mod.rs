@@ -930,16 +930,26 @@ pub fn write_config(dir: &Path, extra: &str) -> PathBuf {
     file
 }
 
-/// The built binary, serving on a loopback port freed just before it starts.
+/// The log line `main` writes right after binding its listener; [`ServerProcess::wait_ready`]
+/// reads the bound port from it.
+pub const LISTENING: &str = "listening on";
+
+/// The built binary, serving on a loopback port it picks itself and logs, known once
+/// [`wait_ready`](Self::wait_ready) has returned `Ok`.
+///
+/// Readiness reads the child's own [`LISTENING`] line, which is logged at `info`: a test that sets
+/// `RUST_LOG` must keep `memory_engine_mcp` at `info` or finer, and must name the crate, since
+/// `main` replaces a bare level with WARN (#1149).
 pub struct ServerProcess {
     pub child: Child,
-    pub port: u16,
+    port: Option<u16>,
     pub stderr: PathBuf,
 }
 
 impl ServerProcess {
     /// Start the binary with `--listen`, `--token-file` and `--config` for `dir`, plus `args`
-    /// and `envs`. No inherited `MEMORY_MCP_*` variable reaches it.
+    /// and `envs`. No inherited `MEMORY_MCP_*` variable reaches it; `RUST_LOG` is
+    /// `memory_engine_mcp=info` unless `envs` sets it (see [`ServerProcess`]).
     pub fn spawn(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Self {
         Self::spawn_with_token_file(dir, &write_token_file(dir, &MACHINES), args, envs)
     }
@@ -979,13 +989,10 @@ impl ServerProcess {
         envs: &[(&str, &str)],
         with_user: bool,
     ) -> Self {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        // Per port, so two servers started in one directory keep their own logs.
-        let stderr = dir.join(format!("stderr-{port}.log"));
+        // Numbered, so two servers started in one directory keep their own logs.
+        static SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SPAWNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stderr = dir.join(format!("stderr-{n}.log"));
         let mut command = Command::new(env!("CARGO_BIN_EXE_memory-engine-mcp"));
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("MEMORY_MCP_") {
@@ -995,9 +1002,12 @@ impl ServerProcess {
         if with_user {
             command.env("MEMORY_MCP_USER", "alice");
         }
+        // Port 0: a port freed here for the child could be taken by another test's socket before
+        // the child binds it, and that test's server would then answer for this one (#1143).
         command
+            .env("RUST_LOG", "memory_engine_mcp=info")
             .arg("--listen")
-            .arg(format!("127.0.0.1:{port}"))
+            .arg("127.0.0.1:0")
             .arg("--token-file")
             .arg(token_file)
             .args(args)
@@ -1007,14 +1017,38 @@ impl ServerProcess {
             .stderr(std::fs::File::create(&stderr).unwrap());
         Self {
             child: command.spawn().unwrap(),
-            port,
+            port: None,
             stderr,
         }
     }
 
+    /// The port the child bound.
+    ///
+    /// # Panics
+    ///
+    /// Before [`wait_ready`](Self::wait_ready) has read it.
+    #[must_use]
+    pub const fn port(&self) -> u16 {
+        self.port
+            .expect("call wait_ready first: the child picks its own port")
+    }
+
     #[must_use]
     pub fn url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        format!("http://127.0.0.1:{}", self.port())
+    }
+
+    /// The port in the first complete [`LISTENING`] line of the child's own log.
+    fn logged_port(&self) -> Option<u16> {
+        let log = self.stderr();
+        let (complete, _) = log.rsplit_once('\n')?;
+        complete.lines().find_map(|line| {
+            let (_, addr) = line.split_once(LISTENING)?;
+            addr.trim()
+                .parse::<std::net::SocketAddr>()
+                .ok()
+                .map(|a| a.port())
+        })
     }
 
     #[must_use]
@@ -1022,7 +1056,8 @@ impl ServerProcess {
         std::fs::read_to_string(&self.stderr).unwrap_or_default()
     }
 
-    /// Wait until `GET /mcp` answers 401, or return the exit status if the child dies first.
+    /// Wait until the child has logged the port it bound and `GET /mcp` there answers 401, or
+    /// return the exit status if the child dies first.
     pub fn wait_ready(&mut self) -> Result<(), ExitStatus> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -1033,14 +1068,23 @@ impl ServerProcess {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return Err(status);
             }
-            if let Ok(response) = client.get(format!("{}/mcp", self.url())).send()
+            if self.port.is_none() {
+                self.port = self.logged_port();
+            }
+            if self.port.is_some()
+                && let Ok(response) = client.get(format!("{}/mcp", self.url())).send()
                 && response.status() == 401
             {
                 return Ok(());
             }
             assert!(
                 Instant::now() < deadline,
-                "server not ready in time; stderr:\n{}",
+                "server not ready in time{}; stderr:\n{}",
+                if self.port.is_none() {
+                    ": no `listening on` line (a test's RUST_LOG must keep memory_engine_mcp at info)"
+                } else {
+                    ""
+                },
                 self.stderr()
             );
             std::thread::sleep(Duration::from_millis(50));
@@ -1092,7 +1136,7 @@ impl ServerProcess {
     pub fn status_from_headers(&self, machine: &str, fixture: &Fixture, claimed: u64) -> u16 {
         use std::fmt::Write as _;
         use std::io::{Read, Write};
-        let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", self.port())).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();

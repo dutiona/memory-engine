@@ -8,7 +8,7 @@ mod common;
 use std::path::Path;
 use std::sync::Arc;
 
-use common::{ServerProcess, write_token_file};
+use common::{LISTENING, ServerProcess, write_token_file};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::{AddFactRequest, EmbeddingFingerprint, FactType, MemoryEngine, ServedArtifact};
 
@@ -119,29 +119,15 @@ fn write_config(dir: &Path, fp: &EmbeddingFingerprint) {
     std::fs::write(&file, format!("{engine}{embedding}")).unwrap();
 }
 
-/// The log line `main` writes right after binding its listener. Every spawn here enables it,
-/// so its absence proves the listener was never bound, not merely that a poll missed it.
-const LISTENING: &str = "listening on";
-
-fn with_log<'a>(envs: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
-    let mut all = vec![("RUST_LOG", "memory_engine_mcp=info")];
-    all.extend_from_slice(envs);
-    all
-}
-
-/// The binary with `--config` for `dir`, logging at info.
+/// The binary with `--config` for `dir`. Every spawn logs its [`LISTENING`] line, so its
+/// absence proves the listener was never bound, not merely that a poll missed it.
 fn spawn(dir: &Path, envs: &[(&str, &str)]) -> ServerProcess {
-    ServerProcess::spawn(dir, &[], &with_log(envs))
+    ServerProcess::spawn(dir, &[], envs)
 }
 
-/// The binary without `--config` (an environment-only deployment), logging at info.
+/// The binary without `--config` (an environment-only deployment).
 fn spawn_bare(dir: &Path, envs: &[(&str, &str)]) -> ServerProcess {
-    ServerProcess::spawn_bare(
-        dir,
-        &write_token_file(dir, &common::MACHINES),
-        &[],
-        &with_log(envs),
-    )
+    ServerProcess::spawn_bare(dir, &write_token_file(dir, &common::MACHINES), &[], envs)
 }
 
 /// Assert the server exits non-zero having never bound its listener, naming `marker`.
