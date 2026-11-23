@@ -365,7 +365,7 @@ A move that loses a race with another answers `error: memory 412 changed while i
 changed`. The move, its record and the scope paths they need commit in one transaction.
 
 **Call records.** Each call appends one `MemoryOp` record to the event log (ADR-0021 §12): the call ID, the tool, the
-machine and `project`, the request's facts as decoded with the dropped ones, the key and the rules version:
+machine (as the token file writes it, never redacted, so `erase --machine` finds the record, #1136) and `project`, the request's facts as decoded with the dropped ones, the key and the rules version:
 
 ```json
 {"call":"9f1c2b7a40d3e6f5","tool":"set_level","machine":"laptop","fact_ids":[412],"level":"user","from":"user:alice/project:github.com%2Fexample%2Fproject","to":"user:alice","project":{"facts":{"root":"/home/alice/perso/dev/project","dev_root":"/home/alice/perso/dev","origin_url":"github.com:example/project.git"},"dropped":{},"key":"github.com/example/project","rules":1}}

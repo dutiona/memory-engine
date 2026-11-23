@@ -56,6 +56,11 @@ Never redacted:
   its strings get the machine-token rule only, because the other rules misread ordinary paths (a dot-free root holding
   a UUID, a checkout named `sk-learn-tutorial-2024`) and scrubbing a fact the project key is derived from would merge
   distinct projects. Any other shape under that key is scrubbed normally.
+- A declared machine's name (#1136): the top-level `machine` member of an event payload or of a fact's metadata,
+  when it equals a name the engine was built with (`MemoryEngineBuilder::machines`; the MCP server passes its token
+  file's). It is that machine's identifier, which `erase --machine` matches, so a long random-looking name (which
+  reads as high-entropy) is kept as written and never counted. The same name anywhere else, a `machine` nested
+  deeper, or a `machine` no deployment declared, is content and takes every rule.
 
 **The fixpoint.** One pass can leave a remainder the next one catches, so write paths call `scrub`, which repeats
 passes until one changes nothing, at most 8. A text that does not settle is refused with
@@ -253,4 +258,6 @@ them.
 
 - Rows stored before this release are not rewritten; today they are smoke data only.
 - A caller can write the capture-context shape itself; its strings then get the machine-token rule only.
+- Rows stored before #1136 keep a `machine` that a rule rewrote: `erase --machine` does not find them by machine
+  (`erase --fact` does).
 - A provider token typed into a project path or branch is stored, as one in a link is.

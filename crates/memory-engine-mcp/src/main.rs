@@ -116,7 +116,11 @@ async fn run() -> Result<(), BoxError> {
     let embedder = tokio::task::block_in_place(|| build_embedder(resolved))?;
 
     // 4. Open MemoryEngine
-    let mut builder = MemoryEngine::builder(embed_dim).path(mcp_config.engine.db_path.clone());
+    // The token file's machines are the identifiers the engine keeps as written in the
+    // records and memories it files for them, where `erase --machine` finds them (#1136).
+    let mut builder = MemoryEngine::builder(embed_dim)
+        .machines(tokens.machines().map(|m| m.as_str().to_owned()))
+        .path(mcp_config.engine.db_path.clone());
     if let Some(dir) = &mcp_config.engine.backup_dir {
         // Checked now: `VACUUM INTO` would only fail at the next pending migration.
         if !dir.is_dir() {

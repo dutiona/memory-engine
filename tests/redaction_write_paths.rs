@@ -208,6 +208,10 @@ const EXEMPT: &[(&str, &str)] = &[
         "declared_identity",
         "construction: an identity is an identifier, compared, never stored",
     ),
+    (
+        "machines",
+        "construction: machine names, identifiers the write gates keep as written (#1136)",
+    ),
     ("end_idle_segments", "ends segments by time; stores no text"),
     ("open_status_connection", "read"),
     ("load_graph_from_db", "read"),
@@ -1806,4 +1810,66 @@ async fn an_import_redacts_with_the_denylist() {
             "the denylist literal is on disk"
         );
     }
+}
+
+/// #1136: a machine name the deployment declared is that machine's identifier, kept as written in
+/// a payload's or metadata's top-level `machine`, where `erase --machine` looks for it; anywhere
+/// else, or undeclared, it is content and takes every rule.
+#[tokio::test]
+async fn a_declared_machine_name_is_kept_only_as_the_machine_member() {
+    let name = "q7m2x9k4v8w3z6p1r5t0y8u2";
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("memory.db");
+    let engine = MemoryEngine::builder(DIM)
+        .path(&db)
+        .machines([name.to_owned()])
+        .build()
+        .unwrap();
+    engine
+        .ingest_at(
+            "unscoped:laptop",
+            &event(json!({ "machine": name, "error": name, "detail": { "machine": name } })),
+        )
+        .await
+        .unwrap();
+    let id = engine
+        .add_fact_deferred(&request(
+            "a memory".into(),
+            json!({ "machine": name, "note": name }),
+        ))
+        .await
+        .unwrap();
+    let payload = &events(&engine).await[0];
+    assert_eq!(payload["machine"], name);
+    assert_eq!(payload["error"], "[REDACTED:high-entropy]");
+    assert_eq!(payload["detail"]["machine"], "[REDACTED:high-entropy]");
+    let fact = engine.get_fact(id).await.unwrap();
+    assert_eq!(fact.metadata["machine"], name);
+    assert_eq!(fact.metadata["note"], "[REDACTED:high-entropy]");
+    let mut engine = engine;
+    engine.close().await.unwrap();
+    assert_eq!(
+        read_redaction_counts(&db).unwrap().redacted,
+        3,
+        "the kept name never counts"
+    );
+
+    let undeclared = MemoryEngine::builder(DIM).build().unwrap();
+    undeclared
+        .ingest(&event(json!({ "machine": name })))
+        .await
+        .unwrap();
+    assert_eq!(
+        events(&undeclared).await[0]["machine"],
+        "[REDACTED:high-entropy]"
+    );
+
+    let refused = MemoryEngine::builder(DIM)
+        .machines(["a/b".to_owned()])
+        .build();
+    assert!(
+        matches!(refused, Err(MemoryError::Conflict(_))),
+        "{:?}",
+        refused.err()
+    );
 }

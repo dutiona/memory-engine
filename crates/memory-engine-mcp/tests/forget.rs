@@ -276,3 +276,118 @@ async fn a_forget_whose_record_fails_changes_nothing() {
         memory_engine::inspect::FactState::Active
     ));
 }
+
+/// The text of a model tool's answer over the binary, its call line removed.
+fn text(response: &Value) -> String {
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no tool result in {response}"));
+    text.split_once('\n').unwrap().1.to_owned()
+}
+
+/// The operator's `erase --machine`, through the engine, with the server stopped.
+fn erase_machine(db: &std::path::Path, machine: &str) -> memory_engine::types::EraseReport {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the test stands in for the operator's `erase` command, run with the server stopped"
+    )]
+    runtime.block_on(async {
+        let mut engine = memory_engine::MemoryEngine::builder(common::DIM)
+            .path(db)
+            .build()
+            .unwrap();
+        let report = engine
+            .erase(&memory_engine::types::EraseTarget::Machine(machine.into()))
+            .await
+            .unwrap();
+        engine.close().await.unwrap();
+        report
+    })
+}
+
+/// #1136: a machine whose name reads as high-entropy keeps it in every call record and memory, so
+/// the operator's `erase --machine` (run here through the engine, the server stopped) takes the
+/// records and memories it filed outside its bucket too; the other machine's rows stay.
+#[test]
+fn erasing_a_random_looking_machine_takes_its_records_and_memories() {
+    let scrambled = "q7m2x9k4v8w3z6p1r5t0y8u2";
+    let dir = tempfile::tempdir().unwrap();
+    let tokens = common::write_token_file(dir.path(), &[scrambled, "laptop"]);
+    let mut server = common::ServerProcess::spawn_with_token_file(dir.path(), &tokens, &[], &[]);
+    server.wait_ready().unwrap();
+    for (machine, marker) in [(scrambled, "beekeeper"), ("laptop", "owlkeeper")] {
+        let user = text(&server.tool(
+            machine,
+            "remember",
+            &json!({ "content": format!("the {marker} works at the user level"), "level": "user" }),
+        ));
+        assert!(user.starts_with("stored "), "{user}");
+        let bucket = text(&server.tool(
+            machine,
+            "remember",
+            &json!({ "content": format!("the {marker} works in the bucket") }),
+        ));
+        let id: i64 = bucket.split(' ').nth(1).unwrap().parse().unwrap();
+        server.tool(machine, "recall", &json!({ "query": marker }));
+        let forgot = text(&server.tool(
+            machine,
+            "forget",
+            &json!({ "id": id, "reason": "it moved" }),
+        ));
+        assert_eq!(forgot, "forgotten");
+    }
+    assert!(server.terminate().success(), "{}", server.stderr());
+    let db = dir.path().join("memory.db");
+    let count = |sql: &str| -> i64 {
+        rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row(sql, [], |r| r.get(0))
+            .unwrap()
+    };
+    let records = |machine: &str| {
+        count(&format!(
+            "SELECT COUNT(*) FROM events WHERE source = 'mcp' \
+             AND json_extract(payload, '$.machine') = '{machine}'"
+        ))
+    };
+    let memories = |machine: &str| {
+        count(&format!(
+            "SELECT COUNT(*) FROM facts WHERE json_extract(metadata, '$.machine') = '{machine}'"
+        ))
+    };
+    // Each record names its caller: remember twice, recall and forget.
+    assert_eq!(count("SELECT COUNT(*) FROM events WHERE source = 'mcp'"), 8);
+    assert_eq!(
+        records(scrambled),
+        4,
+        "the scrambled machine's records name it"
+    );
+    assert_eq!(records("laptop"), 4);
+    assert_eq!(memories(scrambled), 2, "its memories name it");
+    assert_eq!(memories("laptop"), 2);
+
+    assert!(erase_machine(&db, scrambled).purged);
+    assert_eq!(count("SELECT COUNT(*) FROM events WHERE source = 'mcp'"), 4);
+    assert_eq!(records("laptop"), 4, "laptop's records stay");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM facts"),
+        2,
+        "laptop's memories alone"
+    );
+    assert_eq!(memories("laptop"), 2);
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("memory.db")
+        {
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(!common::holds(&bytes, b"beekeeper"), "{}", path.display());
+        }
+    }
+}

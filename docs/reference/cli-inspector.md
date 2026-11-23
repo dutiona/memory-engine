@@ -310,7 +310,9 @@ The one operation that deletes (ADR-0020 §8, #1023). Exactly one target:
   scope the bucket rule does not reach. The captured events and memories go with it through `payload.machine`,
   `metadata.machine` and their source events. The same holds for what the machine's backfill uploads imported (#1026):
   their events, memories, activities, receipts and segments name the machine where these rules look, so they go too,
-  even when the machine's name is in the author denylist, which never redacts an identifier.
+  even when the machine's name is in the author denylist, which never redacts an identifier. The MCP server's call
+  records and `remember` memories keep the machine's name as its token file writes it, however random it looks
+  (#1136), so a record or memory filed outside the bucket (a user-level `remember`) goes too.
 
 Both also take every wisdom fact derived from a taken fact, the summaries naming one, the activities that promoted
 one, every incident edge, and the embedding queue's last error and pause error when a taken fact's attempt left them

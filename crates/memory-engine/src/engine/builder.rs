@@ -99,6 +99,7 @@ pub struct MemoryEngineBuilder<B: sealed::Backing = InMemory> {
     search_config: Option<SearchConfig>,
     reranker: Option<Box<dyn Reranker>>,
     upcaster_registry: UpcasterRegistry,
+    machines: Vec<String>,
     // BACKING — in-memory marker or file payload:
     backing: B,
 }
@@ -116,6 +117,7 @@ impl MemoryEngine {
             search_config: None,
             reranker: None,
             upcaster_registry: UpcasterRegistry::new(),
+            machines: Vec::new(),
             backing: InMemory(()),
         }
     }
@@ -143,6 +145,47 @@ impl<B: sealed::Backing> MemoryEngineBuilder<B> {
         self.upcaster_registry = registry;
         self
     }
+
+    /// Declare the deployment's machine names (#1136): a top-level `machine` member equal to one
+    /// of them, in an event payload or a fact's metadata, is that machine's identifier and is
+    /// stored as written, where `erase --machine` looks for it. Anywhere else, or any other value,
+    /// it is content and takes every redaction rule. Without a declaration no name is kept, so a
+    /// name that reads as a secret (a long random-looking one) is redacted like any text.
+    ///
+    /// Each name must be a lowercase DNS label, the grammar `erase` takes; [`build`] refuses
+    /// another.
+    ///
+    /// [`build`]: MemoryEngineBuilder::build
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use memory_engine::MemoryEngine;
+    ///
+    /// let engine = MemoryEngine::builder(4).machines(["laptop".to_owned()]).build()?;
+    /// assert!(MemoryEngine::builder(4).machines(["a/b".to_owned()]).build().is_err());
+    /// # drop(engine);
+    /// # Ok::<(), memory_engine::MemoryError>(())
+    /// ```
+    pub fn machines(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.machines = names.into_iter().collect();
+        self
+    }
+}
+
+/// The declared machine names, refused unless each is a lowercase DNS label.
+fn declared(machines: Vec<String>) -> Result<Box<[String]>> {
+    if let Some(bad) = machines
+        .iter()
+        .find(|m| !crate::types::is_dns_label(m.as_bytes()))
+    {
+        return Err(crate::error::MemoryError::Conflict(
+            crate::error::ConflictError::PolicyParameter(format!(
+                "a machine is a lowercase DNS label: {bad:?}"
+            )),
+        ));
+    }
+    Ok(machines.into())
 }
 
 /// Transition and terminal for the in-memory state.
@@ -157,6 +200,7 @@ impl MemoryEngineBuilder<InMemory> {
             search_config: self.search_config,
             reranker: self.reranker,
             upcaster_registry: self.upcaster_registry,
+            machines: self.machines,
             backing: File {
                 path: path.into(),
                 read_only: false,
@@ -171,16 +215,21 @@ impl MemoryEngineBuilder<InMemory> {
     ///
     /// # Errors
     ///
-    /// Returns `MemoryError::Storage` if the connection or schema setup fails.
+    /// Returns `MemoryError::Storage` if the connection or schema setup fails, and
+    /// `MemoryError::Conflict` (`PolicyParameter`) for a [declared machine](Self::machines) that
+    /// is not a lowercase DNS label, before anything opens.
     pub fn build(self) -> Result<MemoryEngine> {
+        let machines = declared(self.machines)?;
         let pool = ConnectionPool::open_memory(self.embed_dim)?;
-        MemoryEngine::init_from_pool(
+        let mut engine = MemoryEngine::init_from_pool(
             pool,
             self.embed_dim,
             self.search_config,
             self.upcaster_registry,
             self.reranker.map(Arc::from),
-        )
+        )?;
+        engine.machines = machines;
+        Ok(engine)
     }
 }
 
@@ -239,8 +288,8 @@ impl MemoryEngineBuilder<File> {
 
     /// Assemble the [`EngineConfig`] this builder describes, *without* opening.
     ///
-    /// Note: the reranker is **not** part of `EngineConfig` (it is not `Clone`),
-    /// so `into_config` drops it. Use [`build`](Self::build) to open with the
+    /// Note: the reranker and the [declared machines](Self::machines) are **not** part of
+    /// `EngineConfig`, so `into_config` drops them. Use [`build`](Self::build) to open with the
     /// reranker attached.
     #[must_use]
     pub fn into_config(self) -> EngineConfig {
@@ -272,9 +321,14 @@ impl MemoryEngineBuilder<File> {
     /// differs from the store's recorded one; each refusal comes before any migration.
     /// Returns `MemoryError::Migration` if the path is an existing SQLite file holding another
     /// application's schema (no memory-engine `schema_version`), before anything writes to it.
+    /// Returns `MemoryError::Conflict` (`PolicyParameter`) for a [declared machine](Self::machines)
+    /// that is not a lowercase DNS label, before anything opens.
     pub fn build(self) -> Result<MemoryEngine> {
         let config = self.to_config();
-        MemoryEngine::open_from_config(&config, self.reranker.map(Arc::from))
+        let machines = declared(self.machines)?;
+        let mut engine = MemoryEngine::open_from_config(&config, self.reranker.map(Arc::from))?;
+        engine.machines = machines;
+        Ok(engine)
     }
 }
 
