@@ -70,6 +70,10 @@ impl MemoryEngine {
     /// its session's first live event is [`ImportOutcome::LiveOverlap`]; a memory reinforces
     /// an active twin in its home or is queued for its vector, and a forget's tombstone blocks
     /// it. Imported events are labelled `backfill`, and their memories dated by their events.
+    /// An upload marked `copy` is a plugin store's (#1117): its events are labelled with its
+    /// kind, yield to live capture from a minute before a session's first live event, and are
+    /// [`ImportOutcome::Superseded`] where another import holds their actor and kind in the
+    /// session.
     ///
     /// The preview is a digest of every effect the upload would write and of the store's
     /// outcomes, never of the receipt time or a row id. A [`BatchMode::DryRun`] rolls back and
@@ -107,6 +111,7 @@ impl MemoryEngine {
     ///     provenance: serde_json::json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
     ///     body_sha256: [9; 32],
     ///     census: serde_json::json!({ "lines": 1 }),
+    ///     copy: false,
     /// };
     /// let stop = ImportItem::Event(ImportEvent {
     ///     event_id: "bf.4f6c.s".into(),
@@ -193,6 +198,7 @@ impl MemoryEngine {
                     Some(Applied::Duplicate) => ImportOutcome::Duplicate,
                     Some(Applied::Collision) => ImportOutcome::Collision,
                     Some(Applied::LiveOverlap) => ImportOutcome::LiveOverlap,
+                    Some(Applied::Superseded) => ImportOutcome::Superseded,
                     other => {
                         return Err(MemoryError::Internal(format!(
                             "the store answered an imported item with {other:?}"
@@ -218,6 +224,7 @@ impl MemoryEngine {
             items,
             facts,
             live_since: batch.live_since,
+            held_by: batch.held_by,
             found,
             stubbed,
         })
@@ -232,12 +239,17 @@ fn prepare_upload(
     denylist: &[String],
 ) -> Result<(String, [u8; 32], Vec<Prepared>)> {
     let (source, source_found) = redact::scrub_with(&upload.source, denylist)?;
+    let origin = if upload.copy {
+        Origin::Copy(&upload.kind)
+    } else {
+        Origin::Backfill
+    };
     let mut prepared = items
         .into_iter()
         .map(|item| match item {
-            ImportItem::Event(event) => prepare_event(upload, event, denylist),
+            ImportItem::Event(event) => prepare_event(upload, event, denylist, origin),
             ImportItem::Memory(memory) => {
-                prepare_memory(upload, &source, source_found, memory, denylist)
+                prepare_memory(upload, &source, source_found, memory, denylist, origin)
             }
         })
         .collect::<Result<Vec<_>>>()?;
@@ -246,7 +258,12 @@ fn prepare_upload(
     Ok((source, context, prepared))
 }
 
-fn prepare_event(upload: &Upload, event: ImportEvent, denylist: &[String]) -> Result<Prepared> {
+fn prepare_event(
+    upload: &Upload,
+    event: ImportEvent,
+    denylist: &[String],
+    origin: Origin<'_>,
+) -> Result<Prepared> {
     let ImportEvent {
         event_id,
         time,
@@ -295,10 +312,7 @@ fn prepare_event(upload: &Upload, event: ImportEvent, denylist: &[String]) -> Re
     {
         return Ok(Prepared::refused(key, summary, reason));
     }
-    let capture = Capture {
-        denylist,
-        origin: Origin::Backfill,
-    };
+    let capture = Capture { denylist, origin };
     let (write, found, stubbed) = match prepare(&delivery, record, &capture) {
         Ok(Plan::Write {
             write: DeliveryWrite::Capture(write),
@@ -366,6 +380,7 @@ fn prepare_memory(
     source_found: u64,
     memory: ImportMemory,
     denylist: &[String],
+    origin: Origin<'_>,
 ) -> Result<Prepared> {
     let ImportMemory {
         event_id,
@@ -442,7 +457,7 @@ fn prepare_memory(
         timestamp: item.time,
         event_type: EventType::SystemEvent,
         payload,
-        source: BACKFILL.to_owned(),
+        source: origin.source().to_owned(),
         session_id: None,
         scope_id: 1,
         origin_node_id: BACKFILL.to_owned(),
@@ -484,6 +499,7 @@ fn preview_of(
         outcome: "created",
         hint,
         preview: redact::cut(&fact.content).to_owned(),
+        importance: fact.base_importance,
     }
 }
 

@@ -9,38 +9,19 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::{DateTime, SecondsFormat, Timelike, Utc};
-use memory_engine::bootstrap::{parse_timestamp, read_json_lines};
-use memory_engine::types::lifecycle::{
-    Actor, Content, ImportEvent, ImportItem, NeutralRecord, StopOutcome, ToolOutcome,
-};
+use chrono::{DateTime, SecondsFormat, Utc};
+use memory_engine::bootstrap::parse_timestamp;
+use memory_engine::types::lifecycle::{Actor, Content, NeutralRecord, StopOutcome, ToolOutcome};
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 
-use super::{result_text, tool_content};
-use crate::adapters::Mapped;
-
-/// The text Claude Code puts at the start of what an interruption leaves.
-const INTERRUPTED: &str = "[Request interrupted by user";
+use super::{INTERRUPTED, result_text, tool_content};
+use crate::adapters::{Mapped, Raw, is_event_id, json_objects, keyed};
 
 /// The model of the messages Claude Code writes itself.
 const SYNTHETIC: &str = "<synthetic>";
 
 /// Why a transcript of more entries than ADR-0009's importer keeps is refused whole.
 const OVER_THE_LIMIT: &str = "the transcript is over the 1,000,000-entry limit";
-
-/// The records one millisecond may hold: `seq` is the millisecond times this plus the rank,
-/// so it stays within ADR-0020's six digits.
-const PER_MILLISECOND: u32 = 1000;
-
-/// `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`, ADR-0020 §3's event ID.
-fn is_event_id(id: &str) -> bool {
-    let b = id.as_bytes();
-    (1..=64).contains(&b.len())
-        && b[0].is_ascii_alphanumeric()
-        && b.iter()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
-}
 
 fn text<'a>(object: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
     object.get(name).and_then(Value::as_str)
@@ -171,14 +152,6 @@ struct Call {
     input: Value,
 }
 
-/// A record, in file order, before its order key.
-struct Raw {
-    line: usize,
-    time: DateTime<Utc>,
-    event_id: String,
-    record: NeutralRecord,
-}
-
 /// The message an assistant entry belongs to: its session, its actor, and its `message.id`,
 /// else the entry itself. A fork repeats a message under its own session, so each session's
 /// copy is its own message and maps to the original's record, never to one text of both.
@@ -265,11 +238,7 @@ pub fn read(body: &[u8]) -> Result<Mapped, &'static str> {
 
 /// [`read`] with an explicit entry limit (test seam).
 fn read_capped(body: &[u8], max_entries: usize) -> Result<Mapped, &'static str> {
-    let (objects, malformed, truncated) =
-        read_json_lines(body, memory_engine::BACKFILL_BODY_BYTES as u64, max_entries);
-    if truncated {
-        return Err(OVER_THE_LIMIT);
-    }
+    let (objects, malformed) = json_objects(body, max_entries, OVER_THE_LIMIT)?;
     if !objects
         .iter()
         .any(|(_, v)| v.get("sessionId").is_some_and(Value::is_string))
@@ -293,32 +262,15 @@ fn read_capped(body: &[u8], max_entries: usize) -> Result<Mapped, &'static str> 
         incomplete_turns: reader.incomplete + reader.turns.len(),
         skipped: BTreeMap::new(),
     };
-    let mut ranks: HashMap<(i64, u32), u32> = HashMap::new();
-    for raw in reader.records {
-        let millisecond = raw.time.timestamp_subsec_millis().min(PER_MILLISECOND - 1);
-        let rank = ranks
-            .entry((raw.time.timestamp(), millisecond))
-            .or_default();
-        if *rank >= PER_MILLISECOND {
-            *reader
-                .skipped
-                .entry("over 1,000 records in one millisecond")
-                .or_default() += 1;
-            continue;
-        }
-        let seq = millisecond * PER_MILLISECOND + *rank;
-        *rank += 1;
-        let canonical = canonical(&raw).to_string();
-        mapped.items.push(ImportItem::Event(ImportEvent {
-            event_id: raw.event_id,
-            time: raw.time.with_nanosecond(0).unwrap_or(raw.time),
-            seq,
-            body_sha256: Sha256::digest(canonical.as_bytes()).into(),
-            body_size: canonical.len() as u64,
-            line: raw.line,
-            record: raw.record,
-        }));
-    }
+    let records = reader
+        .records
+        .into_iter()
+        .map(|raw| {
+            let c = canonical(&raw);
+            (raw, c)
+        })
+        .collect();
+    mapped.items = keyed(records, &mut reader.skipped);
     mapped.skipped = reader.skipped;
     Ok(mapped)
 }

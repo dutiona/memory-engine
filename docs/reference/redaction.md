@@ -190,7 +190,9 @@ client's own session.
 `MemoryEngine::import_backfill`, gated like `record_lifecycle_event`. Its events take exactly the
 [captured events](#captured-events) rules, through the same code, with one difference: the **author denylist** applies
 too. The server reads `ME_REDACT_DENYLIST_FILE` once at start and refuses every upload, dry runs included, when it is
-unset or unreadable, so no dry run is reviewed under weaker redaction than its write would get.
+unset or unreadable, so no dry run is reviewed under weaker redaction than its write would get. The `claude-mem` and
+`claude-memory` plugin-store kinds take the same path: every row redacted with every rule and the denylist, a memory's
+text and metadata with `scrub_metadata`, and their session IDs identifiers.
 
 - **What the denylist reaches.** Every content member an upload stores: prompts, tool names, inputs, results and errors
   (before the cut), final messages, summaries, `cwd`, the upload's source, a memory's body and its frontmatter

@@ -33,11 +33,6 @@ ignore = [
     # HTTP tests use reqwest, so the client is not compiled; the rmcp entry under [bans]
     # keeps it that way. Documented exception; removal tracked by #1035.
     "RUSTSEC-2026-0462",
-    # RUSTSEC-2026-0440: astral-tokio-tar is unmaintained (not a vuln), pulled via
-    # testcontainers, a dev-dependency of me-backend-postgres only (the live-PG test
-    # harness). No testcontainers release drops it yet: testcontainers/testcontainers-rs#1006
-    # is open. Documented exception; removal tracked by #1036.
-    "RUSTSEC-2026-0440",
     # RUSTSEC-2026-0543: chrono is unmaintained (not a vuln; all versions, no safe upgrade).
     # Direct dependency of nine workspace crates, and pulled via rmcp -> schemars.
     # Documented exception; replacement with jiff or time tracked by #1073.

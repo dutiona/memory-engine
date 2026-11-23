@@ -360,7 +360,7 @@ async fn the_upload_checks_run_in_order() {
     // 3: an unknown harness or kind, before any body byte; an envelope fault comes first.
     let codex = ok.clone().header("ME-Harness", "codex");
     assert_eq!(status_from_headers(&server, &codex, 10).await, 422);
-    let kind = ok.clone().header("ME-Backfill-Kind", "claude-mem");
+    let kind = ok.clone().header("ME-Backfill-Kind", "no-such-kind");
     assert_eq!(status_from_headers(&server, &kind, 10).await, 422);
     let both = codex.clone().without("ME-Client-Version");
     assert_eq!(send(&server, "laptop", &both).await.0, 400);

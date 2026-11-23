@@ -45,6 +45,7 @@ fn upload(home: &str) -> Upload {
         provenance: provenance("/work/p"),
         body_sha256: digest("the uploaded body"),
         census: json!({ "skipped": { "progress": 1 } }),
+        copy: false,
     }
 }
 
@@ -565,6 +566,85 @@ async fn an_imported_memory_names_its_machine_and_event() {
         })
     );
     assert_eq!(events[0].timestamp, at(-5));
+}
+
+/// A plugin store's rows are a copy (#1117): labelled with the store's kind and never live; a
+/// prompt yields to the transcript import already holding its session's prompts, while its
+/// stop and its memory, which no other import holds, are stored, the stop's fact dated by its
+/// event and the memory's weight shown before the write.
+#[tokio::test]
+async fn a_copy_is_labelled_with_its_kind_and_yields() {
+    let s = Store::new();
+    s.write(
+        &upload(HOME),
+        &[main_item("bf.1.p", 0, prompt("Add a flag."))],
+        &[],
+    )
+    .await;
+    let copy = Upload {
+        kind: "claude-memory".into(),
+        source: "plugin-stores/claude-memory/claude-memory-none.jsonl".into(),
+        copy: true,
+        ..upload(HOME)
+    };
+    let observation = ImportItem::Memory(ImportMemory {
+        event_id: "bf.claude-memory.o1".into(),
+        body_sha256: digest("an observation"),
+        body_size: 32,
+        item: MemoryItem {
+            text: "The flag is parsed once.".into(),
+            fact_type: FactType::Episodic,
+            importance: 0.6,
+            time: at(5),
+            metadata: json!({ "memory_type": "observation", "session_id": SESSION }),
+        },
+    });
+    let items = vec![
+        main_item("bf.claude-memory.a.p", 0, prompt("Add a flag.")),
+        main_item(
+            "bf.claude-memory.b.s",
+            9,
+            stop(StopOutcome::Completed, "Added the flag."),
+        ),
+        observation,
+    ];
+
+    let write = s.write(&copy, &items, &[]).await;
+
+    let outcome = |id: &str| {
+        write
+            .items
+            .iter()
+            .find(|(_, item)| item.event_id == id)
+            .map(|(outcome, _)| *outcome)
+    };
+    assert_eq!(
+        outcome("bf.claude-memory.a.p"),
+        Some(ImportOutcome::Superseded)
+    );
+    assert_eq!(outcome("bf.claude-memory.b.s"), Some(ImportOutcome::Stored));
+    assert_eq!(outcome("bf.claude-memory.o1"), Some(ImportOutcome::Stored));
+    assert_eq!(
+        write
+            .held_by
+            .get(SESSION)
+            .map(|h| h.iter().map(String::as_str).collect::<Vec<_>>()),
+        Some(vec!["backfill"])
+    );
+    let fact = |id: &str| write.facts.iter().find(|f| f.event_id == id).unwrap();
+    assert_eq!(fact("bf.claude-memory.b.s").fact_type, FactType::Episodic);
+    assert_eq!(fact("bf.claude-memory.b.s").t_created, at(9));
+    assert!((fact("bf.claude-memory.o1").importance - 0.6).abs() < f64::EPSILON);
+    let copies: Vec<Event> = s
+        .engine
+        .replay_events(&ReplayFilter::default())
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.source == "claude-memory")
+        .collect();
+    assert_eq!(copies.len(), 2, "the stop and the memory's event");
+    assert!(copies.iter().all(|e| e.origin_node_id == "backfill"));
 }
 
 /// One text filed under two projects is two memories, one in each.

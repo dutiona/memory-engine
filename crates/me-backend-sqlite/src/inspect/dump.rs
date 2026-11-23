@@ -1301,6 +1301,7 @@ mod tests {
             activity: None,
             fact: None,
             call: None,
+            copy: false,
         };
         let key = ReceiptKey {
             machine: "laptop",

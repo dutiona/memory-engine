@@ -160,6 +160,7 @@ To capture Claude Code sessions into a memory-engine server, install the [Claude
 | `memory-engine`     | Core library (5 primitives, traits, storage)     |
 | `memory-engine-mcp` | MCP server (`recall`, `remember`, `forget`, `set_level`; session events on `POST /lifecycle/events`; backfill uploads on `POST /backfill/uploads`) |
 | `memory-engine-cli` | Terminal inspector and maintenance (query, explain, dump, stats, prune) |
+| `memory-engine-plugin-export` | Exports a claude-mem or claude-memory plugin store, one file per project, for `POST /backfill/uploads` |
 
 ## Current Status
 

@@ -45,11 +45,18 @@ pub trait Lifecycle: Send + Sync {
     ///
     /// The transaction takes the write lock first, then reads, once per session of the batch's
     /// captures, the first live event of that session and `machine` (an event whose `source` is
-    /// `lifecycle`, by order key). Each item is then applied as [`record_delivery`] applies one,
-    /// in item order: its key first, a key an earlier item of the batch wrote included
-    /// ([`Applied::Duplicate`] or [`Applied::Collision`]); then a capture at or after its
-    /// session's first live event is [`Applied::LiveOverlap`] and writes nothing; otherwise the
-    /// item is stored. A memory is filed under its home with its event, blocked by a tombstone
+    /// `lifecycle`, by order key), and the `(source, actor, kind)` of that session's events of
+    /// `machine` whose `source` is neither the capture's own nor `lifecycle`: the other imports
+    /// (#1117). Their sources, with `lifecycle` for a session captured live, are the batch's
+    /// `held_by`. Each item is then applied as [`record_delivery`] applies one, in item order:
+    /// its key first, a key an earlier item of the batch wrote included ([`Applied::Duplicate`]
+    /// or [`Applied::Collision`]); then a capture at or after its session's first live event is
+    /// [`Applied::LiveOverlap`] and writes nothing. A plugin store's copy
+    /// ([`CaptureWrite::copy`](me_types::types::lifecycle::CaptureWrite::copy)) is
+    /// [`Applied::LiveOverlap`] from 60 s before that event, and otherwise
+    /// [`Applied::Superseded`] when another import holds its actor and kind in the session; a
+    /// copy never yields to its own source, and nothing yields to a copy. Otherwise the item is
+    /// stored. A memory is filed under its home with its event, blocked by a tombstone
     /// of its text, reinforcing an active twin in its home, or queued for its vector.
     ///
     /// The batch's preview is [`preview_digest`](me_types::types::lifecycle::preview_digest) of

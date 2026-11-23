@@ -14,7 +14,8 @@ The allowlist of a host splits its copy in two:
 - **Durable text artifacts, to knowledge-base ingest**: documents, specifications, notes kept as files. They never go
   through this route.
 
-The claude-mem and claude-memory plugin stores have no reader yet; they wait for their own ticket.
+The claude-mem and claude-memory plugin stores go through the route too, exported first: see
+[Plugin stores](#plugin-stores).
 
 Never run `memory-engine-cli bootstrap` on the service store. It is ADR-0009's offline importer for an embedded store:
 it extracts by keywords, embeds inline and writes one marker per session, a second import mechanism beside the route,
@@ -104,6 +105,45 @@ embedded by the upload, so an upload works with the embedder down: full-text `re
 `status` shows them waiting. While a large backlog drains, live memories wait behind it for their vectors; pace the
 writes by the dry runs' fact counts.
 
+## Plugin stores
+
+A claude-mem store (`.claude-mem/claude-mem.db`) and a claude-memory store (`.claude-memory/conversations.db`) are not
+uploaded as files: a store can exceed 256 MiB, its `-wal` may hold committed rows, and it spans many projects where an
+upload files under one Home. `memory-engine-plugin-export`, a binary of the server crate built from the release tag,
+turns one store into one JSON Lines file per project, each one upload.
+
+1. **Copy** the store with its `-wal`, when it has one, into a private scratch directory. Never export the plugin's
+   live directory.
+2. **Export** the copy into a directory that does not exist yet:
+
+   ```sh
+   memory-engine-plugin-export claude-mem <scratch>/claude-mem.db <scratch>/export-claude-mem
+   ```
+
+   It writes `<kind>-<12 hex digits>.jsonl` per project (`<kind>-none.jsonl` for rows of no project) and `index.tsv`,
+   whose columns are `file`, `project`, `sessions`, `rows` and `bytes`. The directory is created 0700 and each file
+   0600: they hold the store's text unredacted. A store whose header says WAL with no `-wal` beside it is refused, since
+   its main file alone may be older than the store it copies. A store the plugin closed cleanly has no `-wal` either:
+   once the copy is known whole, an empty `<store>-wal` in the scratch copy lets it export. `pending_messages`, the
+   plugin's raw tool I/O, is never read.
+3. **Per file**, a dry run as above with `ME-Backfill-Kind` the store's kind (`claude-mem` or `claude-memory`) and
+   `ME-Backfill-Source: plugin-stores/<kind>/<file>`. The project facts come from `index.tsv` and the manifest: a
+   claude-memory file sends the row whose `project_root` is the longest prefix, at a `/` boundary, of its `project`; a
+   claude-mem file, whose `project` is a bare name, sends the row whose `project_root` ends in a segment equal to it,
+   when exactly one does; otherwise none, and `project.home` shows the machine's bucket.
+4. **Order per machine**: its transcripts and memory files first, then claude-mem, then claude-memory.
+5. **Review** as above, and also:
+   - `census.skipped`: `notification`, `interrupt`, `interrupted turn`, `narration` (the assistant messages between
+     tool calls, which live capture never records), and the empty and incomplete rows;
+   - `events.live_overlap` and `events.superseded`, and each session's `held_by`: the other origins already holding it
+     on the machine (`lifecycle`, `backfill`, the other store);
+   - the facts: every observation and summary is Episodic, a how-to note (`problem-solution`, `pattern`, `gotcha`)
+     starting at importance 0.6, the others at 0.5.
+
+   A transcript dry run whose `held_by` names a store is not written without a decision: a transcript uploaded after
+   its store's rows imports whole, beside them.
+6. **Delete the export directory** once the machine's run is done.
+
 ## Undo
 
 - **One fact**: `forget` it from a session of its project.
@@ -122,3 +162,15 @@ No source is deleted before its ingestion and a verified backup taken after it.
   blocked.
 - A subagent file uploaded long after its parent's can find the parent's segment ended and import as late events:
   stored, with no segment change (ADR-0020 §5, rule 1).
+- Plugin stores:
+  - a session's last turn gives a stop whether or not it completed: the store keeps no stop reason;
+  - a synthetic user message claude-memory does not mark (a compaction summary, a command echo) imports as a prompt,
+    in the event log only;
+  - a task notification that arrived mid-turn splits that turn in two and gives a stop live capture would not have
+    fired;
+  - a re-export of a grown session whose last turn gained assistant messages adds a second stop for that turn;
+  - a row edited at the source between two exports collides and stops its file;
+  - a project file over 256 MiB is refused whole;
+  - a store row in the minute before a live session's first event is dropped, and one recorded more than a minute
+    before its own live twin imports twice;
+  - a transcript uploaded after its store's rows doubles that session's prompts, stops and final-message memories.
