@@ -22,7 +22,7 @@ use memory_engine::{
 use memory_engine_embed::{HttpDeltaProposer, ProposerStats};
 
 use crate::commands::embedding_args::EmbeddingArgs;
-use crate::db::open_engine_writable;
+use crate::db::{open_engine_writable, open_engine_writable_with_embedder};
 use crate::output::OutputFormat;
 
 /// Upper bound on #209 drain retries. `consolidate` is a manual force-consolidate, so a
@@ -92,42 +92,25 @@ fn require<'a>(value: Option<&'a String>, flag: &str) -> anyhow::Result<&'a str>
         .with_context(|| format!("--backend llm requires {flag}"))
 }
 
-/// Build the LLM backend (proposer + summary embedder), run it through the #209 guard and
-/// return the run's result with the proposer's token stats. Setup errors (missing flags,
-/// a client build, a foreign embedder) are `Err`; the run's own error is in the inner result.
+/// Build the LLM backend's proposer, run it with the summary `embedder` the open checked through
+/// the #209 guard and return the run's result with the proposer's token stats. Setup errors (a
+/// client build) are `Err`; the run's own error is in the inner result.
 async fn run_llm(
     engine: &MemoryEngine,
     args: &ConsolidateArgs,
+    embedder: memory_engine_embed::HttpEmbeddingProvider,
 ) -> anyhow::Result<(anyhow::Result<CycleOutcome>, ProposerStats)> {
     let llm_url = require(args.llm_url.as_ref(), "--llm-url")?.to_owned();
     let llm_model = require(args.llm_model.as_ref(), "--llm-model")?.to_owned();
-    // The engine is already open in scope — use its dim rather than reopening
-    // the DB to re-read the config (per review).
-    let dim = engine.embed_dim();
-    let embed_args = args.embed.clone();
     let timeout_secs = args.timeout_secs;
 
     // Both the proposer and the embedder own a `reqwest::blocking::Client`.
     // Building one spins up a temporary tokio runtime and then DROPS it; doing
     // that on the `#[tokio::main]` executor thread panics ("cannot drop a
-    // runtime in a context where blocking is not allowed"). Build them on a
-    // blocking thread so neither construction nor the later drop ever touches
-    // the executor.
-    // Summary embedder: shared config (provider/MRL identity per #619). Required
-    // for the LLM backend — errors if --embed-url/--embed-model are absent.
-    let embedder = std::sync::Arc::new(
-        tokio::task::spawn_blocking(move || embed_args.build_required(dim))
-            .await
-            .map_err(|e| anyhow::anyhow!("join error building embedder: {e}"))??,
-    );
-    // The apply would refuse the summaries of a foreign embedder (#1062): refuse
-    // it before the LLM is called, as `query` does. A store with no identity yet passes
-    // here and is refused by the apply (#613). A refused embedder has sent no
-    // request, so dropping it here, on the executor, is safe (as in `query`).
-    engine
-        .verify_embedding_identity(&*embedder)
-        .await
-        .map_err(|e| anyhow::anyhow!("embedding identity check failed: {e}"))?;
+    // runtime in a context where blocking is not allowed"). Build the proposer on a
+    // blocking thread, and drop both there after the run. An embedder that has sent no
+    // request (a failed proposer build) may drop here, on the executor, as in `query`.
+    let embedder = std::sync::Arc::new(embedder);
     let proposer = std::sync::Arc::new(
         tokio::task::spawn_blocking(move || {
             HttpDeltaProposer::new(llm_url, llm_model, None, timeout_secs)
@@ -153,7 +136,20 @@ async fn run_llm(
 }
 
 pub async fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> anyhow::Result<()> {
-    let mut engine = open_engine_writable(db)?;
+    // The LLM backend's summary embedder is built before the open, which declares its identity:
+    // the apply would refuse a foreign embedder's summaries (#1062), so a store that records
+    // another identity is refused read-only, before it migrates and before the LLM is called
+    // (#1132). A store with no identity yet accepts it and is refused by the apply (#613).
+    let (mut engine, embedder) = match args.backend {
+        BackendArg::DreamCycle => (open_engine_writable(db)?, None),
+        BackendArg::Llm => {
+            require(args.llm_url.as_ref(), "--llm-url")?;
+            require(args.llm_model.as_ref(), "--llm-model")?;
+            let (engine, embedder) =
+                open_engine_writable_with_embedder(db, None, &args.embed).await?;
+            (engine, Some(embedder))
+        }
+    };
     let start = Instant::now();
 
     // Run the selected backend through the #209 guard (draining deferrals). The LLM
@@ -162,13 +158,14 @@ pub async fn run(db: &Path, args: &ConsolidateArgs, format: OutputFormat) -> any
     // outcome (a failed run still burned LLM calls — fail-loud accounting). Setup errors
     // (missing flags, client build) fail BEFORE any JSON; the consolidate work's own
     // errors (cycle run + apply) are reported IN the JSON below.
-    let (run_result, llm_stats): (anyhow::Result<CycleOutcome>, Option<_>) = match args.backend {
-        BackendArg::DreamCycle => {
+    // The open above chose the backend: an embedder means the LLM backend.
+    let (run_result, llm_stats): (anyhow::Result<CycleOutcome>, Option<_>) = match embedder {
+        None => {
             let cycle = DefaultDreamCycle::with_defaults();
             (run_with_drain(&engine, &cycle).await, None)
         }
-        BackendArg::Llm => {
-            let (result, stats) = run_llm(&engine, args).await?;
+        Some(embedder) => {
+            let (result, stats) = run_llm(&engine, args, embedder).await?;
             (result, Some(stats))
         }
     };

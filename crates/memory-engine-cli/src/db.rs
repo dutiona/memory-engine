@@ -1,6 +1,10 @@
 use std::path::Path;
 
-use memory_engine::{MemoryEngine, StoreLock, StoreLockError};
+use memory_engine::traits::EmbeddingProvider;
+use memory_engine::{MemoryEngine, MemoryError, StoreLock, StoreLockError};
+use memory_engine_embed::HttpEmbeddingProvider;
+
+use crate::commands::embedding_args::EmbeddingArgs;
 
 /// Peek the embedding dimension from an existing `SQLite` database.
 ///
@@ -120,12 +124,11 @@ pub fn ensure_store_exists(path: &Path) -> anyhow::Result<()> {
 /// Open a `MemoryEngine` with **write** capability, peeking the dimension from
 /// the existing store.
 ///
-/// Used by every command that mutates a previously-embedded database and does not
-/// already know its embedding dimension — e.g. `record-outcome`, `consolidate`,
-/// `migrate`, and the no-`--embed-dim` branch of
-/// `batch-ingest` / `bootstrap`. Commands that derive the dimension from their own
-/// input (`add-fact`, and `batch-ingest` / `bootstrap` *with* `--embed-dim`) use
-/// [`open_engine_writable_with_dim`] instead. Sets `backup_dir` next to the
+/// Used by every command that mutates a previously-embedded database, does not already know
+/// its embedding dimension and embeds nothing — e.g. `record-outcome`, `migrate` and
+/// `consolidate --backend dream-cycle`. A command that embeds opens through
+/// [`open_engine_writable_with_embedder`]; `add-fact`, which knows its dimension from its
+/// input, uses [`open_engine_writable_with_dim`]. Sets `backup_dir` next to the
 /// database so any schema migration creates a WAL-safe backup first. The store lock is
 /// taken before the store is read at all.
 pub fn open_engine_writable(path: &Path) -> anyhow::Result<Writable> {
@@ -138,8 +141,7 @@ pub fn open_engine_writable(path: &Path) -> anyhow::Result<Writable> {
 /// Open a `MemoryEngine` with **write** capability using an explicitly known
 /// dimension, **without** peeking the database.
 ///
-/// For write commands that know the dimension from their own input (e.g.
-/// `add-fact` derives it from the `--embedding` length), so they work against a
+/// For `add-fact`, which derives the dimension from its `--embedding` length, so it works against a
 /// freshly-created, never-embedded database that has no recorded dimension yet.
 /// If the database *was* previously embedded at a different dimension, the
 /// engine's open path rejects the mismatch against the recorded one.
@@ -155,6 +157,42 @@ pub fn open_engine_writable_with_dim(
     ensure_store_exists(path)?;
     let lock = lock_store(path)?;
     build_writable(path, embed_dim, declared, lock)
+}
+
+/// Open an existing store writable for a command that embeds: take the lock, read the dimension
+/// (`embed_dim`, else what the store records), build the embedder at it, then open with the
+/// embedder's identity declared, so a store that records another identity is refused read-only
+/// before anything migrates it (#1132), as the server does (#1126). The lock still comes before
+/// the first read of the store.
+///
+/// # Errors
+///
+/// As [`open_engine_writable`], the embedder's own build errors, and `embedding identity check
+/// failed` when the store records another identity.
+pub async fn open_engine_writable_with_embedder(
+    path: &Path,
+    embed_dim: Option<usize>,
+    embed: &EmbeddingArgs,
+) -> anyhow::Result<(Writable, HttpEmbeddingProvider)> {
+    ensure_store_exists(path)?;
+    let lock = lock_store(path)?;
+    let dim = match embed_dim {
+        Some(dim) => dim,
+        None => peek_embed_dim_from_db(path)?,
+    };
+    let embedder = embed.build_required_blocking(dim).await?;
+    let declared = EmbeddingProvider::fingerprint(&embedder);
+    let engine = build_writable(path, dim, Some(declared), lock).map_err(|e| match e
+        .downcast_ref::<MemoryError>()
+    {
+        Some(
+            MemoryError::EmbeddingModelMismatch { .. } | MemoryError::EmbeddingDimension { .. },
+        ) => {
+            anyhow::anyhow!("embedding identity check failed: {e}")
+        }
+        _ => e,
+    })?;
+    Ok((engine, embedder))
 }
 
 /// Create a new store at `path` (the `--create` paths of `batch-ingest` and `bootstrap`),

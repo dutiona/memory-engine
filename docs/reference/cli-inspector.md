@@ -244,6 +244,8 @@ Bulk-ingests facts from a JSONL file (or stdin with `--file -`). Each line is a 
 | `--embed-dim`     | —                                          | Required with `--create`             |
 | `--scope`         | —                                          | Default scope for all facts          |
 
+**Embedding identity:** on an existing store the embedder is built under the store lock and its identity checked read-only before the store opens: one that differs from the identity the store records exits 1 with `embedding identity check failed`, and an older store stays unmigrated (#1132). `bootstrap` does the same.
+
 **Error handling:** Malformed lines are skipped with a warning on stderr. Failed batches (embedding/DB errors) are skipped. Progress is reported on stderr. Exit code is non-zero only if zero facts were ingested.
 
 **Output formats:**
@@ -374,9 +376,9 @@ prints a machine-readable JSON result:
 
 The `--backend llm` path requires all four `--llm-*` / `--embed-*` flags (the LLM backend
 embeds its own summaries). The embedder flags (`--embed-model`, `--embed-provider`, the MRL
-and served-artifact flags) must name the identity the store records: it is checked before
-the LLM is called, and a mismatch exits 1 with `embedding identity check failed` and no JSON
-(#1062). A store that records no identity yet (for example, every fact still waits for its vector) passes
+and served-artifact flags) must name the identity the store records: it is checked read-only
+before the store opens, so a refused run neither migrates the store nor calls the LLM, and a
+mismatch exits 1 with `embedding identity check failed` and no JSON (#1062, #1132). A store that records no identity yet (for example, every fact still waits for its vector) passes
 that check; the apply then refuses the summaries (#613), after the LLM calls, and the JSON says
 `failed`. The #209 guard defers a cycle that follows a caller write; the command retries a
 deferred cycle up to 8 times in one invocation, so one call runs, and it reports

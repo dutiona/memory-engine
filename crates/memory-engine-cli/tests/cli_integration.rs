@@ -1160,6 +1160,96 @@ async fn query_refuses_an_embedder_whose_identity_differs() {
     assert_clean_failure(&output, "embedding identity check failed");
 }
 
+/// The bytes of a store's database and its `-wal` (an absent `-wal` reads as empty).
+fn store_files(db: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    (
+        std::fs::read(db).unwrap(),
+        std::fs::read(wal).unwrap_or_default(),
+    )
+}
+
+/// #1132: an older store stamped mock/test/4, opened by a command whose embedder reports
+/// another model, is refused before it migrates.
+async fn assert_refused_before_migrating(
+    args: &[&str],
+    setup: impl FnOnce(&std::path::Path) -> Vec<String>,
+) {
+    let (dir, db_path) = create_stale_db().await;
+    let extra = setup(dir.path());
+    let before = store_files(&db_path);
+    let output = cli()
+        .args(["--db", db_path.to_str().unwrap()])
+        .args(args)
+        .args(&extra)
+        .args([
+            "--embed-url",
+            UNREACHABLE_EMBEDDER,
+            "--embed-model",
+            "other",
+        ])
+        .args(["--embed-provider", "test"])
+        .output()
+        .unwrap();
+    assert_clean_failure(&output, "embedding identity check failed");
+    assert!(
+        store_files(&db_path) == before,
+        "the refused run changed the store"
+    );
+}
+
+#[tokio::test]
+async fn batch_ingest_refuses_a_mismatched_embedder_before_migrating() {
+    let input = |dir: &std::path::Path| {
+        let file = dir.join("facts.jsonl");
+        std::fs::write(
+            &file,
+            "{\"content\":\"a fact\",\"fact_type\":\"semantic\"}\n",
+        )
+        .unwrap();
+        vec!["--file".to_owned(), file.to_str().unwrap().to_owned()]
+    };
+    assert_refused_before_migrating(&["batch-ingest"], input).await;
+    assert_refused_before_migrating(&["batch-ingest", "--embed-dim", "4"], input).await;
+}
+
+#[tokio::test]
+async fn bootstrap_refuses_a_mismatched_embedder_before_migrating() {
+    let notes = |dir: &std::path::Path| {
+        let memory = dir.join("memory");
+        std::fs::create_dir(&memory).unwrap();
+        std::fs::write(
+            memory.join("note.md"),
+            "# A note\n\nSome remembered text.\n",
+        )
+        .unwrap();
+        vec![
+            "--memory-dir".to_owned(),
+            memory.to_str().unwrap().to_owned(),
+        ]
+    };
+    assert_refused_before_migrating(&["bootstrap"], notes).await;
+    assert_refused_before_migrating(&["bootstrap", "--embed-dim", "4"], notes).await;
+}
+
+#[tokio::test]
+async fn consolidate_refuses_a_mismatched_embedder_before_migrating() {
+    let llm = |_: &std::path::Path| {
+        [
+            "--backend",
+            "llm",
+            "--llm-url",
+            "http://127.0.0.1:9/api/generate",
+            "--llm-model",
+            "m",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    };
+    assert_refused_before_migrating(&["consolidate"], llm).await;
+}
+
 #[test]
 fn help_never_prints_the_embedding_api_key_from_the_environment() {
     let output = cli()
