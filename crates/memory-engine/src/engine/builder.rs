@@ -270,6 +270,8 @@ impl MemoryEngineBuilder<File> {
     /// `MemoryError::EmbeddingDimension` if a [declared identity](Self::declared_identity) has
     /// another dimension than the engine's, or `MemoryError::EmbeddingModelMismatch` if it
     /// differs from the store's recorded one; each refusal comes before any migration.
+    /// Returns `MemoryError::Migration` if the path is an existing SQLite file holding another
+    /// application's schema (no memory-engine `schema_version`), before anything writes to it.
     pub fn build(self) -> Result<MemoryEngine> {
         let config = self.to_config();
         MemoryEngine::open_from_config(&config, self.reranker.map(Arc::from))

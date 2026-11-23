@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::error::{ConflictError, MemoryError, MigrationError, Result, StorageError};
+use crate::error::{ConflictError, MemoryError, MigrationError, Result};
 use crate::pool::ConnectionPool;
 use crate::store::upcaster::UpcasterRegistry;
 
@@ -164,17 +164,7 @@ impl MemoryEngine {
             let probe =
                 crate::store::schema::open_connection_read_only(&config.path.to_string_lossy())
                     .map_err(cleanup)?;
-            let has_config: bool = probe
-                .query_row(
-                    "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'config'",
-                    [],
-                    |r| r.get(0),
-                )
-                .map_err(|e| cleanup(StorageError::backend(e).into()))?;
-            has_config
-                && crate::store::schema::get_config(&probe, "schema_version")
-                    .map_err(cleanup)?
-                    .is_some()
+            crate::store::schema::holds_engine_schema(&probe).map_err(cleanup)?
         };
         if !has_version {
             return Err(cleanup(

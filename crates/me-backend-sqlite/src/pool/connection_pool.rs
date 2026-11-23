@@ -7,7 +7,7 @@ use rusqlite::Connection;
 
 use crate::store::schema::{
     init_schema, migrate, open_connection, open_connection_read_only,
-    open_memory as open_memory_conn,
+    open_memory as open_memory_conn, refuse_foreign_file,
 };
 use me_types::error::{MemoryError, MigrationError, Result};
 
@@ -316,6 +316,9 @@ impl ConnectionPool {
     /// or the stored version is newer than the compiled-in maximum.
     /// Returns `MemoryError::UnsupportedEpoch` if the database was written by a
     /// future version of the engine.
+    /// Returns `MemoryError::Migration` if `path` is an existing SQLite file holding a schema
+    /// but no memory-engine `schema_version` (another application's), before anything writes
+    /// to it (#1133).
     pub fn open(
         path: &Path,
         embed_dim: usize,
@@ -323,6 +326,7 @@ impl ConnectionPool {
         backup_dir: Option<&Path>,
     ) -> Result<Self> {
         let read_pool_size = validate_read_pool_size(read_pool_size)?;
+        refuse_foreign_file(path)?;
 
         let path_str = path.to_string_lossy();
         let write_conn = open_connection(&path_str)?;

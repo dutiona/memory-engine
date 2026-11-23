@@ -6507,6 +6507,61 @@ async fn an_open_at_another_dimension_never_migrates_an_older_store() {
     );
 }
 
+/// #1133: a writable open refuses a SQLite file that holds another application's schema before
+/// its first write, so the file keeps every byte; a zero-length file is still a blank store.
+#[test]
+fn a_foreign_sqlite_file_is_refused_and_left_byte_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    let cases = [
+        (
+            "notes-delete",
+            "DELETE",
+            "CREATE TABLE notes(body TEXT); INSERT INTO notes VALUES ('hello');",
+        ),
+        (
+            "notes-wal",
+            "WAL",
+            "CREATE TABLE notes(body TEXT); INSERT INTO notes VALUES ('hello');",
+        ),
+        (
+            "config-without-version",
+            "DELETE",
+            "CREATE TABLE config(key TEXT PRIMARY KEY, value TEXT); INSERT INTO config VALUES ('theme', 'dark');",
+        ),
+        (
+            "config-other-columns",
+            "DELETE",
+            "CREATE TABLE config(k TEXT, v TEXT); INSERT INTO config VALUES ('schema_version', '1');",
+        ),
+    ];
+    for (name, journal, sql) in cases {
+        let db = dir.path().join(format!("{name}.db"));
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.query_row(&format!("PRAGMA journal_mode = {journal}"), [], |_| Ok(()))
+                .unwrap();
+            conn.execute_batch(sql).unwrap();
+        }
+        let before = std::fs::read(&db).unwrap();
+        let err = MemoryEngine::builder(DIM)
+            .path(&db)
+            .build()
+            .expect_err(name);
+        assert!(
+            matches!(&err, MemoryError::Migration(MigrationError::Incompatible(m)) if m.contains("not a memory-engine database")),
+            "{name}: {err:?}"
+        );
+        assert_eq!(
+            std::fs::read(&db).unwrap(),
+            before,
+            "{name}: the file changed"
+        );
+    }
+    let empty = dir.path().join("empty.db");
+    std::fs::write(&empty, b"").unwrap();
+    MemoryEngine::builder(DIM).path(&empty).build().unwrap();
+}
+
 #[tokio::test]
 async fn an_all_waiting_store_refuses_another_dimension() {
     let dir = tempfile::tempdir().unwrap();
