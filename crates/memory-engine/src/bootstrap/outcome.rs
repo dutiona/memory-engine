@@ -24,8 +24,8 @@ pub struct OutcomeSignals {
     pub has_commit: bool,
     pub tests_passed: TestOutcome,
     pub has_error_loops: bool,
-    /// True when the last tool call in the session was interrupted, as reported
-    /// by `ToolUseResult::interrupted` propagated through `filter.rs`.
+    /// True when the last tool call in the session was interrupted: its `toolUseResult` or its
+    /// result block's `content` [`records_an_interrupt`](crate::bootstrap::records_an_interrupt).
     pub was_interrupted: bool,
     pub final_user_sentiment: Option<Sentiment>,
 }
@@ -67,7 +67,7 @@ pub enum Sentiment {
 /// | `has_commit` | `"git commit"` in tool input **or** commit-like patterns (`[main`, `[master`, 7+ hex chars) in stdout |
 /// | `tests_passed` | `"test result: ok"` / `"passed"` with test-runner patterns in stdout |
 /// | `has_error_loops` | Same stderr prefix (first 100 chars) in 3+ consecutive tool calls |
-/// | `was_interrupted` | Last `ToolCallRecord` has `interrupted == true` (from `ToolUseResult::interrupted`) |
+/// | `was_interrupted` | Last `ToolCallRecord` has `interrupted == true` (`bootstrap::records_an_interrupt`) |
 /// | `final_user_sentiment` | Keyword match on the last user message |
 ///
 /// # Classification

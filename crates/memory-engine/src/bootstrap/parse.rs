@@ -67,6 +67,45 @@ pub struct MessagePayload {
     pub content: Option<serde_json::Value>,
 }
 
+/// The prefix Claude Code writes when the user interrupts a turn; both
+/// transcript readers use it.
+pub const INTERRUPTED: &str = "[Request interrupted by user";
+
+/// Whether a tool result records a user interrupt (#1154).
+///
+/// An object records one when its `interrupted` is `true`, a text when it opens with
+/// [`INTERRUPTED`]: a string, or an array whose first `text` block (with a string `text`) does.
+/// A call is interrupted when its `toolUseResult` or its `tool_result` block's `content` records
+/// one: both transcript readers apply this one rule.
+///
+/// # Examples
+///
+/// ```
+/// use memory_engine::bootstrap::records_an_interrupt;
+/// use serde_json::json;
+///
+/// assert!(records_an_interrupt(&json!({ "stdout": "", "interrupted": true })));
+/// assert!(records_an_interrupt(&json!("[Request interrupted by user for tool use]")));
+/// assert!(records_an_interrupt(&json!([{ "type": "text", "text": "[Request interrupted by user]" }])));
+/// // An object's text is never read, and the marker must open the text.
+/// assert!(!records_an_interrupt(&json!({ "stdout": "[Request interrupted by user" })));
+/// assert!(!records_an_interrupt(&json!("Error: [Request interrupted by user for tool use]")));
+/// ```
+#[must_use]
+pub fn records_an_interrupt(value: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match value {
+        Value::Object(map) => map.get("interrupted") == Some(&Value::Bool(true)),
+        Value::String(text) => text.starts_with(INTERRUPTED),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .find_map(|b| b.get("text").and_then(Value::as_str))
+            .is_some_and(|text| text.starts_with(INTERRUPTED)),
+        _ => false,
+    }
+}
+
 /// Result of a tool invocation, carried on user-type entries.
 ///
 /// Not `Deserialize`-derived: the wire field is a `toolUseResult` of any JSON
@@ -76,7 +115,8 @@ pub struct MessagePayload {
 pub struct ToolUseResult {
     pub stdout: Option<String>,
     pub stderr: Option<String>,
-    pub interrupted: Option<bool>,
+    /// Whether the result records an interrupt ([`records_an_interrupt`]).
+    pub interrupted: bool,
     pub is_error: Option<bool>,
 }
 
@@ -84,15 +124,17 @@ pub struct ToolUseResult {
 ///
 /// Every non-null value is `Some`: a `None` would turn a tool-result row into a
 /// prompt and shift `extract_tool_calls`' positional pairing. An object keeps
-/// its fields when they are typed (a string `stdout`/`stderr`, a bool
-/// `interrupted`/`isError`); a wrong-typed field is dropped, never an error. A
-/// string becomes `stdout`; any other value (array, number, bool) is the
-/// default. An array is not put in `stdout` on purpose: `outcome.rs`
-/// `has_short_sha` would read an MCP call ID in it as a commit.
+/// its fields when they are typed (a string `stdout`/`stderr`, a bool `isError`;
+/// `interrupted` is [`records_an_interrupt`] of the whole value); a wrong-typed
+/// field is dropped, never an error. A string becomes `stdout`; any other value
+/// (array, number, bool) is the default. An array is not put in `stdout` on
+/// purpose: `outcome.rs` `has_short_sha` would read an MCP call ID in it as a
+/// commit.
 fn tool_use_result<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Option<ToolUseResult>, D::Error> {
     let value = serde_json::Value::deserialize(d)?;
+    let interrupted = records_an_interrupt(&value);
     Ok(match value {
         serde_json::Value::Null => None,
         serde_json::Value::Object(map) => Some(ToolUseResult {
@@ -104,14 +146,18 @@ fn tool_use_result<'de, D: serde::Deserializer<'de>>(
                 .get("stderr")
                 .and_then(serde_json::Value::as_str)
                 .map(String::from),
-            interrupted: map.get("interrupted").and_then(serde_json::Value::as_bool),
+            interrupted,
             is_error: map.get("isError").and_then(serde_json::Value::as_bool),
         }),
         serde_json::Value::String(s) => Some(ToolUseResult {
             stdout: Some(s),
+            interrupted,
             ..Default::default()
         }),
-        _ => Some(ToolUseResult::default()),
+        _ => Some(ToolUseResult {
+            interrupted,
+            ..Default::default()
+        }),
     })
 }
 
@@ -895,7 +941,7 @@ mod tests {
         );
         let array = entries[1].tool_use_result.as_ref().unwrap();
         assert!(array.stdout.is_none() && array.stderr.is_none());
-        assert!(array.interrupted.is_none() && array.is_error.is_none());
+        assert!(!array.interrupted && array.is_error.is_none());
         assert_eq!(
             entries[2].tool_use_result.as_ref().unwrap().is_error,
             Some(true)

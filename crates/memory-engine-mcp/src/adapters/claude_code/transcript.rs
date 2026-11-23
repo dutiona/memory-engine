@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use memory_engine::bootstrap::parse_timestamp;
+use memory_engine::bootstrap::{parse_timestamp, records_an_interrupt};
 use memory_engine::types::lifecycle::{Actor, Content, NeutralRecord, StopOutcome, ToolOutcome};
 use serde_json::{Map, Value, json};
 
@@ -373,10 +373,10 @@ impl Reader {
         let result = tool_use_result
             .and_then(result_text)
             .or_else(|| block_text.clone());
-        let interrupted = [&result, &block_text]
-            .iter()
-            .any(|t| t.as_deref().is_some_and(|t| t.starts_with(INTERRUPTED)))
-            || tool_use_result.is_some_and(|r| r.get("interrupted") == Some(&Value::Bool(true)));
+        let interrupted = tool_use_result
+            .into_iter()
+            .chain(block.get("content"))
+            .any(records_an_interrupt);
         let outcome = if interrupted {
             ToolOutcome::Interrupted
         } else if block.get("is_error") == Some(&Value::Bool(true)) {
@@ -1118,5 +1118,118 @@ mod tests {
         assert_eq!(read(b"not json\n[1]\n").unwrap_err(), "no session");
         let none = line(&json!({ "type": "user", "uuid": "u", "message": { "content": "x" } }));
         assert_eq!(read(none.as_bytes()).unwrap_err(), "no session");
+    }
+
+    /// A zero-vector embedder: the bootstrap needs one, and the test reads only its outcome counts.
+    struct Zero;
+    impl memory_engine::EmbeddingProvider for Zero {
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, memory_engine::MemoryError> {
+            Ok(vec![0.0; 4])
+        }
+        fn fingerprint(&self) -> memory_engine::EmbeddingFingerprint {
+            memory_engine::EmbeddingFingerprint::new("zero", "test", 4)
+        }
+    }
+
+    /// Both transcript readers judge a tool call interrupted by the same rule (#1154): each shape's
+    /// call goes through the backfill reader (its `ToolOutcome`) and the bootstrap (its session
+    /// counted `failure` when its last call was interrupted).
+    #[tokio::test]
+    async fn both_readers_agree_on_an_interrupted_call() {
+        use memory_engine::types::lifecycle::ToolOutcome;
+
+        let shapes: [(&str, Value, Value, bool); 6] = [
+            (
+                "flag",
+                json!({"stdout": "", "stderr": "", "interrupted": true, "isImage": false}),
+                json!(""),
+                true,
+            ),
+            (
+                "result string",
+                json!("[Request interrupted by user for tool use]"),
+                json!("Error: stopped"),
+                true,
+            ),
+            (
+                "block text",
+                json!("Error: [Request interrupted by user for tool use]"),
+                json!("[Request interrupted by user for tool use]"),
+                true,
+            ),
+            (
+                "block array",
+                json!({"stdout": "x", "stderr": ""}),
+                json!([{"type": "text", "text": "[Request interrupted by user for tool use]"}]),
+                true,
+            ),
+            (
+                "success",
+                json!({"stdout": "ok", "stderr": "", "interrupted": false}),
+                json!("ok"),
+                false,
+            ),
+            (
+                "block flag",
+                json!({"stdout": "x", "stderr": ""}),
+                json!({"interrupted": true}),
+                true,
+            ),
+        ];
+
+        let mut wrong: Vec<String> = Vec::new();
+        for (name, tool_use_result, content, expected) in shapes {
+            let session = format!("s-{}", name.replace(' ', "-"));
+            let lines = vec![
+                entry(
+                    "user",
+                    "u1",
+                    "2026-03-19T10:00:00Z",
+                    &json!({"parentUuid": null, "sessionId": session, "message": {"role": "user", "content": "Rename the module."}}),
+                ),
+                entry(
+                    "assistant",
+                    "a1",
+                    "2026-03-19T10:00:01Z",
+                    &json!({"parentUuid": "u1", "sessionId": session, "message": {"id": "m1", "role": "assistant", "model": "claude-sonnet-4-5", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "notes.md"}}], "stop_reason": "tool_use"}}),
+                ),
+                entry(
+                    "user",
+                    "u2",
+                    "2026-03-19T10:00:05Z",
+                    &json!({"parentUuid": "a1", "sessionId": session, "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": content, "is_error": expected}]}, "toolUseResult": tool_use_result}),
+                ),
+            ];
+            let bytes = body(&lines);
+
+            let mapped = read(&bytes).unwrap();
+            let backfill = events(&mapped)
+                .iter()
+                .find_map(|e| match &e.record.content {
+                    Content::ToolUse { outcome, .. } => Some(*outcome == ToolOutcome::Interrupted),
+                    _ => None,
+                })
+                .unwrap();
+
+            let engine = memory_engine::MemoryEngine::builder(4).build().unwrap();
+            let report = engine
+                .bootstrap_session(
+                    std::io::Cursor::new(bytes.clone()),
+                    std::sync::Arc::new(Zero),
+                    std::sync::Arc::new(memory_engine::KeywordExtractor),
+                    &memory_engine::BootstrapConfig::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+            let bootstrap = report.outcome_counts.failure == 1;
+
+            if (backfill, bootstrap) != (expected, expected) {
+                wrong.push(format!(
+                    "{name}: expected {expected}, backfill {backfill}, bootstrap {bootstrap}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 }

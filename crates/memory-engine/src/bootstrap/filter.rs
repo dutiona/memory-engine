@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
-use super::parse::{ContentBlock, EntryType, SessionEntry};
+use super::parse::{ContentBlock, EntryType, INTERRUPTED, SessionEntry, records_an_interrupt};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -110,10 +110,6 @@ const LEARNING_KEYWORDS: &[&str] = &["discovered", "til", "turns out", "reason i
 // ---------------------------------------------------------------------------
 // Turn reconstruction
 // ---------------------------------------------------------------------------
-
-/// The prefix Claude Code writes when the user interrupts a turn; both
-/// transcript readers use it.
-pub const INTERRUPTED: &str = "[Request interrupted by user";
 
 /// Whether `entry` takes part in a turn: a user or assistant entry, except a user entry without
 /// a tool result that is no prompt (an `isMeta` or `isCompactSummary` row, or one whose text
@@ -357,6 +353,20 @@ fn extract_text(entry: &SessionEntry) -> String {
     parts.join("\n")
 }
 
+/// The raw `content` of `entry`'s first `tool_result` block, as sent: the parsed
+/// [`ContentBlock::ToolResult`] keeps only a lossy string of it.
+fn result_content(entry: &SessionEntry) -> Option<&serde_json::Value> {
+    entry
+        .message
+        .as_ref()?
+        .content
+        .as_ref()?
+        .as_array()?
+        .iter()
+        .find(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("tool_result"))?
+        .get("content")
+}
+
 /// Extract tool call records from the assistant's tool-use blocks, enriching
 /// them with tool-result data from corresponding user entries.
 ///
@@ -402,7 +412,8 @@ fn extract_tool_calls(
             calls[i].stdout.clone_from(&result.stdout);
             calls[i].stderr.clone_from(&result.stderr);
             calls[i].is_error = result.is_error.unwrap_or(false);
-            calls[i].interrupted = result.interrupted.unwrap_or(false);
+            calls[i].interrupted = result.interrupted
+                || result_content(result_entry).is_some_and(records_an_interrupt);
         }
     }
 
@@ -672,7 +683,7 @@ mod tests {
             tool_use_result: Some(ToolUseResult {
                 stdout: stdout.map(String::from),
                 stderr: stderr.map(String::from),
-                interrupted: Some(false),
+                interrupted: false,
                 is_error: Some(is_error),
             }),
             is_meta: None,
@@ -697,7 +708,7 @@ mod tests {
             tool_use_result: Some(ToolUseResult {
                 stdout: None,
                 stderr: Some("interrupted".into()),
-                interrupted: Some(true),
+                interrupted: true,
                 is_error: Some(false),
             }),
             is_meta: None,

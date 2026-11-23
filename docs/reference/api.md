@@ -183,8 +183,9 @@ the other origins holding it), and each memory's `FactPreview` with `FactPreview
 `Keyed`, `MemoryWrite`, `Batch` with `Batch::held_by` and `preview_digest`, which the store computes
 and the engine relies on. `BACKFILL_BODY_BYTES` (256 MiB) is the route's body limit and the importer's stream bound.
 The readers use two parts of ADR-0009's importer, `bootstrap::read_json_lines` (its bounded JSONL loop, one JSON object
-per line with its line number) and `bootstrap::memory_item` (a memory file read without redaction or embedding), and
-its timestamp grammar, `bootstrap::parse_timestamp`.
+per line with its line number) and `bootstrap::memory_item` (a memory file read without redaction or embedding), its
+timestamp grammar, `bootstrap::parse_timestamp`, and `bootstrap::records_an_interrupt`, the one rule both transcript
+readers judge an interrupted tool call by (#1154).
 
 ### Conflict Resolution
 
@@ -289,7 +290,7 @@ The crate root (`lib.rs`) re-exports these items for convenience:
 - **Embedding queue** (#1021): `Backoff`, `Settled`, `read_embed_queue_status`, and the queue types `PendingEmbedding`, `NextEmbedding`, `EmbedQueueStatus`; `EmbedderError` beside `MemoryError`
 - **Lifecycle** (#1025): `read_quarantined` and `LIFECYCLE_BODY_BYTES`; the record types are `memory_engine::types::lifecycle`
 - **Backfill** (#1026): `BACKFILL_BODY_BYTES`; the import types are `memory_engine::types::lifecycle`, and
-  `read_json_lines`, `memory_item` and `parse_timestamp` are in `memory_engine::bootstrap`
+  `read_json_lines`, `memory_item`, `parse_timestamp` and `records_an_interrupt` are in `memory_engine::bootstrap`
 
 ## Feature Flags
 
