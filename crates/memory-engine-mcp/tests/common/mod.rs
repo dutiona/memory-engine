@@ -299,7 +299,9 @@ pub struct TestServer {
     pub dir: TempDir,
     allowed_hosts: Vec<String>,
     denylist: Option<Vec<String>>,
-    closed_port: Option<u16>,
+    /// Bound, not listening: connections are refused and no other bind can take the port until
+    /// [`bring_embedder_up`](Self::bring_embedder_up) listens on it.
+    closed: Option<tokio::net::TcpSocket>,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<std::io::Result<()>>>,
 }
@@ -423,16 +425,19 @@ impl TestServer {
                 .mount(&embedder)
                 .await;
         }
-        let closed_port = setup.unreachable.then(|| {
-            std::net::TcpListener::bind("127.0.0.1:0")
-                .unwrap()
-                .local_addr()
-                .unwrap()
-                .port()
+        let closed = setup.unreachable.then(|| {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            socket
         });
-        let endpoint = closed_port.map_or_else(
+        let endpoint = closed.as_ref().map_or_else(
             || format!("{}/v1/embeddings", embedder.uri()),
-            |port| format!("http://127.0.0.1:{port}/v1/embeddings"),
+            |socket| {
+                format!(
+                    "http://127.0.0.1:{}/v1/embeddings",
+                    socket.local_addr().unwrap().port()
+                )
+            },
         );
         let db = dir.path().join("memory.db");
         let Setup {
@@ -488,7 +493,7 @@ impl TestServer {
             dir,
             allowed_hosts,
             denylist,
-            closed_port,
+            closed,
             shutdown: None,
             task: None,
         };
@@ -546,10 +551,11 @@ impl TestServer {
     /// Open the closed port of [`start_unreachable`](Self::start_unreachable): a mock embedder
     /// answering every embed with a vector listens there from now on.
     pub async fn bring_embedder_up(&mut self) {
-        let port = self
-            .closed_port
+        let socket = self
+            .closed
+            .take()
             .expect("the server was started unreachable");
-        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+        let listener = socket.listen(1024).unwrap().into_std().unwrap();
         self.embedder = MockServer::builder().listener(listener).start().await;
         Mock::given(method("POST"))
             .and(path("/v1/embeddings"))
