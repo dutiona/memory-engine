@@ -615,17 +615,20 @@ transcript never yields to a copy, and a store's observations and summaries neve
 import's transaction, so a live capture or an import that commits while an upload is being prepared still wins.
 
 **One transaction.** The engine redacts and maps the whole upload outside any lock, then applies it in one
-`BEGIN IMMEDIATE`, in order-key order. The **preview** is a SHA-256 over every effect the upload would write (the
-items' keys, digests, Homes, event columns but the receipt time, payloads and facts, the kind, the redacted source, the
-provenance and the denylist's digest), over what the report shows beside them (the body's SHA-256, the reader's census,
-the refused items), and over the store's outcome for each item, never a row id. An edit to a line no item reads still
-changes it. A dry run returns it;
-a write commits only when no item collided and its own preview equals `ME-Backfill-Preview`. A change of the file, of a
-header such as `ME-Backfill-Mtime` or a project fact, of the denylist, or of the store's outcomes (a live capture of the
-session, a forget) since the dry run gives a 412 and writes nothing. Nothing is embedded: every memory is queued for the
-[drain](#embedding-queue), so an upload stores with the embedder down, full-text `recall` finds its memories at once,
-and `status` shows them waiting. The scope cache, the drain's wake and the redaction counters move only after a commit.
-Live captures wait on the server's one write connection while an upload's insert phase runs.
+`BEGIN IMMEDIATE`, in order-key order. The **preview** is a SHA-256 over every effect the upload would write (the items'
+keys, digests, Homes, event columns but the receipt time, payloads and facts but a memory's validity start, the kind,
+the redacted source, the provenance and the denylist's digest), over what the report shows beside them (the body's
+SHA-256, the reader's census, the refused items), and over the store's outcome for each item, never a row id. An edit to
+a line no item reads still changes it. A dry run returns it; a write commits only when no item collided and its own
+preview equals `ME-Backfill-Preview`. A change of the file, of a header such as `ME-Backfill-Mtime` or a project fact,
+of the denylist, or of the store's outcomes (a live capture of the session, a forget) since the dry run gives a 412 and
+writes nothing. An item dated after its upload's receipt (a machine whose clock ran ahead, a bad timestamp) keeps its
+date as its event's time, its order key and its memory's date; its memory is valid from the earlier of that date and the
+receipt of the write that stores it, as a live capture's is, so it is never scheduled in the future, and its dry run and
+its write share one preview. Nothing is embedded: every memory is queued for the [drain](#embedding-queue), so an upload
+stores with the embedder down, full-text `recall` finds its memories at once, and `status` shows them waiting. The scope
+cache, the drain's wake and the redaction counters move only after a commit. Live captures wait on the server's one
+write connection while an upload's insert phase runs.
 
 **The report.** One JSON schema for both modes and for a 409, for an operator to read with `jq`:
 

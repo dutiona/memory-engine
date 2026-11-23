@@ -29,6 +29,12 @@ fn received() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 11, 21, 12, 0, 0).unwrap()
 }
 
+/// How long the owner takes to review a dry run before its write: the route's write is a second
+/// request, received later than its dry run.
+const fn review() -> Duration {
+    Duration::minutes(10)
+}
+
 fn provenance(root: &str) -> Value {
     json!({ "facts": { "root": root }, "dropped": {}, "key": null, "rules": 1 })
 }
@@ -168,14 +174,18 @@ impl Store {
             .unwrap()
     }
 
-    /// A dry run of `items`, then their write under its preview.
+    /// A dry run of `items`, then their write under its preview, received `review()` later.
     async fn write(&self, upload: &Upload, items: &[ImportItem], denylist: &[String]) -> Imported {
         let dry = self
             .import(upload, items.to_vec(), denylist, BatchMode::DryRun)
             .await;
+        let later = Upload {
+            received_at: upload.received_at + review(),
+            ..upload.clone()
+        };
         let write = self
             .import(
-                upload,
+                &later,
                 items.to_vec(),
                 denylist,
                 BatchMode::Write {
@@ -371,8 +381,61 @@ async fn imported_facts_are_backdated_to_their_event() {
     assert!(
         events
             .iter()
-            .all(|e| e.created_at == Some(received()) && e.timestamp < received())
+            .all(|e| e.created_at == Some(received() + review()) && e.timestamp < received())
     );
+}
+
+/// An item dated after its dry run's receipt (a clock running ahead) writes under that dry run's
+/// preview (#1153): one dated between the dry run's and the write's receipts, one after both, as a
+/// capture and as a memory. Each memory is valid from the earlier of its date and its write's
+/// receipt.
+#[tokio::test]
+async fn a_future_dated_item_writes_under_its_dry_runs_preview() {
+    let base = (received() - at(0)).num_seconds();
+    let items = vec![
+        main_item(
+            "bf.f.1",
+            base + 300,
+            stop(StopOutcome::Completed, "a message from a fast clock"),
+        ),
+        main_item(
+            "bf.f.2",
+            base + 3600,
+            stop(StopOutcome::Completed, "a later message from a fast clock"),
+        ),
+        memory(
+            "bf.f.m1",
+            "a rule from a fast clock",
+            received() + Duration::minutes(5),
+        ),
+        memory(
+            "bf.f.m2",
+            "a later rule from a fast clock",
+            received() + Duration::hours(1),
+        ),
+    ];
+
+    let s = Store::new();
+    s.write(&upload(HOME), &items, &[]).await;
+
+    let receipt = received() + review();
+    let facts = s.engine.list_active_facts(None).await.unwrap();
+    assert_eq!(facts.len(), 4);
+    for fact in &facts {
+        let date = if fact.content == "a message from a fast clock"
+            || fact.content == "a rule from a fast clock"
+        {
+            received() + Duration::minutes(5)
+        } else {
+            received() + Duration::hours(1)
+        };
+        assert_eq!(
+            (fact.t_created, fact.t_valid),
+            (date, Some(date.min(receipt))),
+            "{}",
+            fact.content
+        );
+    }
 }
 
 /// A session captured live is authoritative from its first live event: the imported events at

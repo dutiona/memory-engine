@@ -75,8 +75,13 @@ impl MemoryEngine {
     /// [`ImportOutcome::Superseded`] where another import holds their actor and kind in the
     /// session.
     ///
+    /// A memory is valid from the earlier of its date and the receipt, so a clock running ahead
+    /// never schedules it in the future.
+    ///
     /// The preview is a digest of every effect the upload would write and of the store's
-    /// outcomes, never of the receipt time or a row id. A [`BatchMode::DryRun`] rolls back and
+    /// outcomes, never of the receipt time or a row id: it binds a memory's date, never its
+    /// validity start, so an item dated after its dry run's receipt writes under that dry run's
+    /// preview (#1153). A [`BatchMode::DryRun`] rolls back and
     /// returns it; a [`BatchMode::Write`] commits only when no item collided and its preview is
     /// that one, the reviewed dry run's. Nothing is embedded: every memory is queued for the
     /// drain, so an import works with the embedder down. The scope cache, the drain's wake and
@@ -607,7 +612,8 @@ fn effects(item: &Keyed) -> Result<Value> {
         "fact": fact.map(|fact| json!({
             "text": fact.content,
             "type": fact.fact_type.to_string(),
-            "t_valid": fact.t_valid.map(time),
+            // Not t_valid: the earlier of t_created and the receipt, and the preview never holds a
+            // receipt time (#1153).
             "t_created": time(fact.t_created),
             "metadata": fact.metadata,
         })),

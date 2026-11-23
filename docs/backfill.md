@@ -82,6 +82,8 @@ Read the dry run's report (`jq . <session>.dry.json`) before any write:
   anything redaction missed.
 - **`facts`**: what the write would create, reinforce or find blocked, each with its Home, type and date. An item with
   `hint: set_level` is a `user` memory filed at its project: after the write, a session raises it with `set_level`.
+  A date after the harvest means the host's clock ran ahead or the entry's timestamp is bad: the memory keeps that
+  date and is valid from the write at the latest.
 - **`collisions`**: empty. A collision is a key held with other content; it stops the file.
 
 ### The write
@@ -97,7 +99,7 @@ but for `mode` and `committed`. Compare the two and keep both.
 | 401 | The token: its line, or the wrong host's token |
 | 408, 503 | Retry. A 503 naming `ME_REDACT_DENYLIST_FILE` needs the configuration fixed and a restart first |
 | 409 | Stop the file and look at its `collisions` |
-| 412 | The file, the denylist or the store changed since the dry run: run a new dry run and review it again |
+| 412 | The file, the denylist or the store changed since the dry run, or the server was upgraded: run a new dry run and review it again |
 | 413 | Stop the file: it is over 256 MiB and is refused whole |
 | 422 | Stop the file and look: the reader could not read it, or its import failed |
 

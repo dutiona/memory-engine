@@ -140,6 +140,13 @@ fn drive(envelope: &UploadEnvelope, headers: &http::HeaderMap, body: &[u8]) {
             let (status, body) =
                 rt.block_on(server.import_upload(machine(), &envelope, &replay, raw));
             check(true, status.as_u16(), &body);
+            // Nothing changed since the dry run but the receipt time, which the preview never
+            // holds: a reviewed write never answers 412 (#1153).
+            assert_ne!(
+                status.as_u16(),
+                412,
+                "a replayed dry run lost its preview: {body}"
+            );
         }
     });
 }
