@@ -292,6 +292,10 @@ fn a_key_file_never_reaches_the_log() {
     );
     assert!(server.terminate().success(), "stderr:\n{}", server.stderr());
     let log = server.stderr();
+    assert!(
+        log.contains(" TRACE "),
+        "nothing was logged at trace:\n{log}"
+    );
     assert!(!log.contains(&key), "the key is in the log:\n{log}");
     assert!(
         !log.contains(&common::token("laptop")),
