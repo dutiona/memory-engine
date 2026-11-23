@@ -35,11 +35,12 @@ cargo doc --no-deps -p memory-engine                                   # Docs, d
 cargo doc --no-deps -p memory-engine --all-features                    # Docs, all features
 cargo deny check                                                       # Supply-chain (advisories/licenses/bans/sources)
 uv run --locked sphinx-build -b html -W --keep-going -E docs docs/_build  # Sphinx site: a warning fails it (#1046); local only, no CI job runs Sphinx
+cargo +nightly fetch --locked --manifest-path fuzz/Cargo.toml          # Fuzz lock (#1093), before the fuzz build: cargo-fuzz has no --locked; re-seed per fuzz/Cargo.toml
 cargo +nightly fuzz build                                              # Fuzz gate (#993) — detached fuzz/ consumes the facade API; needs nightly + cargo-fuzz
 cargo +nightly fuzz run backfill_upload fuzz/corpus/backfill_upload fuzz/seeds/backfill_upload -- -create_missing_dirs=1 -max_total_time=60 -timeout=10   # Bounded fuzz run (#1120): one minute of the backfill upload route from its seeds
 ```
 
-The `fuzz build` line is the **facade-API gate** (#993): `fuzz/` is a detached workspace that no `--workspace` command compiles, yet it consumes the facade public API by path — so a removal or rename can break it silently. It needs nightly + cargo-fuzz (`just fuzz-build` wraps it) and is incremental (a seconds-long no-op when the facade is unchanged). The `fuzz run` line after it is a one-minute bounded run of the backfill upload route and its four readers from the checked-in seeds (#1120), never a fuzzing campaign; it needs the same toolchain.
+The `fetch --locked` line before it holds the fuzz build to the committed `fuzz/Cargo.lock` (#1093): cargo-fuzz has no `--locked` and `fuzz build` would rewrite a stale lock, so when the line fails, re-seed the lock as `fuzz/Cargo.toml` says. The `fuzz build` line is the **facade-API gate** (#993): `fuzz/` is a detached workspace that no `--workspace` command compiles, yet it consumes the facade public API by path — so a removal or rename can break it silently. It needs nightly + cargo-fuzz (`just fuzz-build` wraps it) and is incremental (a seconds-long no-op when the facade is unchanged). The `fuzz run` line after it is a one-minute bounded run of the backfill upload route and its four readers from the checked-in seeds (#1120), never a fuzzing campaign; it needs the same toolchain.
 
 The workflow also carries an **MSRV** job — `cargo +1.89 build --workspace --tests --examples` (default _and_ all-features); reproduce it locally if you change a dependency or edition-sensitive code.
 

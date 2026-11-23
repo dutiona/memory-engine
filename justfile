@@ -96,4 +96,6 @@ fuzz-build:
         echo "error: needs cargo-fuzz — cargo install cargo-fuzz --locked" >&2
         exit 1
     fi
+    # cargo-fuzz has no --locked: hold the build to the committed fuzz/Cargo.lock first (#1093).
+    cargo +nightly fetch --locked --manifest-path fuzz/Cargo.toml
     cargo +nightly fuzz build
