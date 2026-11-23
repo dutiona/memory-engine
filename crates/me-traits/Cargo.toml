@@ -1,6 +1,6 @@
 [package]
 name = "me-traits"
-version = "0.2.0-rc.3"
+version = "0.2.0-rc.4"
 edition = "2024"
 rust-version.workspace = true
 description = "Consumer/contract traits for the memory-engine workspace (Wave 2 #816)"
