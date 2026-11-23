@@ -91,7 +91,7 @@ fn build_corpus(root: &Path) {
         "reference_spec.md",
         "---\nname: spec\nmetadata:\n  type: reference\n---\nThe four-layer architecture spec lives in the wiki.\n",
     );
-    // No frontmatter — whole body is the fact (the MEMORY index file).
+    // The memory directory's index: skipped, never a fact (#1119).
     write_file(root, "MEMORY.md", "# Memory Index\n- pointer to a fact\n");
     // Recursion: a memory in a nested project subdir.
     write_file(
@@ -99,6 +99,8 @@ fn build_corpus(root: &Path) {
         "sub/nested.md",
         "---\nmetadata:\n  type: user\n---\nA nested memory fact.\n",
     );
+    // A second index at a deeper level: skipped by name, not by location.
+    write_file(root, "sub/MEMORY.md", "# Sub index\n- pointer\n");
     // Frontmatter-only stub → empty body → skipped.
     write_file(root, "empty.md", "---\nname: stub\n---\n");
 }
@@ -126,15 +128,15 @@ async fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
         .unwrap();
 
     assert_eq!(
-        report.memory_files_parsed, 6,
-        "6 files have a body (one stub skipped), got {}",
+        report.memory_files_parsed, 5,
+        "5 fact files (the stub and both MEMORY.md indexes skipped), got {}",
         report.memory_files_parsed
     );
     assert_eq!(
-        report.memory_files_skipped, 1,
-        "the frontmatter-only stub is skipped"
+        report.memory_files_skipped, 3,
+        "the frontmatter-only stub and both indexes are skipped"
     );
-    assert_eq!(report.facts_created, 6, "one fact per parsed file");
+    assert_eq!(report.facts_created, 5, "one fact per parsed file");
     assert_eq!(
         report.facts_reinforced, 0,
         "first pass creates, never reinforces"
@@ -147,7 +149,13 @@ async fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
 
     // --- Redaction: the secret is nowhere in the store ---
     let stored = engine.list_active_facts(None).await.unwrap();
-    assert_eq!(stored.len(), 6);
+    assert_eq!(stored.len(), 5);
+    assert!(
+        stored
+            .iter()
+            .all(|f| f.metadata.get("file").and_then(|v| v.as_str()) != Some("MEMORY.md")),
+        "no fact is the index"
+    );
     for f in &stored {
         assert!(
             !f.content.contains(PLANTED_SECRET),
@@ -160,8 +168,8 @@ async fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
     let count_type = |t: FactType| stored.iter().filter(|f| f.fact_type == t).count();
     assert_eq!(count_type(FactType::Procedural), 1, "feedback → Procedural");
     assert_eq!(count_type(FactType::Episodic), 1, "project → Episodic");
-    // user(2) + reference(1) + MEMORY-no-type(1) = 4 Semantic.
-    assert_eq!(count_type(FactType::Semantic), 4);
+    // user(2) + reference(1) = 3 Semantic.
+    assert_eq!(count_type(FactType::Semantic), 3);
 
     // reference fact carries the KB routing tag.
     let reference = stored
@@ -186,8 +194,8 @@ async fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
         project.t_created.year()
     );
     // No fact is stamped with a wall-clock (current-year) t_created via mtime:
-    // the temp files' mtime IS the current year, so MEMORY.md (no frontmatter,
-    // mtime-dated) legitimately carries the current year — assert only that the
+    // the temp files' mtime IS the current year, so mtime-dated facts
+    // legitimately carry the current year — assert only that the
     // explicitly-dated project fact is historical.
     assert!(project.t_created < chrono::Utc::now());
 
@@ -202,16 +210,16 @@ async fn memory_dir_import_routes_backdates_redacts_and_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(report2.facts_created, 0, "re-run must create 0 facts");
-    assert_eq!(report2.facts_reinforced, 6, "re-run reinforces all 6");
-    assert_eq!(report2.memory_files_parsed, 6);
+    assert_eq!(report2.facts_reinforced, 5, "re-run reinforces all 5");
+    assert_eq!(report2.memory_files_parsed, 5);
     assert_eq!(
         report2.secrets_redacted, 0,
         "secrets_redacted is create-gated: a reinforced re-run re-scrubs but re-counts nothing"
     );
     assert_eq!(
         engine.list_active_facts(None).await.unwrap().len(),
-        6,
-        "store still holds exactly 6 facts after re-run"
+        5,
+        "store still holds exactly 5 facts after re-run"
     );
 
     // --- Sources read-only: every byte unchanged ---

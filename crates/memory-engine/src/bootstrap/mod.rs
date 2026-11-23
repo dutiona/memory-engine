@@ -29,7 +29,7 @@ pub use extract::{ExtractedFact, KeywordExtractor, SessionExtractor};
 pub use filter::{
     CandidateEpisode, ConversationTurn, EpisodeCategory, INTERRUPTED, ToolCallRecord,
 };
-pub use memory_dir::{ParsedMemory, memory_item, parse_memory_file};
+pub use memory_dir::{MEMORY_INDEX, ParsedMemory, memory_item, parse_memory_file};
 pub use metrics::{BootstrapConfig, BootstrapReport, PrewarmMetrics};
 pub use outcome::{OutcomeSignals, SessionOutcome};
 pub use parse::{parse_timestamp, read_json_lines};

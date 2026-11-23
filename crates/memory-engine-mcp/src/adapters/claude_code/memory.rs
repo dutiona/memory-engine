@@ -4,14 +4,11 @@
 use std::fmt::Write as _;
 
 use chrono::{DateTime, Utc};
-use memory_engine::bootstrap::memory_item;
+use memory_engine::bootstrap::{MEMORY_INDEX, memory_item};
 use memory_engine::types::lifecycle::{ImportItem, ImportMemory};
 use sha2::{Digest, Sha256};
 
 use crate::adapters::Mapped;
-
-/// The index of pointers every memory directory holds: no memory of its own.
-const INDEX: &str = "MEMORY.md";
 
 /// Read one memory file, named `name`, filed under the scope path `home`, with the copy's
 /// modification time `mtime` as its last date (#1026).
@@ -53,13 +50,13 @@ pub fn read(
         lines: text.lines().filter(|l| !l.trim().is_empty()).count(),
         ..Mapped::default()
     };
-    let item = if name == INDEX {
-        None
-    } else {
-        memory_item(name, text, mtime)
-    };
+    let item = memory_item(name, text, mtime);
     let Some(item) = item else {
-        let reason = if name == INDEX { "index" } else { "empty" };
+        let reason = if name == MEMORY_INDEX {
+            "index"
+        } else {
+            "empty"
+        };
         mapped.skipped.insert(reason, 1);
         return Ok(mapped);
     };

@@ -3,10 +3,11 @@
 //! The Claude Code harness keeps durable memory as flat `.md` files: a
 //! `MEMORY.md` index plus one file per fact, each with shallow YAML frontmatter
 //! (`name`, `description`, `metadata.type`) and a Markdown body. This module
-//! parses those files into ME facts with **backdated** `t_created` (a frontmatter
-//! date when present, else a filename-encoded date, else the file mtime),
-//! redaction-gated and dedup-with-reinforced exactly like the JSONL session
-//! path. Sources are opened read-only and never modified.
+//! parses the fact files into ME facts with **backdated** `t_created` (a
+//! frontmatter date when present, else a filename-encoded date, else the file
+//! mtime), redaction-gated and dedup-with-reinforced exactly like the JSONL
+//! session path; the `MEMORY.md` index, which carries pointers and no memory of
+//! its own (#1119), is skipped. Sources are opened read-only and never modified.
 //!
 //! The frontmatter scanner here is deliberately minimal — it understands only
 //! the handful of fields the native-memory schema uses, not arbitrary YAML — so
@@ -34,6 +35,11 @@ use crate::types::{ClassifierInput, FactType, NewFact};
 
 use super::BootstrapConfig;
 use crate::redact;
+
+/// The index of pointers every Claude Code memory directory holds, one per
+/// directory: no memory of its own (#1119). Matched against a file name, never
+/// a path.
+pub const MEMORY_INDEX: &str = "MEMORY.md";
 
 /// Baseline importance for curated native-memory facts. Higher than the
 /// keyword-extracted session candidates: these files are hand-authored durable
@@ -320,7 +326,9 @@ fn build_metadata(file: &str, parsed: &ParsedMemory, route_kb: bool) -> serde_js
 /// The memory is the file's body, routed by its memory type (`feedback` Procedural, `project`
 /// Episodic, any other Semantic, `reference` tagged `route: knowledge-base`), dated by its
 /// frontmatter, else its file name, else `fallback`, and described by its metadata. `None` for
-/// an empty body, such as a frontmatter-only stub.
+/// the `MEMORY.md` index — a file named exactly `MEMORY.md` (both callers pass the file name,
+/// so an index at any depth is skipped) — and for an empty body, such as a
+/// frontmatter-only stub.
 ///
 /// # Examples
 ///
@@ -336,9 +344,13 @@ fn build_metadata(file: &str, parsed: &ParsedMemory, route_kb: bool) -> serde_js
 /// assert_eq!(item.time, Utc.with_ymd_and_hms(2026, 2, 14, 0, 0, 0).unwrap());
 /// assert_eq!(item.metadata["file"], "feedback_2026_02_14.md");
 /// assert!(memory_item("stub.md", "---\nname: stub\n---\n", mtime).is_none());
+/// assert!(memory_item("MEMORY.md", "- [a](a.md)\n", mtime).is_none());
 /// ```
 #[must_use]
 pub fn memory_item(name: &str, raw: &str, fallback: DateTime<Utc>) -> Option<MemoryItem> {
+    if name == MEMORY_INDEX {
+        return None;
+    }
     let parsed = parse_memory_file(raw);
     if parsed.body.is_empty() {
         return None;
@@ -364,10 +376,10 @@ pub fn memory_item(name: &str, raw: &str, fallback: DateTime<Utc>) -> Option<Mem
 ///
 /// Pure compute plus the consumer callbacks (`embed`/`should_pin`) — **no DB
 /// access**. Run inside `spawn_blocking` (a blocking `EmbeddingProvider` must not
-/// park the async executor). Returns `None` when the file is skipped — unreadable or
-/// an empty body (best-effort, non-fatal, mirrors the old per-file loop) — else
-/// `Some((fact, redaction_count))`; the redactions fold into the report only on the
-/// *created* branch (caller-side). An embedding failure returns `Err` (aborts the
+/// park the async executor). Returns `None` when the file is skipped — unreadable, the
+/// `MEMORY.md` index, or an empty body (best-effort, non-fatal, mirrors the old per-file
+/// loop) — else `Some((fact, redaction_count))`; the redactions fold into the report only on
+/// the *created* branch (caller-side). An embedding failure returns `Err` (aborts the
 /// run, matching the old `?`).
 ///
 /// # Errors
