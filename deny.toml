@@ -24,10 +24,6 @@ all-features = true
 # RUSTSEC-2026-0459 (bundled SQLite before 3.54.0) was *fixed* — rusqlite bumped to
 # 0.43 (SQLite 3.54.1), which requires Rust 1.89, so the MSRV was raised again — not ignored.
 ignore = [
-    # RUSTSEC-2026-0173: proc-macro-error2 is unmaintained (not a vuln), pulled via
-    # tabled_derive <- tabled in memory-engine-cli. Documented exception; to be removed
-    # once tabled is upgraded/replaced. Tracking: #815.
-    "RUSTSEC-2026-0173",
     # RUSTSEC-2026-0462: rmcp 1.8's streamable-HTTP *client* is vulnerable (fixed only in
     # 3.9.0, a major bump). memory-engine-mcp enables only rmcp's server features, and its
     # HTTP tests use reqwest, so the client is not compiled; the rmcp entry under [bans]
