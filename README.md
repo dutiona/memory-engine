@@ -127,7 +127,7 @@ Consumer (AI agent, CLI tool, MCP server)
 
 ## Documentation
 
-- [API reference](https://dutiona.github.io/memory-engine/) (cargo doc)
+- [API reference](docs/reference/api.md) (`cargo doc --no-deps -p memory-engine --all-features --open` for the full rustdoc)
 - [Design & research basis](docs/design/research-basis.md)
 - [Architecture Decision Records](docs/design/adr/)
 
