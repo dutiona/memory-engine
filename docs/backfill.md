@@ -40,8 +40,9 @@ and it needs the store lock the running server holds.
 ### The dry run
 
 Send the file with `ME-Backfill-Mode: dry-run`. The token is read from its file into a header on standard input, never
-put on a command line; every `ME-Project-*` value and `ME-Backfill-Source` is percent-encoded as ADR-0020 §3 says (each
-byte outside 0x21 to 0x7E, and `%`, `"` and `\`, as `%HH`):
+put on a command line; every `ME-Project-*` value but the dev root, and `ME-Backfill-Source`, is percent-encoded as
+ADR-0020 §3 says (each byte outside 0x21 to 0x7E, and `%`, `"` and `\`, as `%HH`). The dev root is sent as configured,
+never encoded: the server drops one that is not plain absolute ASCII ([Project facts](reference/mcp-server.md#project-facts-and-the-project-key)).
 
 ```sh
 printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -sS -H @- \
