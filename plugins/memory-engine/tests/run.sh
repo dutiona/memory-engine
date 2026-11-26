@@ -246,6 +246,29 @@ os.makedirs(os.path.join(sys.argv[1], "cut", "a"), exist_ok=True)
 	for m; do [ ! -e "$m" ] || fail "a helper ran code from a path: $m"; done
 }
 
+# The skill names exactly the seven tools of the manifest's servers, and the README no other tool-level name.
+t_skill() {
+	py '
+import json, re, sys
+plugin, skill_path, readme = sys.argv[1:4]
+servers = json.load(open(plugin))["mcpServers"]
+approved = {"me": ("recall", "remember", "forget", "set_level"), "kb": ("search_index", "ingest_text", "ingest_url")}
+assert set(servers) == set(approved), sorted(servers)
+seven = {"mcp__plugin_memory-engine_%s__%s" % (k, t) for k, tools in approved.items() for t in tools}
+skill = open(skill_path).read()
+front = re.match(r"---\nname: memory\ndescription: \S.*\n---\n", skill)
+assert front, skill[:200]
+named = set(re.findall(r"mcp__[A-Za-z0-9_-]+", skill))
+assert named == seven, sorted(named ^ seven)
+for banned in ("mcp__memory-engine__", "memory_", "memory-engine-cli"):
+    assert banned not in skill, banned
+assert "Pruning and deletion are never yours" in skill
+names = set(re.findall(r"mcp__plugin_memory-engine_[a-z]+__[a-z_]+", open(readme).read()))
+assert names <= seven, sorted(names - seven)
+' "$PLUGIN/.claude-plugin/plugin.json" "$PLUGIN/skills/memory/SKILL.md" "$PLUGIN/README.md" ||
+		fail "the skill or the README names a tool the servers do not serve"
+}
+
 # ---------------------------------------------------------------- item 2: enqueue
 
 # hook_as_pid SCRIPT SUB: run SCRIPT in a shell that then execs the helper, so SCRIPT knows the hook's pid as $$.
@@ -1413,7 +1436,7 @@ t_hostile_git_config() {
 # ---------------------------------------------------------------- runner
 
 CASES=${CASES:-"
-registration version mcp_servers helper_command
+registration version mcp_servers helper_command skill
 body_identical envelope order seq_taken seq_bound seq_concurrent pid_reuse id_collision rejected_collision tree_heals
 body_write_fail headers_write_fail endpoint options_absent side_duties_fail silent modes real_no_token_argv
 facts_repo facts_worktree facts_subdir facts_detached facts_non_git facts_cwd facts_insteadof userinfo encoding
