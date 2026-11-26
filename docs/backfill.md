@@ -40,11 +40,14 @@ and it needs the store lock the running server holds.
 ### The dry run
 
 Send the file with `ME-Backfill-Mode: dry-run`. The token is read from its file into a header on standard input, never
-put on a command line; every `ME-Project-*` value and `ME-Backfill-Source` is percent-encoded as ADR-0020 §3 says (each
-byte outside 0x21 to 0x7E, and `%`, `"` and `\`, as `%HH`):
+put on a command line; every `ME-Project-*` value but the dev root, and `ME-Backfill-Source`, is percent-encoded as
+ADR-0020 §3 says (each byte outside 0x21 to 0x7E, and `%`, `"` and `\`, as `%HH`). The dev root is sent as configured,
+never encoded: it must be an absolute path of bytes 0x21 to 0x7E with no `%`, `"` or `\`, or the server drops it
+([Project facts](reference/mcp-server.md#project-facts-and-the-project-key)), and an upload with no remote then files
+under the machine's bucket.
 
 ```sh
-printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -sS -H @- \
+printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -q -sS --noproxy '*' -H @- \
   -H 'ME-Harness: claude-code' \
   -H 'ME-Backfill-Kind: transcript' \
   -H 'ME-Backfill-Mode: dry-run' \
@@ -56,6 +59,10 @@ printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -sS -H @- \
   --data-binary @<copy>/projects/<project-dir>/<session>.jsonl \
   https://<memory-host>/backfill/uploads > <report-dir>/<session>.dry.json
 ```
+
+`-q` keeps a `~/.curlrc` (a `verbose` line would print the `Authorization` header) out of the upload, and `--noproxy`
+sends it straight to the memory host, never through a proxy, as the plugin's hook does: a host whose only route out is a
+proxy cannot upload.
 
 A memory file is `ME-Backfill-Kind: memory-file` and carries the copy's modification time, which dates a memory with
 no frontmatter date and no date in its name: `-H "ME-Backfill-Mtime: $(date -u -r <file> +%Y-%m-%dT%H:%M:%SZ)"` with
@@ -79,7 +86,8 @@ Read the dry run's report (`jq . <session>.dry.json`) before any write:
   calls, refusals by reason, and the counts by kind and actor.
 - **`tool_events` and `stubs`**: the tools called, and every call that touched a sensitive path, kept as a stub.
 - **`redaction`**: what was found, the stubs, the placeholders by rule; read the `facts.items[].preview` texts for
-  anything redaction missed.
+  anything redaction missed. The report previews facts only: prompts, tool excerpts and the other event texts are
+  counted by kind and actor, never shown, so a miss in them cannot be read here (#1170).
 - **`facts`**: what the write would create, reinforce or find blocked, each with its Home, type and date. An item with
   `hint: set_level` is a `user` memory filed at its project: after the write, a session raises it with `set_level`.
   A date after the harvest means the host's clock ran ahead or the entry's timestamp is bad: the memory keeps that
@@ -140,6 +148,9 @@ turns one store into one JSON Lines file per project, each one upload.
      tool calls, which live capture never records), and the empty and incomplete rows;
    - `events.live_overlap` and `events.superseded`, and each session's `held_by`: the other origins already holding it
      on the machine (`lifecycle`, `backfill`, the other store);
+     a dry run sees the store as it is, so a session another of the machine's files holds shows in `held_by` only once
+     that file is written: a machine reviewed whole before its first write finds that overlap from its reports'
+     `sessions[].id`;
    - the facts: every observation and summary is Episodic, a how-to note (`problem-solution`, `pattern`, `gotcha`)
      starting at importance 0.6, the others at 0.5.
 
