@@ -169,12 +169,16 @@ Setting `skip_existing: false` disables this check and allows duplicate imports 
 The bootstrap pipeline runs in five stages:
 
 1. **Parse** -- Read JSONL entries from the session log. Malformed lines are skipped with a `tracing::warn`.
-2. **Reconstruct** -- A turn is a prompt, its first assistant entry (by UUID linkage, with sequential fallback) and every entry linked beneath it up to the next prompt; each `tool_result` answers the call its `tool_use_id` names, the backfill reader's rule (#1159). Noise entries (progress, queue operations, file history snapshots) make no prompt.
+2. **Reconstruct** -- A turn is a prompt, its first assistant entry (by UUID linkage, with sequential fallback) and every entry linked beneath it up to the next prompt; each `tool_result` answers the call its `tool_use_id` names, the backfill reader's rule (#1159). Its assistant text is the visible text of those entries, never their thinking, and nothing from the rows Claude Code writes itself (a `<synthetic>` message, an API error). Noise entries (progress, queue operations, file history snapshots) make no prompt.
 3. **Classify** -- Determine the session outcome (Success, Failure, Indeterminate) from heuristic signals: git commits, passing tests, error loops, interruptions, and user sentiment.
 4. **Filter** -- Apply keyword pre-filter to surface candidate episodes in four categories: Bug, Decision, Convention, and Learning.
 5. **Extract** -- Pass each candidate episode to the `SessionExtractor` to produce facts, then ingest them with backdated `t_created` and `last_accessed` timestamps for correct Ebbinghaus decay.
 
 The entire ingest phase (marker event + facts) runs within a SQLite savepoint for crash safety. On failure, the savepoint is rolled back with no side effects.
+
+A fact's content is its turns' `User:` and `Assistant:` text, cut at 2,000 characters from its end, so a long multi-row turn can lose its last words.
+
+Facts stored before the assistant text became visible text only are not rewritten: a session with a bootstrap marker is skipped, so its facts keep the text they were stored with, thinking included where the turn's first row was a thinking block. A `--reprocess` run rebuilds the session's facts from visible text; their content differs from the old facts', so no twin is reinforced and each candidate turn gets a new fact beside its old one, which stays active. Erase a session's old bootstrap facts before reprocessing it if they must go.
 
 ## Limitations
 

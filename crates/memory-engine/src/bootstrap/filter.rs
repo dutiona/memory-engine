@@ -268,11 +268,8 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
         }
     }
 
-    // Pairing runs before the sort: `owner` holds indices into `turns` as built.
-    let calls = pair_calls(entries, &owner, turns.len());
-    for (turn, calls) in turns.iter_mut().zip(calls) {
-        turn.tool_calls = calls;
-    }
+    // Filling runs before the sort: `owner` holds indices into `turns` as built.
+    fill_turns(entries, &owner, &mut turns);
     turns.sort_by_key(|t| t.timestamp);
     turns
 }
@@ -311,15 +308,13 @@ fn claim<'a>(
     }
 }
 
-/// The calls of each of `n_turns` turns, by one pass over `entries` in file order: an owned
-/// assistant entry's `tool_use` blocks become its turn's calls, and each `tool_result` block
-/// fills the pending call its `tool_use_id` names (see [`reconstruct_turns`]).
-fn pair_calls(
-    entries: &[SessionEntry],
-    owner: &[Option<usize>],
-    n_turns: usize,
-) -> Vec<Vec<ToolCallRecord>> {
-    let mut calls: Vec<Vec<ToolCallRecord>> = (0..n_turns).map(|_| Vec::new()).collect();
+/// Fill each turn's assistant text and calls, by one pass over `entries` in file order: an owned
+/// assistant entry adds its visible text (never its thinking, and nothing when Claude Code wrote
+/// it, see [`written_by_claude_code`]) and its `tool_use` blocks become its turn's calls; each
+/// `tool_result` block fills the pending call its `tool_use_id` names (see [`reconstruct_turns`]).
+fn fill_turns(entries: &[SessionEntry], owner: &[Option<usize>], turns: &mut [ConversationTurn]) {
+    let mut calls: Vec<Vec<ToolCallRecord>> = turns.iter().map(|_| Vec::new()).collect();
+    let mut texts: Vec<Vec<String>> = turns.iter().map(|_| Vec::new()).collect();
     // Every call with an id, owned or not, so that a result naming an unowned call answers
     // nothing rather than an older call of the same id.
     let mut pending: HashMap<String, Option<(usize, usize)>> = HashMap::new();
@@ -329,6 +324,14 @@ fn pair_calls(
                 let Some(content) = entry.message.as_ref().and_then(|m| m.content.as_ref()) else {
                     continue;
                 };
+                if let Some(turn) = owner[i]
+                    && !written_by_claude_code(entry)
+                {
+                    let text = extract_text(entry);
+                    if !text.is_empty() {
+                        texts[turn].push(text);
+                    }
+                }
                 for block in super::parse::parse_content_blocks(content) {
                     let ContentBlock::ToolUse { id, name, input } = block else {
                         continue;
@@ -371,14 +374,28 @@ fn pair_calls(
             _ => {}
         }
     }
-    calls
+    for ((turn, calls), texts) in turns.iter_mut().zip(calls).zip(texts) {
+        turn.tool_calls = calls;
+        turn.assistant_text = texts.join("\n");
+    }
+}
+
+/// Whether Claude Code wrote this assistant entry itself, not the model: a `<synthetic>` message
+/// or an `isApiErrorMessage` row. Its text is no assistant text, as in the backfill reader.
+fn written_by_claude_code(entry: &SessionEntry) -> bool {
+    entry.is_api_error_message == Some(serde_json::Value::Bool(true))
+        || entry
+            .message
+            .as_ref()
+            .and_then(|m| m.model.as_ref())
+            .and_then(serde_json::Value::as_str)
+            == Some("<synthetic>")
 }
 
 /// Build a [`ConversationTurn`] from a prompt and the assistant entry that answers it; its
-/// calls are filled in by [`pair_calls`].
+/// assistant text and calls are filled in by [`fill_turns`].
 fn build_turn(user: &SessionEntry, assistant: &SessionEntry) -> ConversationTurn {
     let user_text = extract_text(user);
-    let assistant_text = extract_text(assistant);
 
     let timestamp = user
         .timestamp
@@ -395,7 +412,7 @@ fn build_turn(user: &SessionEntry, assistant: &SessionEntry) -> ConversationTurn
     ConversationTurn {
         timestamp,
         user_text,
-        assistant_text,
+        assistant_text: String::new(),
         tool_calls: Vec::new(),
         uuid: user.uuid.clone().unwrap_or_default(),
     }
@@ -414,7 +431,7 @@ fn extract_text(entry: &SessionEntry) -> String {
     let mut parts: Vec<String> = Vec::new();
     for block in blocks {
         match block {
-            ContentBlock::Text(t) | ContentBlock::Thinking(t) => parts.push(t),
+            ContentBlock::Text(t) => parts.push(t),
             ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. }
             | ContentBlock::Other => {}
@@ -587,11 +604,13 @@ mod tests {
             git_branch: None,
             message: Some(MessagePayload {
                 role: Some("user".into()),
+                model: None,
                 content: Some(json!([{"type": "text", "text": text}])),
             }),
             tool_use_result: None,
             is_meta: None,
             is_compact_summary: None,
+            is_api_error_message: None,
             data: None,
         }
     }
@@ -607,11 +626,13 @@ mod tests {
             git_branch: None,
             message: Some(MessagePayload {
                 role: Some("assistant".into()),
+                model: None,
                 content: Some(json!([{"type": "text", "text": text}])),
             }),
             tool_use_result: None,
             is_meta: None,
             is_compact_summary: None,
+            is_api_error_message: None,
             data: None,
         }
     }
@@ -633,6 +654,7 @@ mod tests {
             git_branch: None,
             message: Some(MessagePayload {
                 role: Some("assistant".into()),
+                model: None,
                 content: Some(json!([
                     {"type": "text", "text": text},
                     {"type": "tool_use", "id": format!("toolu_{uuid}"), "name": tool_name, "input": {"cmd": "ls"}}
@@ -641,6 +663,7 @@ mod tests {
             tool_use_result: None,
             is_meta: None,
             is_compact_summary: None,
+            is_api_error_message: None,
             data: None,
         }
     }
@@ -658,6 +681,7 @@ mod tests {
             tool_use_result: None,
             is_meta: None,
             is_compact_summary: None,
+            is_api_error_message: None,
             data: None,
         }
     }
@@ -681,6 +705,7 @@ mod tests {
             git_branch: None,
             message: Some(MessagePayload {
                 role: Some("user".into()),
+                model: None,
                 content: Some(json!([
                     {
                         "type": "tool_result",
@@ -698,6 +723,7 @@ mod tests {
             }),
             is_meta: None,
             is_compact_summary: None,
+            is_api_error_message: None,
             data: None,
         }
     }
@@ -718,6 +744,7 @@ mod tests {
             git_branch: None,
             message: Some(MessagePayload {
                 role: Some("user".into()),
+                model: None,
                 content: Some(json!([
                     {
                         "type": "tool_result",
@@ -735,6 +762,7 @@ mod tests {
             }),
             is_meta: None,
             is_compact_summary: None,
+            is_api_error_message: None,
             data: None,
         }
     }
@@ -830,6 +858,114 @@ mod tests {
         let turn = turns.iter().find(|t| t.user_text == "run ls").unwrap();
         // The tool-result row is flagged `isMeta` too: a row with a result is never dropped.
         assert_eq!(turn.tool_calls[0].stdout.as_deref(), Some("ok, ls ran"));
+    }
+
+    /// A turn's `assistant_text` is the non-empty visible text blocks of every
+    /// assistant row the turn owns, joined by "\n": never a thinking block,
+    /// never a row Claude Code writes itself (a `<synthetic>` model or an
+    /// `isApiErrorMessage` row).
+    #[test]
+    fn a_turns_assistant_text_is_its_visible_text() {
+        let jsonl = [
+            json!({
+                "type": "user",
+                "sessionId": "sess-1",
+                "timestamp": "2026-03-19T10:00:00Z",
+                "uuid": "u1",
+                "parentUuid": null,
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Fix the parser."}],
+                },
+            }),
+            json!({
+                "type": "assistant",
+                "sessionId": "sess-1",
+                "timestamp": "2026-03-19T10:00:01Z",
+                "uuid": "a0",
+                "parentUuid": "u1",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "thinking", "thinking": "PRIVATE-REASONING"}],
+                },
+            }),
+            json!({
+                "type": "assistant",
+                "sessionId": "sess-1",
+                "timestamp": "2026-03-19T10:00:02Z",
+                "uuid": "a1",
+                "parentUuid": "a0",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "first"}]},
+            }),
+            json!({
+                "type": "assistant",
+                "sessionId": "sess-1",
+                "timestamp": "2026-03-19T10:00:03Z",
+                "uuid": "a2",
+                "parentUuid": "a1",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+                    ],
+                },
+            }),
+            json!({
+                "type": "user",
+                "sessionId": "sess-1",
+                "timestamp": "2026-03-19T10:00:04Z",
+                "uuid": "r1",
+                "parentUuid": "a2",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+                    ],
+                },
+                "toolUseResult": "ok",
+            }),
+            json!({
+                "type": "assistant",
+                "sessionId": "sess-1",
+                "timestamp": "2026-03-19T10:00:05Z",
+                "uuid": "a3",
+                "parentUuid": "r1",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+            }),
+            json!({
+                "type": "assistant",
+                "sessionId": "sess-1",
+                "timestamp": "2026-03-19T10:00:06Z",
+                "uuid": "a4",
+                "parentUuid": "a3",
+                "message": {
+                    "role": "assistant",
+                    "model": "<synthetic>",
+                    "content": [{"type": "text", "text": "No response requested."}],
+                },
+            }),
+            json!({
+                "type": "assistant",
+                "sessionId": "sess-1",
+                "timestamp": "2026-03-19T10:00:07Z",
+                "uuid": "a5",
+                "parentUuid": "a4",
+                "isApiErrorMessage": true,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "API Error: overloaded"}],
+                },
+            }),
+        ]
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+        let (entries, malformed) = parse_session_file(jsonl.as_bytes(), 0, 0);
+        assert_eq!(malformed, 0);
+        let turns = reconstruct_turns(&entries);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].assistant_text, "first\ndone");
     }
 
     /// The reference transcript's interrupt (README line 21), `isMeta` caveat (line 30) and
@@ -933,6 +1069,40 @@ mod tests {
         assert_eq!(calls_at(47, &lines, &turns), vec![("Bash".into(), false)]);
         let last = turn_at(47, &lines, &turns);
         assert_eq!(last.tool_calls[0].stdout, None);
+
+        // The turn's assistant_text is its visible text: line 14's text block
+        // shows up, while no thinking block of any row ever does.
+        assert!(
+            turn_at(2, &lines, &turns)
+                .assistant_text
+                .contains("The help text lists it.")
+        );
+        let thinking: Vec<String> = lines
+            .iter()
+            .filter_map(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            .flat_map(|row| {
+                row["message"]["content"]
+                    .as_array()
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter(|b| b["type"] == "thinking")
+                            .filter_map(|b| b["thinking"].as_str().filter(|t| !t.is_empty()))
+                            .map(String::from)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert!(!thinking.is_empty(), "the fixture carries thinking blocks");
+        for turn in &turns {
+            for thought in &thinking {
+                assert!(
+                    !turn.assistant_text.contains(thought),
+                    "thinking leaked into assistant_text: {thought}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -960,6 +1130,7 @@ mod tests {
             git_branch: None,
             message: Some(MessagePayload {
                 role: Some("assistant".into()),
+                model: None,
                 content: Some(json!([
                     {"type": "tool_use", "id": "t-first", "name": "Bash", "input": {"cmd": "first"}},
                     {"type": "tool_use", "id": "t-second", "name": "Read", "input": {"path": "second"}}
@@ -968,6 +1139,7 @@ mod tests {
             tool_use_result: None,
             is_meta: None,
             is_compact_summary: None,
+            is_api_error_message: None,
             data: None,
         };
         let entries = vec![
