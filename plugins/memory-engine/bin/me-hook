@@ -93,10 +93,10 @@ strip_userinfo() {
 	esac
 }
 
-# facts: F_ROOT F_UPSTREAM F_ORIGIN F_BRANCH from CLAUDE_PROJECT_DIR only; F_OK when there is a project at all.
+# facts DIR: F_ROOT F_UPSTREAM F_ORIGIN F_BRANCH of the project directory DIR; F_OK when there is a project at all.
 facts() {
 	F_OK= F_ROOT= F_UPSTREAM= F_ORIGIN= F_BRANCH=
-	_dir=${CLAUDE_PROJECT_DIR-}
+	_dir=$1
 	[ -n "$_dir" ] || return 0
 	case $_dir in *"$NL"*) return 0 ;; esac
 	[ -d "$_dir" ] || return 0
@@ -131,15 +131,16 @@ dev_root_ok() {
 	return 0
 }
 
-# fact_lines: the ME-Project-* header lines, an absent fact omitted; fails when a write fails.
+# fact_lines FMT: each present ME-Project-* fact as printf FMT NAME VALUE, an absent fact omitted; fails when a write
+# fails. Both channels print through it, so they send the same values.
 fact_lines() {
 	[ -n "$F_OK" ] || return 0
 	pct "$F_ROOT"
-	printf 'ME-Project-Root: %s\n' "$R" || return 1
-	if dev_root_ok; then printf 'ME-Project-Dev-Root: %s\n' "$DEV" || return 1; fi
-	if [ -n "$F_UPSTREAM" ]; then pct "$F_UPSTREAM" && printf 'ME-Project-Upstream-Url: %s\n' "$R" || return 1; fi
-	if [ -n "$F_ORIGIN" ]; then pct "$F_ORIGIN" && printf 'ME-Project-Origin-Url: %s\n' "$R" || return 1; fi
-	if [ -n "$F_BRANCH" ]; then pct "$F_BRANCH" && printf 'ME-Project-Branch: %s\n' "$R" || return 1; fi
+	printf "$1" ME-Project-Root "$R" || return 1
+	if dev_root_ok; then printf "$1" ME-Project-Dev-Root "$DEV" || return 1; fi
+	if [ -n "$F_UPSTREAM" ]; then pct "$F_UPSTREAM" && printf "$1" ME-Project-Upstream-Url "$R" || return 1; fi
+	if [ -n "$F_ORIGIN" ]; then pct "$F_ORIGIN" && printf "$1" ME-Project-Origin-Url "$R" || return 1; fi
+	if [ -n "$F_BRANCH" ]; then pct "$F_BRANCH" && printf "$1" ME-Project-Branch "$R" || return 1; fi
 	return 0
 }
 
@@ -190,7 +191,7 @@ capture() {
 	[ -e "$_t" ] && rm -rf "$_t"
 	mkdir "$_t" || { heal && mkdir "$_t"; } || exit 0
 	record_endpoint "$ME_URL"
-	facts
+	facts "${CLAUDE_PROJECT_DIR-}"
 	cat >"$_t/body" || abandon
 	_d=$(date -u '+%s %Y-%m-%dT%H:%M:%SZ') || abandon
 	_ep=${_d%% *}
@@ -226,7 +227,7 @@ capture() {
 			printf 'ME-Event-Seq: %s\n' "$_seq" &&
 			printf 'ME-Harness: claude-code\n' &&
 			printf 'ME-Client-Version: %s\n' "$ME_VERSION" &&
-			fact_lines
+			fact_lines '%s: %s\n'
 	} >"$_t/headers" || abandon
 	[ "$SUB" = session-start ] && count_outbox
 	mv "$_t" "$O/$_id" || abandon
