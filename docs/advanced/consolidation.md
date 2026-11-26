@@ -48,7 +48,7 @@ Expired facts have their edges cascade-expired as well, keeping the graph consis
 
 ### Pass 2: Cluster Fusion
 
-Groups active facts using greedy single-linkage clustering at a similarity threshold of 0.85 (hardcoded, lower than the dedup threshold). For each cluster meeting `min_cluster_size`, the `SummaryGenerator` produces a textual summary, which the `EmbeddingProvider` then embeds into the fact vector space. These are stored as `Cluster`-level summaries.
+Groups active facts using greedy single-linkage clustering at `cluster_threshold` (default 0.85, lower than the dedup threshold). For each cluster meeting `min_cluster_size`, the `SummaryGenerator` produces a textual summary, which the `EmbeddingProvider` then embeds into the fact vector space. These are stored as `Cluster`-level summaries.
 
 Prior cluster summaries are deleted before new ones are created, making this pass idempotent.
 
@@ -65,13 +65,18 @@ Returns 1 if a global summary was created, 0 if no clusters exist.
 ## Configuration
 
 ```rust
+#[non_exhaustive]
 pub struct ConsolidationConfig {
-    /// Cosine similarity threshold for dedup (e.g., 0.92).
+    /// Minimum cosine similarity for two facts to be duplicates (merged at ≥ this value).
     pub dedup_threshold: f32,
-    /// Minimum cluster size for fusion (e.g., 3).
+    /// Similarity threshold for single-linkage clustering; looser than `dedup_threshold`.
+    pub cluster_threshold: f32,
+    /// Minimum number of facts a group needs to be summarized into a cluster (≥ 2).
     pub min_cluster_size: usize,
 }
 ```
+
+Defaults: `dedup_threshold = 0.90`, `cluster_threshold = 0.85`, `min_cluster_size = 2`. Construct it via `ConsolidationConfig::builder()` or `ConsolidationConfig::default()` — the struct is `#[non_exhaustive]`, so a struct literal is not usable outside the crate.
 
 ## Statistics
 
@@ -100,11 +105,13 @@ Summary **embedding** is performed by the `EmbeddingProvider` passed alongside t
 ## Usage
 
 ```rust
-let config = ConsolidationConfig {
-    dedup_threshold: 0.92,
-    min_cluster_size: 3,
-};
-let stats = engine.consolidate(&my_summary_generator, &my_embedding_provider, &config)?;
+let config = ConsolidationConfig::builder()
+    .dedup_threshold(0.92)
+    .build();
+// Both providers are shared: `consolidate` takes an `Arc<dyn SummaryGenerator>` and an `Arc<dyn EmbeddingProvider>`.
+let stats = engine
+    .consolidate(Arc::clone(&generator), Arc::clone(&embedder), &config)
+    .await?;
 println!(
     "deduped={}, clusters={}, global={}",
     stats.duplicates_removed, stats.clusters_created, stats.global_summaries
