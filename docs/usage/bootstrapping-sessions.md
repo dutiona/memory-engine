@@ -184,7 +184,7 @@ The bootstrap pipeline runs in five stages:
 
 The entire ingest phase (marker event + facts) runs within a SQLite savepoint for crash safety. On failure, the savepoint is rolled back with no side effects.
 
-A fact's content is its turns' `User:` and `Assistant:` text, cut at 2,000 characters from its end, so a long multi-row turn can lose its last words.
+A fact's content is its turns' `User:` and `Assistant:` text, cut to its first 2,000 bytes (on a character boundary), so a long multi-row turn can lose its last words.
 
 Facts stored before the assistant text became visible text only are not rewritten: a session with a bootstrap marker is skipped, so its facts keep the text they were stored with, thinking included where the turn's first row was a thinking block. A `--reprocess` run rebuilds the session's facts from visible text; their content differs from the old facts', so no twin is reinforced and each candidate turn gets a new fact beside its old one, which stays active. Erase a session's old bootstrap facts before reprocessing it if they must go.
 

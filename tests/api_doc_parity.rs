@@ -644,6 +644,20 @@ fn rust_fences(page: &str) -> Vec<(usize, String)> {
     out
 }
 
+/// Whether a line of `text` opens a trait or an impl, visibility and `unsafe` aside.
+fn could_hold_a_signature(text: &str) -> bool {
+    text.lines().any(|l| {
+        let mut t = l.trim_start();
+        while let Some(rest) = ["pub(crate) ", "pub ", "unsafe "]
+            .iter()
+            .find_map(|p| t.strip_prefix(p))
+        {
+            t = rest;
+        }
+        t.starts_with("trait ") || t.starts_with("impl")
+    })
+}
+
 /// One fence against the code: the errors it holds and how many fns it checked.
 fn check_fence(code: &Code, at: &str, body: &str) -> (Vec<String>, usize) {
     let text = unhide(body);
@@ -654,11 +668,7 @@ fn check_fence(code: &Code, at: &str, body: &str) -> (Vec<String>, usize) {
         items.visit_block_mut(&mut block);
     } else {
         // F2: a fence that could hold a signature is never skipped.
-        let could = text.lines().any(|l| {
-            let t = l.trim_start();
-            t.starts_with("trait ") || t.starts_with("pub trait ") || t.starts_with("impl")
-        });
-        return if could {
+        return if could_hold_a_signature(&text) {
             (
                 vec![format!(
                     "{at}: a fence holding a trait or impl does not parse"
@@ -998,6 +1008,11 @@ fn an_unreadable_or_unknown_trait_fence_fails() {
         check("impl T for {").len(),
         1,
         "an unreadable impl fence fails"
+    );
+    assert_eq!(
+        check("  unsafe impl T for {").len(),
+        1,
+        "so does an indented unsafe one"
     );
     assert!(
         check("let x = ;").is_empty(),

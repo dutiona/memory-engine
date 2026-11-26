@@ -169,7 +169,10 @@ fn is_prompt(entry: &SessionEntry) -> bool {
 /// pending call answers nothing. This is the backfill reader's rule
 /// (`memory-engine-mcp` `adapters::claude_code::transcript`, #1159); the two readers differ in
 /// payload, not pairing: for a result without `toolUseResult` the backfill's result text falls
-/// back to the block's text, while the bootstrap's `stdout` stays `None`.
+/// back to the block's text, while the bootstrap's `stdout` stays `None`. The rule is written
+/// twice rather than shared, because the readers walk different types (`SessionEntry` here, a
+/// JSON map there) and the backfill emits records as it walks; the backfill's
+/// `both_readers_pair_results_by_tool_use_id` test holds both to one expected table instead.
 ///
 /// Progress, queue-operation, file-history-snapshot, last-prompt, and unknown entries make no
 /// prompt, nor do `isMeta` and `isCompactSummary` rows or rows whose text starts with
@@ -1214,6 +1217,19 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(10),
             "a 100_000-deep parent chain must stay linear"
+        );
+
+        // 50_000 prompts sharing one uuid, each with its own reply.
+        let mut prompts: Vec<SessionEntry> = Vec::new();
+        for i in 0..50_000_i64 {
+            prompts.push(user_entry("p", "", "prompt", i));
+            prompts.push(assistant_entry(&format!("a{i}"), "p", "reply", i));
+        }
+        let start = Instant::now();
+        let _ = reconstruct_turns(&prompts);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "prompts sharing a uuid must stay linear"
         );
     }
 
