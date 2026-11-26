@@ -23,13 +23,17 @@ Part of a [four-layer cognitive architecture](https://github.com/dutiona/autonom
 ## Quick Example
 
 ```rust
-use memory_engine::{MemoryEngine, FactType, AddFactRequest, EmbeddingProvider, MemoryError};
+use memory_engine::{MemoryEngine, FactType, AddFactRequest, EmbeddingProvider, MemoryError, EmbeddingFingerprint};
 
 // Consumers implement EmbeddingProvider with their model of choice
 struct DummyEmbedder;
 impl EmbeddingProvider for DummyEmbedder {
     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
         Ok(vec![0.0; 384]) // replace with real embeddings
+    }
+
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", 384)
     }
 }
 

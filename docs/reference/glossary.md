@@ -63,7 +63,7 @@ Importance score (materialized)
 : A composite score in [0, 1] stored on each fact as `importance_score`. Computed during `prune()` as a weighted sum of recency, frequency, graph connectivity, and base importance. Used by `resume_context()` tier 2 (high-importance) to select facts without recomputation.
 
 PersistenceClassifier
-: Consumer-provided trait that decides whether a newly inserted fact should be pinned. Called during `add_fact()` with a pre-insert synthetic `Fact`. Default implementation returns `false` (opt-in). Classifiers should rely on `content`, `fact_type`, `importance`, and `metadata` only.
+: Consumer-provided trait that decides whether a newly inserted fact should be pinned. Called during `add_fact()` with a `ClassifierInput` (`content`, `fact_type`, `base_importance`, `metadata`) of the fact about to be inserted. Default implementation returns `false` (opt-in).
 
 Scheduling API
 : The `list_due(now, scope)` and `next_due_time(scope)` methods. `list_due` returns active facts whose `t_valid` has arrived and stamps `surfaced_at` on first return. `next_due_time` returns the earliest future `t_valid` for poll scheduling.

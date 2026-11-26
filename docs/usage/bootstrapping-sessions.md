@@ -11,11 +11,15 @@ This pipeline is the embedded library's, run on a store no server holds (`memory
 # use memory_engine::{MemoryEngine, MemoryError};
 # use memory_engine::bootstrap::{KeywordExtractor, BootstrapConfig};
 # use memory_engine::EmbeddingProvider;
+# use memory_engine::EmbeddingFingerprint;
 #
 # struct MyEmbedder;
 # impl EmbeddingProvider for MyEmbedder {
 #     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
 #         Ok(vec![0.0; 384])
+#     }
+#     fn fingerprint(&self) -> EmbeddingFingerprint {
+#         EmbeddingFingerprint::new("mock", "test", 384)
 #     }
 # }
 #
@@ -45,11 +49,15 @@ To bootstrap an entire directory of session logs at once:
 # use memory_engine::{MemoryEngine, MemoryError};
 # use memory_engine::bootstrap::{KeywordExtractor, BootstrapConfig};
 # use memory_engine::EmbeddingProvider;
+# use memory_engine::EmbeddingFingerprint;
 #
 # struct MyEmbedder;
 # impl EmbeddingProvider for MyEmbedder {
 #     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
 #         Ok(vec![0.0; 384])
+#     }
+#     fn fingerprint(&self) -> EmbeddingFingerprint {
+#         EmbeddingFingerprint::new("mock", "test", 384)
 #     }
 # }
 #

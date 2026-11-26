@@ -89,7 +89,7 @@ Consumers implement `SummaryGenerator` to provide summarization logic. The engin
 
 ```rust
 pub trait SummaryGenerator {
-    fn summarize(&self, facts: &[Fact]) -> Result<String>;
+    fn summarize(&self, items: &[SummarizableContent<'_>]) -> Result<String>;
 }
 ```
 

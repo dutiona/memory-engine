@@ -2,6 +2,8 @@
 
 Signatures are the code's, held to it by `tests/api_doc_parity.rs` (`async` first for an `async fn`, paths cut to their
 last segment); the check reads the documented rows, so a public fn this page omits is not caught.
+Each list of a type's fields names every public field of that type, typed where a bullet gives a type, and the guides'
+trait and impl fences show the traits' own signatures, both held by the same test.
 `cargo doc --no-deps -p memory-engine --all-features --open` builds the full API documentation; it is not hosted.
 
 This page summarizes the public API surface of the `memory-engine` crate.
@@ -12,7 +14,7 @@ This page summarizes the public API surface of the `memory-engine` crate.
 : Facade over all memory primitives. Its methods take `&self`; the builder's take `self`, and the `(free function)` rows take neither. Thread-safe via internal connection pool and `RwLock`-protected caches. Share across threads with `Arc<MemoryEngine>`.
 
 `EngineConfig`
-: Configuration for file-backed engines. Fields: `path: PathBuf`, `embed_dim: usize`, `read_pool_size: usize` (default: 4).
+: Configuration for file-backed engines, built with `EngineConfig::new(path, embed_dim)` and its `with_*` setters (`with_backend`, `with_read_pool_size` (default: 4), `with_search_config`, `with_backup_dir`, `with_upcaster_registry`, `with_read_only`); its fields are private.
 
 ## Public Methods by Category
 
@@ -91,6 +93,7 @@ The two steps of a deferred-embedding drain (#1021); the drain loop is the consu
 - `embedding: Option<Vec<f32>>` -- query vector for semantic search.
 - `mode: SearchMode` -- `Fts`, `Vector`, or `Hybrid`.
 - `limit: usize` -- max results.
+- `rerank_depth: Option<usize>` -- how many candidates to pass to the reranker before truncating to `limit`; clamped to at least `limit`, and `None` falls back to `limit`.
 - `valid_at: Option<DateTime<Utc>>` -- temporal filter on valid time.
 - `fact_type: Option<FactType>` -- filter by fact type.
 - `scope: Option<ScopeQuery>` -- scope resolution strategy.
@@ -98,7 +101,7 @@ The two steps of a deferred-embedding drain (#1021); the drain loop is the consu
 `MemoryQuery` fields (all optional, AND semantics):
 
 - `scope: Option<ScopeQuery>` -- scope filter.
-- `period_start/period_end: Option<DateTime<Utc>>` -- temporal period overlap `[start, end)`.
+- `period_start: Option<DateTime<Utc>>`, `period_end: Option<DateTime<Utc>>` -- temporal period overlap `[start, end)`.
 - `text: Option<String>` -- FTS query (triggers search path).
 - `embedding: Option<Vec<f32>>` -- vector query (triggers search path).
 - `search_mode: Option<SearchMode>` -- override inferred mode (default: infer from text/embedding).
@@ -126,6 +129,7 @@ The two steps of a deferred-embedding drain (#1021); the drain loop is the consu
 `ConsolidationConfig` fields:
 
 - `dedup_threshold: f32` -- cosine similarity threshold for dedup, in `[0.0, 1.0]` (default 0.90). Facts with similarity **>=** this value are merged; `1.0` merges only exact duplicates.
+- `cluster_threshold: f32` -- cosine similarity threshold for grouping related facts into a cluster (single-linkage), lower than `dedup_threshold` (default 0.85).
 - `min_cluster_size: usize` -- minimum facts to form a cluster (must be `>= 2`; default 2).
 
 ### Pruning
@@ -154,6 +158,7 @@ never blocked.
 
 - `half_life_days: f64` -- base Ebbinghaus half-life (default: 69.0).
 - `half_life_overrides: HashMap<FactType, f64>` -- per-type overrides.
+- `decay_exempt_types: HashSet<FactType>` -- fact types exempt from decay-driven pruning altogether (default: `{Semantic, Procedural}`); an explicit `half_life_overrides` entry wins and re-enables decay.
 - `min_importance: f64` -- expiration threshold (default: 0.1).
 - `recency_weight`, `frequency_weight`, `graph_degree_weight`, `base_importance_weight` -- signal weights (default: 0.3, 0.2, 0.3, 0.2).
 
@@ -268,11 +273,16 @@ readers judge an interrupted tool call by (#1154).
 - `scope: Option<String>` -- scope path for ingested facts (e.g., `"project:my-app"`). `None` = root scope.
 - `max_turns: usize` -- maximum turns to process per session. `0` = no limit.
 - `skip_existing: bool` -- skip sessions already bootstrapped (default: `true`).
+- `denylist: Vec<String>` -- author-seeded known-secret literals that augment the always-on signature detectors (`[]` = signatures-only).
+- `max_session_bytes: u64` -- maximum total bytes read from a single session stream before parsing stops (`0` = no limit; default 256 MiB).
+- `max_entries: usize` -- maximum parsed entries retained from a single session before parsing stops with a truncation `warn` (`0` = no limit; default 1,000,000).
 
 `BootstrapReport` fields:
 
 - `sessions_processed`, `sessions_skipped`, `entries_parsed`, `entries_malformed` -- pipeline counters.
 - `turns_reconstructed`, `candidates_found`, `facts_created`, `events_ingested` -- per-stage metrics.
+- `facts_reinforced`, `facts_blocked`, `secrets_redacted` -- fact counters: existing facts reinforced instead of duplicated, facts not written (a tombstone blocks their content), and secret/PII findings scrubbed before storage.
+- `memory_files_parsed`, `memory_files_skipped` -- native `.md` memory files parsed, and skipped (unreadable, the `MEMORY.md` index, or no parseable body).
 - `outcome_counts: OutcomeCounts` -- breakdown by session outcome (success/failure/indeterminate).
 - `category_counts: CategoryCounts` -- breakdown by episode category (bug/decision/convention/learning).
 - `prewarm_metrics: PrewarmMetrics` -- fact-type distribution and average importance for cold-start analysis.

@@ -69,6 +69,8 @@ Consumers must implement `EmbeddingProvider` to supply embeddings:
 ```rust
 pub trait EmbeddingProvider {
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    /// The embedding model's identity, checked against the store's (ADR 0015).
+    fn fingerprint(&self) -> EmbeddingFingerprint;
 }
 ```
 
@@ -77,7 +79,7 @@ The returned vector must match the `embed_dim` configured when opening the engin
 Here is a minimal example using a zero-vector embedder (useful for testing, not for production):
 
 ```rust
-use memory_engine::{MemoryEngine, FactType, AddFactRequest};
+use memory_engine::{MemoryEngine, FactType, AddFactRequest, EmbeddingFingerprint};
 use memory_engine::traits::EmbeddingProvider;
 use memory_engine::error::Result;
 
@@ -88,6 +90,10 @@ struct ZeroEmbedder {
 impl EmbeddingProvider for ZeroEmbedder {
     fn embed(&self, _text: &str) -> Result<Vec<f32>> {
         Ok(vec![0.0; self.dim])
+    }
+
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", self.dim)
     }
 }
 

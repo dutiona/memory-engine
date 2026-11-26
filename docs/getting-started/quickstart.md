@@ -7,7 +7,7 @@ A minimal end-to-end example: open an engine, ingest an event, add a fact, and q
 The engine has no built-in embedding model. You provide one via the `EmbeddingProvider` trait:
 
 ```rust
-use memory_engine::{EmbeddingProvider, MemoryError};
+use memory_engine::{EmbeddingProvider, MemoryError, EmbeddingFingerprint};
 
 struct DummyEmbedder;
 
@@ -15,6 +15,10 @@ impl EmbeddingProvider for DummyEmbedder {
     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
         // Replace with your embedding model (e.g., ONNX Runtime, API call)
         Ok(vec![0.0; 384])
+    }
+
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("mock", "test", 384)
     }
 }
 ```
