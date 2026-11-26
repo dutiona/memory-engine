@@ -1,6 +1,6 @@
 [package]
 name = "me-test-support"
-version = "0.2.0-rc.4"
+version = "0.2.0-rc.5"
 edition = "2024"
 rust-version.workspace = true
 description = "Shared test harness + cross-backend storage conformance battery for the memory-engine workspace (Wave 2 #816 / S3, sub-PR 1)"

@@ -1,6 +1,6 @@
 [package]
 name = "me-storage"
-version = "0.2.0-rc.4"
+version = "0.2.0-rc.5"
 edition = "2024"
 rust-version.workspace = true
 description = "Layer-1 persistence port (the StorageBackend trait family + MemoryCtx + UpcasterRegistry) for the memory-engine workspace (Wave 2 #816)"
