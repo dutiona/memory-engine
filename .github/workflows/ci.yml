@@ -120,8 +120,10 @@ jobs:
         run: cargo +nightly fetch --locked --manifest-path fuzz/Cargo.toml
       - name: cargo +nightly fuzz build
         run: cargo +nightly fuzz build
+      # The corpus goes under fuzz/target, a cargo build output, and the empty fuzz/artifacts dir cargo-fuzz creates
+      # is removed after a clean run (a crash artifact stays), so no fuzzer output stays in the checkout (#1161).
       - name: bounded fuzz run of the backfill upload route (#1120)
-        run: cargo +nightly fuzz run backfill_upload fuzz/corpus/backfill_upload fuzz/seeds/backfill_upload -- -create_missing_dirs=1 -max_total_time=60 -timeout=10
+        run: cargo +nightly fuzz run backfill_upload fuzz/target/corpus/backfill_upload fuzz/seeds/backfill_upload -- -create_missing_dirs=1 -max_total_time=60 -timeout=10 && find fuzz/artifacts -type d -empty -delete
 
   cargo-deny:
     name: Supply-chain (cargo-deny)
