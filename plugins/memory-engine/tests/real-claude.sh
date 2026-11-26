@@ -362,6 +362,7 @@ if [ -e "$P/out/precondition" ] || [ ! -s "$P/out/export.json" ]; then
 	printf 'not ok - phase M did not complete: %s\n' "$(cat "$P/out/precondition" 2>/dev/null || tail -n 3 "$P/driver.log")"
 	exit 1
 fi
+mcheck "real: ME and KB refuse a request without a token, and a rotated-out token, and take the current one" auth
 mcheck "real: the init events list exactly the me and kb servers, connected, and the seven tools" tools
 mcheck "real: every scripted MCP call answered without error, each ME answer opening with its call line" calls
 mcheck "real: every hook event and every MCP call record has the hooks' key, physical root and dev root" key

@@ -167,9 +167,12 @@ def restart():
 def rotate():
     for s in servers():
         stop(s)
-    draw_token()
+    old, new = DRAWN[-1], draw_token()
     for s in servers():
         start(s)
+    # What each server answers a bare POST /mcp with no token, the old one and the new one, after the rotation.
+    json.dump({s: [status(CFG[s + "_port"]), status(CFG[s + "_port"], old), status(CFG[s + "_port"], new)] for s in servers()},
+              open(os.path.join(OUT, "rotation.json"), "w"))
 
 
 def claude_env():
@@ -525,6 +528,12 @@ def check(name):
         ]
         assert kb and all(e["session_id"] in sessions for e in kb), kb
         print("call records linked:", len(records), "; KB calls captured:", len(kb))
+    elif name == "auth":
+        first = load("auth.json")
+        assert all(first[s][0] == 401 and first[s][1] != 401 for s in first), first
+        after = load("rotation.json")
+        assert all(after[s][0] == 401 and after[s][1] == 401 and after[s][2] != 401 for s in after), after
+        print("before:", first, "after the rotation:", after)
     elif name == "rotation":
         assert load("leaks.json")["drawn"] == 2, load("leaks.json")
         assert (
