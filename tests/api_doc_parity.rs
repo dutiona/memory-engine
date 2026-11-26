@@ -626,7 +626,8 @@ fn unhide(body: &str) -> String {
 }
 
 /// Every ` ```rust… ` fence of `page`: (line of its opening, its body).
-fn rust_fences(page: &str) -> Vec<(usize, String)> {
+/// An unclosed fence at end of file is an error, not a silent drop.
+fn rust_fences(page: &str) -> Result<Vec<(usize, String)>, String> {
     let mut out = Vec::new();
     let mut open: Option<(usize, Vec<&str>)> = None;
     for (i, line) in page.lines().enumerate() {
@@ -641,7 +642,10 @@ fn rust_fences(page: &str) -> Vec<(usize, String)> {
             Some((_, body)) => body.push(line),
         }
     }
-    out
+    if let Some((at, _)) = open {
+        return Err(format!("line {at}: a ```rust fence is never closed"));
+    }
+    Ok(out)
 }
 
 /// Whether a line of `text` opens a trait or an impl, visibility and `unsafe` aside.
@@ -794,10 +798,15 @@ fn every_guide_trait_fence_is_the_codes() {
     for page in guides(&root) {
         let text = fs::read_to_string(&page).unwrap();
         let rel = page.strip_prefix(&root).unwrap().display().to_string();
-        for (line, body) in rust_fences(&text) {
-            let (e, n) = check_fence(&code, &format!("{rel}:{line}"), &body);
-            errors.extend(e);
-            checked += n;
+        match rust_fences(&text) {
+            Ok(fences) => {
+                for (line, body) in fences {
+                    let (e, n) = check_fence(&code, &format!("{rel}:{line}"), &body);
+                    errors.extend(e);
+                    checked += n;
+                }
+            }
+            Err(e) => errors.push(format!("{rel}: {e}")),
         }
     }
     // F1: a reader that matched nothing is broken, not green.
@@ -1027,6 +1036,19 @@ fn an_unreadable_or_unknown_trait_fence_fails() {
         check("fn main() {\n    struct S;\n    impl T for S {}\n}").len(),
         1
     );
+}
+
+#[test]
+fn an_unterminated_rust_fence_fails() {
+    let page = "```rust\ntrait A { fn f(&self); }\n```\ntext\n```rust\ntrait B { fn g(&self); }\n";
+    let err = rust_fences(page).unwrap_err();
+    assert!(
+        err.contains("line 5"),
+        "the error names the unclosed fence's opening line: {err}"
+    );
+    let closed = "```rust\ntrait A { fn f(&self); }\n```\n";
+    let fences = rust_fences(closed).unwrap();
+    assert_eq!(fences.len(), 1);
 }
 
 #[test]
