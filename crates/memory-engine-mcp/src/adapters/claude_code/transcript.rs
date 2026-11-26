@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use memory_engine::bootstrap::{parse_timestamp, records_an_interrupt};
-use memory_engine::types::lifecycle::{Actor, Content, NeutralRecord, StopOutcome, ToolOutcome};
+use memory_engine::types::lifecycle::{
+    Actor, Content, NeutralRecord, StopOutcome, TASK_NOTIFICATION, ToolOutcome,
+};
 use serde_json::{Map, Value, json};
 
 use super::{INTERRUPTED, result_text, tool_content};
@@ -29,6 +31,14 @@ fn text<'a>(object: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
 
 fn flag(object: &Map<String, Value>, name: &str) -> bool {
     object.get(name).and_then(Value::as_bool) == Some(true)
+}
+
+/// The kind the harness itself put on an entry (`origin.kind`), when it put one.
+fn origin_kind(object: &Map<String, Value>) -> Option<&str> {
+    object
+        .get("origin")
+        .and_then(Value::as_object)
+        .and_then(|origin| text(origin, "kind"))
 }
 
 /// The members every imported entry needs.
@@ -330,6 +340,14 @@ impl Reader {
             let summary = joined(&blocks).unwrap_or_default();
             let trigger = self.trigger.take();
             return self.push(line, entry, "c", Content::Compact { trigger, summary });
+        }
+        // The one marker the capture contract cannot see (#1171). The turn is booked exactly as
+        // the emitted path books it, so both markers give the same stops and `incomplete_turns`.
+        if origin_kind(entry.object) == Some(TASK_NOTIFICATION) {
+            if !self.turns.insert(entry.turn()) {
+                self.incomplete += 1;
+            }
+            return self.skip(TASK_NOTIFICATION);
         }
         if flag(entry.object, "isMeta") {
             return self.skip("meta");
@@ -850,6 +868,73 @@ mod tests {
         .unwrap();
         assert_eq!(table(&mapped).len(), 1, "the prompt only");
         assert_eq!((mapped.incomplete_turns, mapped.pending), (1, 1));
+    }
+
+    /// A row the harness marked as its own task notification is skipped under its reason, and its
+    /// turn is booked exactly as the emitted path books it (#1171): same turns, same stop, same
+    /// `incomplete_turns`. The prefix is the engine's rule, not the reader's.
+    #[test]
+    fn a_row_the_harness_marked_a_task_notification_is_skipped() {
+        let marked = |uuid: &str, time: &str, text: &str| {
+            entry(
+                "user",
+                uuid,
+                time,
+                &json!({ "origin": { "kind": "task-notification" },
+                         "message": { "role": "user", "content": text } }),
+            )
+        };
+        let body_of = |prompt: String| {
+            body(&[
+                prompt,
+                assistant(
+                    "a1",
+                    "2026-03-19T10:00:05.000Z",
+                    "m1",
+                    &json!([{ "type": "text", "text": "Ran it." }]),
+                    Some("end_turn"),
+                ),
+            ])
+        };
+
+        // Marked by the harness, with and without the marker's text.
+        for text in [
+            "<task-notification>\n<task-id>t1</task-id>\n",
+            "some other text",
+        ] {
+            let mapped = read(&body_of(marked("u1", "2026-03-19T10:00:00.000Z", text))).unwrap();
+            let rows = table(&mapped);
+            assert_eq!(rows.len(), 1, "the stop only");
+            assert_eq!(rows[0].1, "stop");
+            assert_eq!(mapped.skipped.get("task-notification"), Some(&1));
+            assert_eq!(mapped.incomplete_turns, 0, "the stop completes the turn");
+        }
+
+        // The same text without `origin.kind` is a prompt here: the prefix is the engine's rule.
+        let mapped = read(&body_of(user_text(
+            "u1",
+            "2026-03-19T10:00:00.000Z",
+            "<task-notification>\n<task-id>t1</task-id>\n",
+        )))
+        .unwrap();
+        assert_eq!(table(&mapped).len(), 2, "a prompt and its stop");
+        assert!(mapped.skipped.is_empty());
+
+        // And both markers book the turn identically.
+        let marked_turns = read(&body_of(marked("u1", "2026-03-19T10:00:00.000Z", "hi"))).unwrap();
+        let plain_turns =
+            read(&body_of(user_text("u1", "2026-03-19T10:00:00.000Z", "hi"))).unwrap();
+        assert_eq!(marked_turns.incomplete_turns, plain_turns.incomplete_turns);
+        assert_eq!(
+            table(&marked_turns)
+                .into_iter()
+                .filter(|(_, kind, _)| *kind == "stop")
+                .collect::<Vec<_>>(),
+            table(&plain_turns)
+                .into_iter()
+                .filter(|(_, kind, _)| *kind == "stop")
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
