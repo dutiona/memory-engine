@@ -14,7 +14,8 @@ use super::parse::{ContentBlock, EntryType, INTERRUPTED, SessionEntry, records_a
 // Types
 // ---------------------------------------------------------------------------
 
-/// A conversation turn: user message paired with assistant response and tool results.
+/// A conversation turn: a prompt, the assistant entries that answer it, and their tool calls, each
+/// paired with its result by `tool_use_id` ([`reconstruct_turns`]).
 #[derive(Debug, Clone)]
 pub struct ConversationTurn {
     pub timestamp: DateTime<Utc>,
@@ -111,16 +112,37 @@ const LEARNING_KEYWORDS: &[&str] = &["discovered", "til", "turns out", "reason i
 // Turn reconstruction
 // ---------------------------------------------------------------------------
 
-/// Whether `entry` takes part in a turn: a user or assistant entry, except a user entry without
-/// a tool result that is no prompt (an `isMeta` or `isCompactSummary` row, or one whose text
-/// starts with [`INTERRUPTED`]). A row with a tool result always does, so dropping the others
-/// never shifts the positional pairing of results with calls.
+/// The raw `tool_result` objects of `entry`'s `message.content`, as sent: the parsed
+/// [`ContentBlock::ToolResult`] keeps only a lossy string of each, and
+/// [`records_an_interrupt`] reads the raw value.
+fn tool_results(entry: &SessionEntry) -> impl Iterator<Item = &serde_json::Value> {
+    entry
+        .message
+        .as_ref()
+        .and_then(|m| m.content.as_ref())
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("tool_result"))
+}
+
+/// Whether `entry` is a tool-result row: a user row holding a `tool_result` block (the rule of
+/// the backfill reader and of the API), or carrying a `toolUseResult`. A result row is never a
+/// prompt, so a block-less one still opens no turn.
+fn is_result_row(entry: &SessionEntry) -> bool {
+    matches!(entry.entry_type, EntryType::User)
+        && (entry.tool_use_result.is_some() || tool_results(entry).next().is_some())
+}
+
+/// Whether `entry` takes part in a turn: a user or assistant entry, except a user entry that is
+/// neither a result row nor a prompt (an `isMeta` or `isCompactSummary` row, or one whose text
+/// starts with [`INTERRUPTED`]). A result row always does.
 fn takes_part(entry: &SessionEntry) -> bool {
     let flagged = |flag: &Option<serde_json::Value>| *flag == Some(serde_json::Value::Bool(true));
     match entry.entry_type {
         EntryType::Assistant => true,
         EntryType::User => {
-            entry.tool_use_result.is_some()
+            is_result_row(entry)
                 || !(flagged(&entry.is_meta)
                     || flagged(&entry.is_compact_summary)
                     || extract_text(entry).starts_with(INTERRUPTED))
@@ -129,19 +151,35 @@ fn takes_part(entry: &SessionEntry) -> bool {
     }
 }
 
+/// A genuine prompt: a user row that takes part and is no result row. A turn's walk stops at one.
+fn is_prompt(entry: &SessionEntry) -> bool {
+    matches!(entry.entry_type, EntryType::User) && takes_part(entry) && !is_result_row(entry)
+}
+
 /// Reconstruct [`ConversationTurn`]s from a raw `SessionEntry` sequence.
 ///
-/// Progress, queue-operation, file-history-snapshot, last-prompt, and unknown
-/// entries are filtered out. User + assistant entries are paired first by
-/// UUID/parent-UUID linkage, then by sequential fallback.
+/// A turn is a prompt, the assistant entry that answers it (the first valid, unused one whose
+/// `parentUuid` is the prompt's uuid, else the next assistant entry before the next prompt,
+/// #82), and every entry linked beneath that assistant entry through `parentUuid` up to the
+/// next prompt: Claude Code writes one content block per row, so one assistant message spans
+/// several rows, with its tool results and any `system`/`attachment` rows in the chain.
 ///
-/// Three kinds of user entry are also dropped: `isMeta` and `isCompactSummary`
-/// rows (harness metadata, not prompts), and rows whose text starts with
-/// [`INTERRUPTED`] (an interrupted turn, not a prompt). None of them carries a
-/// `tool_use_result`, and an entry with one is never dropped.
+/// Each `tool_result` block answers the call whose `tool_use` `id` its `tool_use_id` names, in
+/// file order: a later call with the same id replaces the earlier one, and a result naming no
+/// pending call answers nothing. This is the backfill reader's rule
+/// (`memory-engine-mcp` `adapters::claude_code::transcript`, #1159); the two readers differ in
+/// payload, not pairing: for a result without `toolUseResult` the backfill's result text falls
+/// back to the block's text, while the bootstrap's `stdout` stays `None`.
+///
+/// Progress, queue-operation, file-history-snapshot, last-prompt, and unknown entries make no
+/// prompt, nor do `isMeta` and `isCompactSummary` rows or rows whose text starts with
+/// [`INTERRUPTED`]; a result row is never a prompt.
 #[must_use]
 pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
-    let relevant: Vec<&SessionEntry> = entries.iter().filter(|e| takes_part(e)).collect();
+    // The index in `entries` of every entry that takes part in a turn.
+    let relevant: Vec<usize> = (0..entries.len())
+        .filter(|&i| takes_part(&entries[i]))
+        .collect();
 
     if relevant.is_empty() {
         return Vec::new();
@@ -150,145 +188,197 @@ pub fn reconstruct_turns(entries: &[SessionEntry]) -> Vec<ConversationTurn> {
     let mut used: HashSet<&str> = HashSet::new();
     let mut turns: Vec<ConversationTurn> = Vec::new();
 
-    // Separate user entries that are tool results (carry tool_use_result)
-    // from user entries that are genuine prompts.
-    let is_tool_result = |e: &SessionEntry| -> bool { e.tool_use_result.is_some() };
-
     // --- Pre-index for O(n) pairing (#406) ---
-    // Two indices over the attacker-controlled `relevant` slice, each built in a
-    // single O(n) pass, replace the per-user linear scans that made the original
-    // reconstruction O(n^2) (an algorithmic-complexity DoS amplifier).
+    // `entries` is attacker-controlled; every index below is built in one pass.
     //
-    // `assistant_by_parent`: parent_uuid -> ALL assistants carrying it, in slice
-    // order. The lookup picks the first VALID (uuid present) and not-yet-`used`
-    // candidate, exactly matching the old linear `.find()` — keeping a single
-    // entry would drop the turn when the first assistant for a parent is invalid
-    // (uuid-less) or already used, even though a later valid one exists (a
-    // corrupt/partial JSONL case).
+    // `assistant_by_parent`: parent_uuid -> ALL assistants carrying it, in slice order. The
+    // lookup picks the first VALID (uuid present) and not-yet-`used` candidate: keeping a
+    // single entry would drop the turn when the first assistant for a parent is invalid
+    // (uuid-less) or already used, even though a later valid one exists.
     //
-    // `tool_results_by_parent`: parent_uuid -> the tool-result user entries that
-    // follow an assistant, in slice order — the O(1) replacement for the
-    // per-call full scan in `collect_tool_result_entries`.
-    let mut assistant_by_parent: HashMap<&str, Vec<&SessionEntry>> = HashMap::new();
-    let mut tool_results_by_parent: HashMap<&str, Vec<&SessionEntry>> = HashMap::new();
-    for entry in &relevant {
+    // `children`: parent_uuid -> every entry naming it, over ALL entries, since rows that
+    // take no part in a turn still sit in its chain.
+    let mut assistant_by_parent: HashMap<&str, Vec<usize>> = HashMap::new();
+    for &i in &relevant {
+        if matches!(entries[i].entry_type, EntryType::Assistant)
+            && let Some(parent) = entries[i].parent_uuid.as_deref()
+            && !parent.is_empty()
+        {
+            assistant_by_parent.entry(parent).or_default().push(i);
+        }
+    }
+    let mut children: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, entry) in entries.iter().enumerate() {
+        if let Some(parent) = entry.parent_uuid.as_deref()
+            && !parent.is_empty()
+        {
+            children.entry(parent).or_default().push(i);
+        }
+    }
+    // The turn each entry belongs to, by its index in `entries`.
+    let mut owner: Vec<Option<usize>> = vec![None; entries.len()];
+    let unused = |used: &HashSet<&str>, i: usize| {
+        entries[i]
+            .uuid
+            .as_deref()
+            .is_some_and(|u| !used.contains(u))
+    };
+
+    // --- UUID-linked pairing ---
+    for &p in &relevant {
+        let prompt = &entries[p];
+        if !is_prompt(prompt) {
+            continue;
+        }
+        let Some(user_uuid) = prompt.uuid.as_deref() else {
+            continue;
+        };
+        if used.contains(user_uuid) {
+            continue;
+        }
+        let assistant = assistant_by_parent
+            .get(user_uuid)
+            .and_then(|cands| cands.iter().copied().find(|&a| unused(&used, a)));
+        if let Some(a) = assistant {
+            used.insert(user_uuid);
+            claim(entries, &children, &mut used, &mut owner, a, turns.len());
+            turns.push(build_turn(prompt, &entries[a]));
+        }
+    }
+
+    // --- Sequential fallback for unpaired entries ---
+    // Only pair a user entry with the next assistant that appears *before* the next genuine
+    // user entry in the sequence (issue #82).
+    for (k, &p) in relevant.iter().enumerate() {
+        let prompt = &entries[p];
+        let user_uuid = prompt.uuid.as_deref().unwrap_or("");
+        if is_prompt(prompt) && !user_uuid.is_empty() && !used.contains(user_uuid) {
+            let assistant = relevant[k + 1..]
+                .iter()
+                .copied()
+                .take_while(|&i| !is_prompt(&entries[i]))
+                .find(|&i| {
+                    matches!(entries[i].entry_type, EntryType::Assistant) && unused(&used, i)
+                });
+            if let Some(a) = assistant {
+                used.insert(user_uuid);
+                claim(entries, &children, &mut used, &mut owner, a, turns.len());
+                turns.push(build_turn(prompt, &entries[a]));
+            }
+        }
+    }
+
+    // Pairing runs before the sort: `owner` holds indices into `turns` as built.
+    let calls = pair_calls(entries, &owner, turns.len());
+    for (turn, calls) in turns.iter_mut().zip(calls) {
+        turn.tool_calls = calls;
+    }
+    turns.sort_by_key(|t| t.timestamp);
+    turns
+}
+
+/// Give turn `turn` the assistant entry at `start` and every entry linked beneath it, up to the
+/// next prompt. Each uuid joins at most one turn (a fork that repeats rows counts them once) and
+/// its children are read once, on an explicit stack: O(n) on hostile input, no recursion (#406).
+fn claim<'a>(
+    entries: &'a [SessionEntry],
+    children: &HashMap<&str, Vec<usize>>,
+    used: &mut HashSet<&'a str>,
+    owner: &mut [Option<usize>],
+    start: usize,
+    turn: usize,
+) {
+    owner[start] = Some(turn);
+    let Some(uuid) = entries[start].uuid.as_deref() else {
+        return;
+    };
+    used.insert(uuid);
+    let mut stack = vec![uuid];
+    while let Some(parent) = stack.pop() {
+        for &i in children.get(parent).map_or(&[][..], Vec::as_slice) {
+            let entry = &entries[i];
+            if is_prompt(entry) {
+                continue;
+            }
+            let Some(uuid) = entry.uuid.as_deref() else {
+                continue;
+            };
+            if used.insert(uuid) {
+                owner[i] = Some(turn);
+                stack.push(uuid);
+            }
+        }
+    }
+}
+
+/// The calls of each of `n_turns` turns, by one pass over `entries` in file order: an owned
+/// assistant entry's `tool_use` blocks become its turn's calls, and each `tool_result` block
+/// fills the pending call its `tool_use_id` names (see [`reconstruct_turns`]).
+fn pair_calls(
+    entries: &[SessionEntry],
+    owner: &[Option<usize>],
+    n_turns: usize,
+) -> Vec<Vec<ToolCallRecord>> {
+    let mut calls: Vec<Vec<ToolCallRecord>> = (0..n_turns).map(|_| Vec::new()).collect();
+    // Every call with an id, owned or not, so that a result naming an unowned call answers
+    // nothing rather than an older call of the same id.
+    let mut pending: HashMap<String, Option<(usize, usize)>> = HashMap::new();
+    for (i, entry) in entries.iter().enumerate() {
         match entry.entry_type {
             EntryType::Assistant => {
-                if let Some(parent) = entry.parent_uuid.as_deref()
-                    && !parent.is_empty()
-                {
-                    assistant_by_parent.entry(parent).or_default().push(entry);
+                let Some(content) = entry.message.as_ref().and_then(|m| m.content.as_ref()) else {
+                    continue;
+                };
+                for block in super::parse::parse_content_blocks(content) {
+                    let ContentBlock::ToolUse { id, name, input } = block else {
+                        continue;
+                    };
+                    let slot = owner[i].map(|turn| {
+                        calls[turn].push(ToolCallRecord {
+                            tool_name: name,
+                            input,
+                            stdout: None,
+                            stderr: None,
+                            is_error: false,
+                            interrupted: false,
+                        });
+                        (turn, calls[turn].len() - 1)
+                    });
+                    if let Some(id) = id {
+                        pending.insert(id, slot);
+                    }
                 }
             }
-            EntryType::User if is_tool_result(entry) => {
-                if let Some(parent) = entry.parent_uuid.as_deref()
-                    && !parent.is_empty()
-                {
-                    tool_results_by_parent
-                        .entry(parent)
-                        .or_default()
-                        .push(entry);
+            EntryType::User => {
+                for block in tool_results(entry) {
+                    let Some(Some((turn, k))) = block
+                        .get("tool_use_id")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|id| pending.remove(id))
+                    else {
+                        continue;
+                    };
+                    let call = &mut calls[turn][k];
+                    let result = entry.tool_use_result.as_ref();
+                    call.stdout = result.and_then(|r| r.stdout.clone());
+                    call.stderr = result.and_then(|r| r.stderr.clone());
+                    call.is_error = block.get("is_error") == Some(&serde_json::Value::Bool(true))
+                        || result.and_then(|r| r.is_error).unwrap_or(false);
+                    call.interrupted = result.is_some_and(|r| r.interrupted)
+                        || block.get("content").is_some_and(records_an_interrupt);
                 }
             }
             _ => {}
         }
     }
-
-    // --- UUID-linked pairing ---
-    for entry in &relevant {
-        if !matches!(entry.entry_type, EntryType::User) || is_tool_result(entry) {
-            continue;
-        }
-        let Some(ref user_uuid) = entry.uuid else {
-            continue;
-        };
-        if used.contains(user_uuid.as_str()) {
-            continue;
-        }
-
-        // Lookup the assistants whose parent_uuid matches this user's uuid and
-        // pick the first valid (uuid present) and not-yet-`used` one — the same
-        // selection the old linear `.find()` made, now scoped to this parent's
-        // (typically singleton) candidate list rather than the whole slice.
-        let assistant = assistant_by_parent
-            .get(user_uuid.as_str())
-            .and_then(|cands| {
-                cands
-                    .iter()
-                    .copied()
-                    .find(|a| a.uuid.as_deref().is_some_and(|u| !used.contains(u)))
-            });
-
-        if let Some(assistant) = assistant {
-            // Collect tool-result user entries that follow this assistant.
-            let tool_results = collect_tool_result_entries(&tool_results_by_parent, assistant);
-            turns.push(build_turn(entry, assistant, tool_results));
-            used.insert(user_uuid.as_str());
-            if let Some(ref a_uuid) = assistant.uuid {
-                used.insert(a_uuid.as_str());
-            }
-            for tr in tool_results {
-                if let Some(ref u) = tr.uuid {
-                    used.insert(u.as_str());
-                }
-            }
-        }
-    }
-
-    // --- Sequential fallback for unpaired entries ---
-    // Only pair a user entry with the next assistant that appears *before*
-    // the next genuine user entry in the sequence (issue #82).
-    let mut i = 0;
-    while i < relevant.len() {
-        let entry = relevant[i];
-        let entry_uuid = entry.uuid.as_deref().unwrap_or("");
-        if matches!(entry.entry_type, EntryType::User)
-            && !is_tool_result(entry)
-            && !entry_uuid.is_empty()
-            && !used.contains(entry_uuid)
-        {
-            // Search for an assistant, stopping at the next genuine user entry.
-            let assistant = relevant[i + 1..]
-                .iter()
-                .take_while(|e| !matches!(e.entry_type, EntryType::User) || is_tool_result(e))
-                .find(|a| {
-                    matches!(a.entry_type, EntryType::Assistant)
-                        && a.uuid.as_deref().is_some_and(|u| !used.contains(u))
-                });
-
-            if let Some(assistant) = assistant {
-                let tool_results = collect_tool_result_entries(&tool_results_by_parent, assistant);
-                turns.push(build_turn(entry, assistant, tool_results));
-                used.insert(entry_uuid);
-                if let Some(ref a_uuid) = assistant.uuid {
-                    used.insert(a_uuid.as_str());
-                }
-                for tr in tool_results {
-                    if let Some(ref u) = tr.uuid {
-                        used.insert(u.as_str());
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-
-    turns.sort_by_key(|t| t.timestamp);
-    turns
+    calls
 }
 
-/// Build a single [`ConversationTurn`] from a user entry and its assistant reply.
-///
-/// `tool_result_entries` are user entries that carry `tool_use_result` for the
-/// assistant's `tool_use` blocks (collected by the caller from subsequent entries).
-fn build_turn(
-    user: &SessionEntry,
-    assistant: &SessionEntry,
-    tool_result_entries: &[&SessionEntry],
-) -> ConversationTurn {
+/// Build a [`ConversationTurn`] from a prompt and the assistant entry that answers it; its
+/// calls are filled in by [`pair_calls`].
+fn build_turn(user: &SessionEntry, assistant: &SessionEntry) -> ConversationTurn {
     let user_text = extract_text(user);
     let assistant_text = extract_text(assistant);
-    let tool_calls = extract_tool_calls(assistant, tool_result_entries);
 
     let timestamp = user
         .timestamp
@@ -306,29 +396,9 @@ fn build_turn(
         timestamp,
         user_text,
         assistant_text,
-        tool_calls,
+        tool_calls: Vec::new(),
         uuid: user.uuid.clone().unwrap_or_default(),
     }
-}
-
-/// Look up the user entries that carry `tool_use_result` and whose `parent_uuid`
-/// points to the given assistant entry — the tool-result rows that follow an
-/// assistant's `tool_use` blocks in Claude Code JSONL.
-///
-/// O(1) lookup into the `tool_results_by_parent` index built once by
-/// [`reconstruct_turns`] (#406), replacing the former per-call O(n) scan. Slice
-/// order within each group is preserved by the index, so positional pairing in
-/// [`extract_tool_calls`] is unchanged.
-fn collect_tool_result_entries<'a, 'b>(
-    tool_results_by_parent: &'b HashMap<&str, Vec<&'a SessionEntry>>,
-    assistant: &SessionEntry,
-) -> &'b [&'a SessionEntry] {
-    let Some(ref assistant_uuid) = assistant.uuid else {
-        return &[];
-    };
-    tool_results_by_parent
-        .get(assistant_uuid.as_str())
-        .map_or(&[], Vec::as_slice)
 }
 
 /// Extract plain text from an entry's message content blocks.
@@ -351,73 +421,6 @@ fn extract_text(entry: &SessionEntry) -> String {
         }
     }
     parts.join("\n")
-}
-
-/// The raw `content` of `entry`'s first `tool_result` block, as sent: the parsed
-/// [`ContentBlock::ToolResult`] keeps only a lossy string of it.
-fn result_content(entry: &SessionEntry) -> Option<&serde_json::Value> {
-    entry
-        .message
-        .as_ref()?
-        .content
-        .as_ref()?
-        .as_array()?
-        .iter()
-        .find(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("tool_result"))?
-        .get("content")
-}
-
-/// Extract tool call records from the assistant's tool-use blocks, enriching
-/// them with tool-result data from corresponding user entries.
-///
-/// In Claude Code JSONL, `tool_use_result` lives on user rows that follow
-/// the assistant's `tool_use` blocks. Each user row carries the result for
-/// one tool invocation. We collect results from `tool_result_entries` (user
-/// entries that carry `tool_use_result`) and pair them positionally with
-/// the assistant's tool-use blocks.
-fn extract_tool_calls(
-    assistant: &SessionEntry,
-    tool_result_entries: &[&SessionEntry],
-) -> Vec<ToolCallRecord> {
-    let Some(ref msg) = assistant.message else {
-        return Vec::new();
-    };
-    let Some(ref content) = msg.content else {
-        return Vec::new();
-    };
-
-    let blocks = super::parse::parse_content_blocks(content);
-    let mut calls: Vec<ToolCallRecord> = Vec::new();
-
-    for block in blocks {
-        if let ContentBlock::ToolUse { name, input } = block {
-            calls.push(ToolCallRecord {
-                tool_name: name,
-                input,
-                stdout: None,
-                stderr: None,
-                is_error: false,
-                interrupted: false,
-            });
-        }
-    }
-
-    // Pair tool results positionally: the i-th tool_result_entry corresponds
-    // to the i-th tool_use block in the assistant's message.
-    for (i, result_entry) in tool_result_entries.iter().enumerate() {
-        if i >= calls.len() {
-            break;
-        }
-        if let Some(ref result) = result_entry.tool_use_result {
-            calls[i].stdout.clone_from(&result.stdout);
-            calls[i].stderr.clone_from(&result.stderr);
-            calls[i].is_error = result.is_error.unwrap_or(false);
-            calls[i].interrupted = result.interrupted
-                || result_content(result_entry).is_some_and(records_an_interrupt);
-        }
-    }
-
-    calls
 }
 
 // ---------------------------------------------------------------------------
@@ -860,6 +863,78 @@ mod tests {
         }
     }
 
+    /// Every call of the reference transcript pairs with its result by id,
+    /// including across the assistant rows linked under each prompt.
+    #[test]
+    fn the_reference_transcript_pairs_every_call_by_id() {
+        fn turn_at<'t>(
+            line: usize,
+            lines: &[String],
+            turns: &'t [ConversationTurn],
+        ) -> &'t ConversationTurn {
+            let text = &lines[line - 1];
+            let row: serde_json::Value = serde_json::from_str(text).unwrap();
+            let uuid = row["uuid"].as_str().unwrap();
+            turns
+                .iter()
+                .find(|t| t.uuid == uuid)
+                .unwrap_or_else(|| panic!("no turn for line {line} uuid {uuid}"))
+        }
+
+        fn calls_at(
+            line: usize,
+            lines: &[String],
+            turns: &[ConversationTurn],
+        ) -> Vec<(String, bool)> {
+            turn_at(line, lines, turns)
+                .tool_calls
+                .iter()
+                .map(|c| (c.tool_name.clone(), c.interrupted))
+                .collect()
+        }
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../memory-engine-mcp/tests/fixtures/claude-code-transcripts/-work-fixture-p/",
+            "52c6c7b7-c890-43ec-81a5-a1cf99d3cc84.jsonl"
+        );
+        let bytes = std::fs::read(path).unwrap();
+        let (entries, _) = parse_session_file(bytes.as_slice(), 0, 0);
+        let turns = reconstruct_turns(&entries);
+        assert_eq!(turns.len(), 8);
+
+        let lines: Vec<String> = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+
+        assert_eq!(
+            calls_at(2, &lines, &turns),
+            vec![
+                ("Bash".into(), false),
+                ("Read".into(), false),
+                ("Read".into(), false),
+                ("mcp__me__recall".into(), false)
+            ]
+        );
+        let first = turn_at(2, &lines, &turns);
+        assert_eq!(
+            first.tool_calls[1].stdout.as_deref(),
+            Some("Error: File does not exist.")
+        );
+
+        assert_eq!(calls_at(18, &lines, &turns), vec![("Bash".into(), true)]);
+        assert_eq!(calls_at(22, &lines, &turns), vec![("Grep".into(), false)]);
+        assert_eq!(calls_at(25, &lines, &turns), Vec::<(String, bool)>::new());
+        assert_eq!(calls_at(27, &lines, &turns), Vec::<(String, bool)>::new());
+        assert_eq!(calls_at(34, &lines, &turns), Vec::<(String, bool)>::new());
+        assert_eq!(calls_at(43, &lines, &turns), vec![("Task".into(), false)]);
+        assert_eq!(calls_at(47, &lines, &turns), vec![("Bash".into(), false)]);
+        let last = turn_at(47, &lines, &turns);
+        assert_eq!(last.tool_calls[0].stdout, None);
+    }
+
     #[test]
     fn reconstruct_interrupted_false_by_default() {
         let entries = vec![
@@ -872,12 +947,9 @@ mod tests {
         assert!(!turns[0].tool_calls[0].interrupted);
     }
 
+    /// Results pair by `tool_use_id`, not position (#1159).
     #[test]
-    fn reconstruct_pairs_multiple_tool_results_in_order() {
-        // #406 regression guard: the O(n) `tool_results_by_parent` index must
-        // preserve slice order WITHIN a parent group, so two tool-result rows
-        // pair POSITIONALLY with the assistant's two tool_use blocks (1st→1st,
-        // 2nd→2nd). A HashMap that lost intra-group order would mis-pair them.
+    fn reconstruct_pairs_results_by_tool_use_id() {
         let assistant = SessionEntry {
             entry_type: EntryType::Assistant,
             session_id: Some("sess-1".into()),
@@ -901,8 +973,8 @@ mod tests {
         let entries = vec![
             user_entry("u1", "", "do two things", 100),
             assistant,
-            user_with_tool_result("u2", "a1", "t-first", Some("out-first"), None, false, 102),
-            user_with_tool_result("u3", "a1", "t-second", Some("out-second"), None, false, 103),
+            user_with_tool_result("u2", "a1", "t-second", Some("out-second"), None, false, 102),
+            user_with_tool_result("u3", "a1", "t-first", Some("out-first"), None, false, 103),
         ];
         let turns = reconstruct_turns(&entries);
         assert_eq!(turns.len(), 1);
@@ -928,6 +1000,49 @@ mod tests {
         let turns = reconstruct_turns(&entries);
         assert_eq!(turns.len(), 1, "the valid later assistant must still pair");
         assert!(turns[0].assistant_text.contains("the real reply"));
+    }
+
+    /// #406: a quadratic or recursive walk of hostile link graphs fails it.
+    #[test]
+    fn reconstruct_turns_stays_linear_on_hostile_links() {
+        use std::time::{Duration, Instant};
+
+        // 100_000 assistant rows all sharing one uuid and one parent.
+        let mut dup_entries: Vec<SessionEntry> = vec![user_entry("u0", "", "prompt", 0)];
+        for i in 0..100_000_i64 {
+            dup_entries.push(assistant_with_tool("dup", "u0", "", "Bash", i));
+        }
+        let start = Instant::now();
+        let _ = reconstruct_turns(&dup_entries);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "duplicate-uuid fan-out must stay linear"
+        );
+
+        // A 100_000-deep chain: prompt, then assistant/tool-result rows linked one by one.
+        let mut chain: Vec<SessionEntry> = vec![user_entry("p0", "", "prompt", 0)];
+        let mut prev = "p0".to_string();
+        for i in 0..50_000_i64 {
+            let a = format!("a{i}");
+            let r = format!("r{i}");
+            chain.push(assistant_with_tool(&a, &prev, "", "Bash", i));
+            chain.push(user_with_tool_result(
+                &r,
+                &a,
+                &format!("toolu_a{i}"),
+                Some("ok"),
+                None,
+                false,
+                i,
+            ));
+            prev = r;
+        }
+        let start = Instant::now();
+        let _ = reconstruct_turns(&chain);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "a 100_000-deep parent chain must stay linear"
+        );
     }
 
     // -- keyword_prefilter tests --

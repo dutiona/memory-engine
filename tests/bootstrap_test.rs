@@ -96,6 +96,10 @@ async fn bootstrap_success_session() {
         "should classify as success or indeterminate"
     );
     assert_eq!(report.events_ingested, 1, "one marker event per session");
+    assert_eq!(
+        report.outcome_counts.success, 1,
+        "the test and commit calls make it a success"
+    );
 }
 
 #[tokio::test]
@@ -189,6 +193,10 @@ async fn bootstrap_failure_session() {
     assert_eq!(report.sessions_processed, 1);
     assert!(report.entries_parsed > 0);
     assert_eq!(report.events_ingested, 1);
+    assert_eq!(
+        report.outcome_counts.failure, 1,
+        "three equal error stderrs make it a failure"
+    );
 }
 
 #[tokio::test]

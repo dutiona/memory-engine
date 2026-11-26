@@ -122,8 +122,8 @@ pub struct ToolUseResult {
 
 /// Deserialize a `toolUseResult` of any JSON shape into an `Option<ToolUseResult>`.
 ///
-/// Every non-null value is `Some`: a `None` would turn a tool-result row into a
-/// prompt and shift `extract_tool_calls`' positional pairing. An object keeps
+/// Every non-null value is `Some`: a `None` would make a result row that carries
+/// no `tool_result` block a prompt. An object keeps
 /// its fields when they are typed (a string `stdout`/`stderr`, a bool `isError`;
 /// `interrupted` is [`records_an_interrupt`] of the whole value); a wrong-typed
 /// field is dropped, never an error. A string becomes `stdout`; any other value
@@ -166,6 +166,8 @@ fn tool_use_result<'de, D: serde::Deserializer<'de>>(
 pub enum ContentBlock {
     Text(String),
     ToolUse {
+        /// The block's `id`, which the `tool_result` answering it names (#1159).
+        id: Option<String>,
         name: String,
         input: serde_json::Value,
     },
@@ -500,7 +502,11 @@ fn parse_single_block(obj: &serde_json::Value) -> ContentBlock {
                 .unwrap_or("")
                 .to_owned();
             let input = obj.get("input").cloned().unwrap_or(serde_json::Value::Null);
-            ContentBlock::ToolUse { name, input }
+            let id = obj
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            ContentBlock::ToolUse { id, name, input }
         }
         "tool_result" => {
             let content = match obj.get("content") {
@@ -810,7 +816,7 @@ mod tests {
         let blocks = parse_content_blocks(&content);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
-            ContentBlock::ToolUse { name, input } => {
+            ContentBlock::ToolUse { name, input, .. } => {
                 assert_eq!(name, "Read");
                 assert_eq!(input["path"], "/tmp");
             }

@@ -169,7 +169,7 @@ Setting `skip_existing: false` disables this check and allows duplicate imports 
 The bootstrap pipeline runs in five stages:
 
 1. **Parse** -- Read JSONL entries from the session log. Malformed lines are skipped with a `tracing::warn`.
-2. **Reconstruct** -- Pair user and assistant entries into `ConversationTurn`s using UUID linkage with sequential fallback. Noise entries (progress, queue operations, file history snapshots) are filtered out.
+2. **Reconstruct** -- A turn is a prompt, its first assistant entry (by UUID linkage, with sequential fallback) and every entry linked beneath it up to the next prompt; each `tool_result` answers the call its `tool_use_id` names, the backfill reader's rule (#1159). Noise entries (progress, queue operations, file history snapshots) make no prompt.
 3. **Classify** -- Determine the session outcome (Success, Failure, Indeterminate) from heuristic signals: git commits, passing tests, error loops, interruptions, and user sentiment.
 4. **Filter** -- Apply keyword pre-filter to surface candidate episodes in four categories: Bug, Decision, Convention, and Learning.
 5. **Extract** -- Pass each candidate episode to the `SessionExtractor` to produce facts, then ingest them with backdated `t_created` and `last_accessed` timestamps for correct Ebbinghaus decay.
