@@ -255,7 +255,7 @@ and the rules do not fall through to the next candidate. Label: every byte outsi
 same relative path on two machines is two projects, and nothing joins two keys (ADR-0021 §8).
 
 Git reports resolved paths, so a dev root configured through a symlink matches no root, and remote-less projects under
-it are keyless.
+it are keyless: configure the dev root as `pwd -P` prints it.
 
 ### Tools
 
