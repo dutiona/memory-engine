@@ -8,6 +8,7 @@ This pipeline is the embedded library's, run on a store no server holds (`memory
 
 ```rust
 # use std::io::Cursor;
+# use std::sync::Arc;
 # use memory_engine::{MemoryEngine, MemoryError};
 # use memory_engine::bootstrap::{KeywordExtractor, BootstrapConfig};
 # use memory_engine::EmbeddingProvider;
@@ -32,11 +33,12 @@ let jsonl_data = std::fs::read("~/.claude/projects/.../session.jsonl")?;
 let reader = Cursor::new(jsonl_data);
 let report = engine.bootstrap_session(
     reader,
-    &MyEmbedder,
-    &extractor,
+    Arc::new(MyEmbedder),
+    Arc::new(extractor),
     &config,
     None, // no auto-pin classifier
-)?;
+)
+.await?;
 
 println!("Processed {} sessions, created {} facts",
     report.sessions_processed, report.facts_created);
@@ -46,6 +48,7 @@ To bootstrap an entire directory of session logs at once:
 
 ```rust
 # use std::path::Path;
+# use std::sync::Arc;
 # use memory_engine::{MemoryEngine, MemoryError};
 # use memory_engine::bootstrap::{KeywordExtractor, BootstrapConfig};
 # use memory_engine::EmbeddingProvider;
@@ -66,14 +69,15 @@ To bootstrap an entire directory of session logs at once:
 # let config = BootstrapConfig::default();
 let report = engine.bootstrap_directory(
     Path::new("~/.claude/projects/my-project/sessions/"),
-    &MyEmbedder,
-    &extractor,
+    Arc::new(MyEmbedder),
+    Arc::new(extractor),
     &config,
     None,
-)?;
+)
+.await?;
 ```
 
-`bootstrap_directory` discovers top-level `*.jsonl` files (skipping subdirectories like `subagents/`) and processes each independently. Individual session failures are logged and skipped -- they do not abort the batch.
+`bootstrap_directory` discovers `*.jsonl` files at any depth (skipping subdirectories like `subagents/`) and processes each independently. Individual session failures are logged and skipped -- they do not abort the batch.
 
 ## Writing a custom `SessionExtractor`
 
@@ -114,18 +118,19 @@ The extractor receives a `CandidateEpisode` (pre-filtered turns with matched key
 
 ```rust
 # use memory_engine::bootstrap::BootstrapConfig;
-let config = BootstrapConfig {
-    scope: Some("project:my-app".into()),
-    max_turns: 100,
-    skip_existing: true, // default
-};
+let mut config = BootstrapConfig::default();
+config.scope = Some("project:my-app".into());
+config.max_turns = 100;
 ```
 
-| Field           | Type             | Default | Description                                                                                                 |
-| --------------- | ---------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
-| `scope`         | `Option<String>` | `None`  | Scope path for ingested facts (e.g., `"project:my-app"`). `None` uses the root scope.                       |
-| `max_turns`     | `usize`          | `0`     | Maximum turns to process per session. `0` means no limit.                                                   |
-| `skip_existing` | `bool`           | `true`  | Skip sessions that have already been bootstrapped (idempotency). Set to `false` to allow duplicate imports. |
+| Field               | Type             | Default                                   | Description                                                                                                 |
+| ------------------- | ---------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `scope`             | `Option<String>` | `None`                                    | Scope path for ingested facts (e.g., `"project:my-app"`). `None` uses the root scope.                       |
+| `max_turns`         | `usize`          | `0`                                       | Maximum turns to process per session. `0` means no limit.                                                   |
+| `skip_existing`     | `bool`           | `true`                                    | Skip sessions that have already been bootstrapped (idempotency). Set to `false` to allow duplicate imports. |
+| `denylist`          | `Vec<String>`    | `Vec::new()`                              | Author-seeded known-secret literals (see `load_secret_denylist`); augments the signature detectors.         |
+| `max_session_bytes` | `u64`            | `DEFAULT_MAX_SESSION_BYTES` (256 MiB)     | Maximum bytes read from a single session stream before parsing stops. `0` means no limit.                   |
+| `max_entries`       | `usize`          | `DEFAULT_MAX_ENTRIES` (1,000,000)         | Maximum parsed entries retained from a single session before parsing stops. `0` means no limit.            |
 
 ## Reading reports
 
@@ -142,6 +147,9 @@ let config = BootstrapConfig {
 | `facts_created`       | `usize`          | Facts inserted into the engine.                                   |
 | `facts_reinforced`    | `usize`          | Active facts with the same content reinforced instead of duplicated. |
 | `facts_blocked`       | `usize`          | Facts not written: a forget's tombstone blocks their content.     |
+| `secrets_redacted`    | `usize`          | Secret/PII findings scrubbed before any content reaches an extractor, the embedder, or storage. |
+| `memory_files_parsed` | `usize`          | Native `.md` memory files parsed (the `--memory-dir` path only).  |
+| `memory_files_skipped`| `usize`          | Native `.md` memory files skipped — unreadable, the `MEMORY.md` index, or no parseable body (the `--memory-dir` path only). |
 | `events_ingested`     | `usize`          | Marker events inserted (one per session).                         |
 | `outcome_counts`      | `OutcomeCounts`  | Breakdown by session outcome (success/failure/indeterminate).     |
 | `category_counts`     | `CategoryCounts` | Breakdown by episode category (bug/decision/convention/learning). |
