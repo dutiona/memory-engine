@@ -169,11 +169,12 @@ The server's `POST /lifecycle/events` route applies one neutral record per harne
 
 | Method | Signature | Description |
 | ------ | --------- | ----------- |
-| `record_lifecycle_event` | `async (&self, delivery: &Delivery, body: Result<NeutralRecord, BodyFault>, denylist: &[String]) -> Result<Recorded>` | Apply one delivery under the capture contract, its content redacted with `denylist` too (never an identifier; `&[]` for signatures only, #1121), in one transaction with its `(machine, event ID)` receipt. A held key answers `Duplicate` or `Collision` and writes nothing; an unparseable body (`BodyFault::Parse`) is held as metadata only (`Quarantined`); an unmappable one, a refused identifier or a record off the engine's invariants is `Refused` and leaves no key; otherwise the event, its activity, the memory a main final message or compaction summary becomes (queued for its vector) and its segment step commit together (`Stored`). `ReadOnly` on a read-only engine; `Storage(Unavailable)` when the store cannot take the write now. |
+| `record_lifecycle_event` | `async (&self, delivery: &Delivery, body: Result<NeutralRecord, BodyFault>, denylist: &[String]) -> Result<Recorded>` | Apply one delivery under the capture contract, its content redacted with `denylist` too (never an identifier; `&[]` for signatures only, #1121), in one transaction with its `(machine, event ID)` receipt. A held key answers `Duplicate` or `Collision` and writes nothing; an unparseable body (`BodyFault::Parse`) is held as metadata only (`Quarantined`); an unmappable one, a refused identifier or a record off the engine's invariants is `Refused` and leaves no key; a record the capture contract does not keep (ADR-0020 §6, a task notification) is `Skipped` with its reason, leaves no key, and the store raises that reason's skip total (#1171); otherwise the event, its activity, the memory a main final message or compaction summary becomes (queued for its vector) and its segment step commit together (`Stored`). `ReadOnly` on a read-only engine; `Storage(Unavailable)` when the store cannot take the write now. |
 | `end_idle_segments` | `async (&self, now: DateTime<Utc>) -> Result<usize>` | End every open segment whose session the server has heard nothing of for 30 minutes before `now`; returns how many ended. |
 | `read_quarantined` | `(db: &Path) -> Result<u64>` (free function) | The quarantine records held, through one read-only SQLite connection: builds no engine, takes no lock, never migrates. |
+| `read_capture_skips` | `(db: &Path) -> Result<BTreeMap<String, u64>>` (free function) | The capture skips held, by reason (#1171), read the same way: store-wide, and it survives `erase --machine`; it counts skipped deliveries. |
 
-`types::lifecycle` holds `NeutralRecord`, `Content`, `Actor`, `Kind`, `Delivery`, `Recorded`, `BodyFault`, the order key
+`types::lifecycle` holds `NeutralRecord`, `Content`, `Actor`, `Kind`, `Delivery`, `Recorded`, `BodyFault`, `TASK_NOTIFICATION` (the capture contract's one skip reason, #1171), the order key
 `OrderKey` and section 5's rule as a pure function, `step`; `LIFECYCLE_BODY_BYTES` (16 MiB) is the one size bound a
 captured record meets. The port is the bounded trait `me_storage::Lifecycle`; Postgres does not implement it.
 
@@ -303,7 +304,7 @@ The crate root (`lib.rs`) re-exports these items for convenience:
 - **Traits**: `ConflictArbiter`, `ConflictResolution`, `ConsolidationConfig`, `ConsolidationStats`, `CrudDecision`, `CycleCtx`, `DeltaProposer`, `DreamCtx`, `DreamCycle`, `EmbeddingProvider`, `InsightStream`, `PersistenceClassifier`, `Reranker`, `SummarizableContent`, `SummaryGenerator`
 - **Types**: all public types from the `types` module (`Event`, `Fact`, `Edge`, `Summary`, `NewEvent`, `NewFact`, `NewEdge`, `NewSummary`, `EventType`, `FactType`, `ConsolidationLevel`, `ScopeQuery`, `ScopeNode`, `AddFactOptions`)
 - **Embedding queue** (#1021): `Backoff`, `Settled`, `read_embed_queue_status`, and the queue types `PendingEmbedding`, `NextEmbedding`, `EmbedQueueStatus`; `EmbedderError` beside `MemoryError`
-- **Lifecycle** (#1025): `read_quarantined` and `LIFECYCLE_BODY_BYTES`; the record types are `memory_engine::types::lifecycle`
+- **Lifecycle** (#1025): `read_quarantined`, `read_capture_skips` (#1171) and `LIFECYCLE_BODY_BYTES`; the record types are `memory_engine::types::lifecycle`
 - **Backfill** (#1026): `BACKFILL_BODY_BYTES`; the import types are `memory_engine::types::lifecycle`, and
   `read_json_lines`, `memory_item`, `parse_timestamp` and `records_an_interrupt` are in `memory_engine::bootstrap`
 

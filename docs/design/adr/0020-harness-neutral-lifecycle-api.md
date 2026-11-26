@@ -24,6 +24,21 @@ This ADR amends it. The lifecycle API is harness-neutral: one neutral core, with
 
 What survives of ME-D6 is its warning against abstractions with one user. Only Claude Code is implemented, and the adapter boundary is a `match`, not a trait (§1).
 
+### The #1171 amendment
+
+A capture rule was missing: Claude Code fires `UserPromptSubmit` for its own background-task message
+(`<task-notification>` as the prompt's first bytes), and the backfill reader mapped the same transcript rows to
+`prompt`. Both were stored as if the user had typed them. The rule now lives in one place, the capture contract of
+§6, applied to live deliveries and to imports alike.
+
+The skip is not a refusal. It answers **204** with `ME-Event-Outcome: skipped`, writes no event and holds no
+receipt, so a delivery whose acknowledgement was lost is skipped again and counted again: the counter in `status`
+counts *skipped deliveries*, not distinct notifications. Exact per-key counting would need a column on
+`lifecycle_receipts`, a table rebuild and a schema bump on the table every delivery writes; that cost is refused
+for a counter's precision. The turn such a prompt starts is unchanged: its `Stop` and final-message fact are kept,
+and since a skip writes no event it refreshes no segment's receipt time, so a notification-only stretch longer
+than §5's idle threshold is a gap like any other silence.
+
 ### Sources
 
 Facts about Claude Code come from its hooks reference, <https://code.claude.com/docs/en/hooks>, read on 2026-11-16 with Claude Code 2.1.325 installed. A few facts were observed on that version in a headless session with a probe plugin, because the documentation does not settle them; each is marked "observed" where it is used (§3, §12, Alternatives considered).
@@ -87,13 +102,13 @@ A neutral record has:
 | `ME-Project-Branch` | no | The checked-out branch of the project directory; absent when detached. Provenance only |
 | `ME-Outbox-Queued` | no, context read only | 1 to 6 decimal digits: the events waiting in the client's queue, the read's own event excluded |
 | `ME-Outbox-Parked` | no, context read only | 1 to 6 decimal digits: the events in the client's `outbox/rejected/` |
-| `ME-Event-Outcome` | response, on every 204 | `stored`, `duplicate` or `quarantined` |
+| `ME-Event-Outcome` | response, on every 204 | `stored`, `duplicate`, `quarantined` or `skipped` |
 
 - **The time format** is what `date -u +%Y-%m-%dT%H:%M:%SZ` prints on both GNU and BSD. BSD `date` has no `%N`, so a client timestamp has second resolution and `ME-Event-Seq` breaks ties.
 - **The version is recorded as what it is.** No hook input field and no documented environment variable carries Claude Code's own version, and the client never parses JSON. The client therefore sends its own version, under a header named for it. The server stores `client_version` as sent, and leaves `harness_version` empty until an adapter can read one from a body.
 - **No header names the machine.** Identity comes from the token (§4).
 - **A fact that does not exist has no header**: no such remote, not a git tree, a detached head.
-- **`ME-Event-Outcome`** makes "stored once" and "quarantined" observable at the HTTP seam the tests drive. A client ignores it.
+- **`ME-Event-Outcome`** makes "stored once", "quarantined" and "skipped" observable at the HTTP seam the tests drive. A client ignores it.
 - **The two outbox counts are optional.** An absent or malformed count is read as zero; it never fails the read.
 - **`git remote get-url`** is the one way to read a remote: it applies the user's URL rewrites, so every channel sends the same URL for one checkout.
 - **Limits.** Each header value is at most 4,096 bytes. The server reads the body as raw bytes and ignores `Content-Type`.
@@ -118,7 +133,7 @@ A harness can also give the model its tools over MCP. Requests to memory-engine 
 
 | Status | The server sends it when | The client |
 |---|---|---|
-| 204 | The event is committed: stored, a duplicate (same key, same body), or quarantined | removes the event |
+| 204 | The event is committed, or deliberately not kept: stored, a duplicate (same key, same body), quarantined, or skipped (§6) | removes the event |
 | 200 | Context route only: the hook-output JSON of §10 | prints the body |
 | 400 | A required header is missing or off its grammar | parks the event |
 | 401 | No token, a malformed one, or one whose hash is not in the file | holds everything and reports it |
@@ -137,7 +152,7 @@ A harness can also give the model its tools over MCP. Requests to memory-engine 
 - **16 MiB** is well above the largest hook input expected (a tool call that writes a large file) and bounds what one request holds in memory.
 - **No event-specific fault ever gets a 5xx.** A retry stops the queue (§12), so an event that fails every time must not hold every later one. An error the server cannot classify while it applies one event is answered 422, never left to become a 500. A 5xx always means "the same request will work later".
 - **409** turns an event-ID collision into a parked event. Without it, a reused ID would be acknowledged as a duplicate and deleted.
-- **Order of the checks, on the event route.** The server checks the envelope (400), then the size (413), then that it knows the harness (422), then the key (a duplicate, or 409), then parses the body (quarantine), then maps and applies it (422). A second upload of a quarantined body is therefore a `duplicate`, and a reused ID with a body that does not parse is a 409, never a quarantine. The context route runs the envelope, size and harness checks, then answers 200 or 422; it never answers `duplicate` and never quarantines.
+- **Order of the checks, on the event route.** The server checks the envelope (400), then the size (413), then that it knows the harness (422), then the key (a duplicate, or 409), then parses the body (quarantine), then maps it (422) and applies it, answering `skipped` when §6 does not keep it. A second upload of a quarantined body is therefore a `duplicate`, and a reused ID with a body that does not parse is a 409, never a quarantine. The context route runs the envelope, size and harness checks, then answers 200 or 422; it never answers `duplicate` and never quarantines.
 - **To hold** is to stop the flush and leave every event queued. The user learns of it at the next session start, from the status line (§10); a capture hook itself prints nothing.
 - **On the context route no answer moves or removes a queued event.** The "client" column above is the event route's. On the context route the client prints the body of a 200 whose media type is `application/json`, with or without parameters, and otherwise prints its fallback line (§10): `token rejected` for a 401 or a 403, `unreachable` when there is no answer, `error` and the status for anything else. A session-start hook's plain output goes into the model's context, so nothing else is ever printed.
 - **The client never follows a redirect.**
@@ -235,7 +250,7 @@ stateDiagram-v2
 
 > Kept in full, after redaction: prompts, the agent's final messages, compaction summaries. Truncated to 512 characters, after redaction: tool inputs and tool results. The promise: known secret formats are redacted, and events that touch sensitive files become stubs. Arbitrary secrets such as unprefixed passwords are not guaranteed to be caught.
 
-Some activity is not captured at all, and the promise says nothing about it: a tool call rejected or cancelled before it runs, a tool call whose capture hook the user cancels, and a turn the user interrupts (§11).
+Some activity is not captured at all, and the promise says nothing about it: a tool call rejected or cancelled before it runs, a tool call whose capture hook the user cancels, a turn the user interrupts (§11), and a harness's own background-task notification, recognised by its start (§11 pins Claude Code's spelling). A prompt that begins with that marker is dropped, and the backfill reader checks the harness's own marker on the row (`origin.kind`) as well, since the live hook sends no such field.
 
 #### Rules
 
@@ -448,6 +463,12 @@ The actor is `subagent` when the hook is `SubagentStart` or `SubagentStop`, or w
 | `SessionEnd` | `session_end` | The reason |
 
 `PostToolUseFailure` is captured so that a failed tool call keeps its outcome.
+
+A `UserPromptSubmit` whose prompt begins with `<task-notification>` is the harness's own message for a finished
+background task, and §6 does not keep it. The spelling is undocumented and the hook input carries no marker, so the
+first bytes are the whole rule; `a_task_notification_is_not_a_capture` pins it (`crates/memory-engine/src/engine/lifecycle.rs`),
+and a transcript row the harness marked with `origin.kind: "task-notification"` is skipped by its reader under the
+same reason.
 
 The outcome records which hook fired. When the user interrupts a running tool, the reference describes two cases: the tool finishes and `PostToolUse` runs with ten seconds to complete, or the hooks are cancelled at once. `PostToolUseFailure` does not fire for a cancelled tool. A call whose capture hook was cancelled is not captured.
 
