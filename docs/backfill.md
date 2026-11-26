@@ -42,7 +42,9 @@ and it needs the store lock the running server holds.
 Send the file with `ME-Backfill-Mode: dry-run`. The token is read from its file into a header on standard input, never
 put on a command line; every `ME-Project-*` value but the dev root, and `ME-Backfill-Source`, is percent-encoded as
 ADR-0020 §3 says (each byte outside 0x21 to 0x7E, and `%`, `"` and `\`, as `%HH`). The dev root is sent as configured,
-never encoded: the server drops one that is not plain absolute ASCII ([Project facts](reference/mcp-server.md#project-facts-and-the-project-key)).
+never encoded: it must be an absolute path of bytes 0x21 to 0x7E with no `%`, `"` or `\`, or the server drops it
+([Project facts](reference/mcp-server.md#project-facts-and-the-project-key)), and an upload with no remote then files
+under the machine's bucket.
 
 ```sh
 printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -q -sS --noproxy '*' -H @- \
@@ -59,7 +61,8 @@ printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -q -sS --noprox
 ```
 
 `-q` keeps a `~/.curlrc` (a `verbose` line would print the `Authorization` header) out of the upload, and `--noproxy`
-keeps the token off a proxy, as the plugin's hook sends.
+sends it straight to the memory host, never through a proxy, as the plugin's hook does: a host whose only route out is a
+proxy cannot upload.
 
 A memory file is `ME-Backfill-Kind: memory-file` and carries the copy's modification time, which dates a memory with
 no frontmatter date and no date in its name: `-H "ME-Backfill-Mtime: $(date -u -r <file> +%Y-%m-%dT%H:%M:%SZ)"` with
