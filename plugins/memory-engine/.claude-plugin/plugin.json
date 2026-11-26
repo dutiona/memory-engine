@@ -1,6 +1,6 @@
 {
   "name": "memory-engine",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Queue every Claude Code lifecycle event in a local outbox and deliver it to a memory-engine server, and give the model memory-engine and knowledge-base tools over MCP",
   "author": { "name": "dutiona" },
   "repository": "https://github.com/dutiona/memory-engine",

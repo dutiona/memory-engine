@@ -305,8 +305,8 @@ assert h["ME-Event-Id"] == id
 assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", id)
 assert h["ME-Event-Time"] == time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(m.group(1)))), h
 assert h["ME-Event-Seq"] == m.group(2)
-assert h["ME-Harness"] == "claude-code" and h["ME-Client-Version"] == "0.1.0", h
-' "$id" "$O/$id/headers" || fail "envelope off ADR-0020's grammar"
+assert h["ME-Harness"] == "claude-code" and h["ME-Client-Version"] == sys.argv[3], h
+' "$id" "$O/$id/headers" "$(sed -n 's/^ME_VERSION=//p' "$PLUGIN/bin/me-hook")" || fail "envelope off ADR-0020's grammar"
 }
 
 t_order() {
