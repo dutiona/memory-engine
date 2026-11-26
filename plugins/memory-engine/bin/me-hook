@@ -27,7 +27,7 @@ O=$S/outbox
 TOKEN=$H/.config/memory-engine/secrets/token
 
 usage() {
-	printf 'usage: me-hook capture|session-start|flush\n' >&2
+	printf 'usage: me-hook capture|session-start|flush|headers me|kb\n' >&2
 	exit 1
 }
 
@@ -243,6 +243,49 @@ capture() {
 	exit 0
 }
 
+# ---------------------------------------------------------------- the MCP channel (ADR-0020 §12)
+
+# read_token: TOK := the token file's first line, only when it has ADR-0020 §4's shape. The shape is what makes
+# printing the token into the helper's JSON safe.
+read_token() {
+	read_line "$TOKEN" || return 1
+	case $RL in me_*) ;; *) return 1 ;; esac
+	_b=${RL#me_}
+	[ "${#_b}" -eq 32 ] || return 1
+	case $_b in *[!0-9A-Za-z]*) return 1 ;; esac
+	TOK=$RL
+}
+
+# headers me|kb: Claude Code's headersHelper for the plugin's two MCP servers. It prints one JSON object of string
+# pairs and writes nothing. Every value is printable ASCII without " or \ (the token's shape, constants, pct), so
+# nothing needs escaping. The project directory comes only from standard input, as exactly one line: the
+# here-document's ${CLAUDE_PROJECT_DIR}. The dev root is never printed here: the manifest's static header carries it,
+# and a dynamic header of the same name would override it.
+headers() {
+	read_token || {
+		printf 'me-hook: no usable token file\n' >&2
+		exit 1
+	}
+	if [ "$1" = kb ]; then
+		printf '{"Authorization":"Bearer %s"}\n' "$TOK" || exit 1
+		exit 0
+	fi
+	_p= _x=
+	if IFS= read -r _p; then
+		if IFS= read -r _x || [ -n "$_x" ]; then _p=; fi
+	else
+		_p=
+	fi
+	DEV=
+	facts "$_p"
+	{
+		printf '{"Authorization":"Bearer %s","ME-Harness":"claude-code","ME-Client-Version":"%s"' "$TOK" "$ME_VERSION" &&
+			fact_lines ',"%s":"%s"' &&
+			printf '}\n'
+	} || exit 1
+	exit 0
+}
+
 # ---------------------------------------------------------------- delivery (ADR-0020 §3, §12)
 
 # read_line FILE: RL := its first line, with or without a final line feed; fails when that line is missing or empty.
@@ -389,5 +432,8 @@ capture | session-start)
 	capture
 	;;
 flush) flush ;;
+headers)
+	case ${2-} in me | kb) headers "$2" ;; *) usage ;; esac
+	;;
 *) usage ;;
 esac

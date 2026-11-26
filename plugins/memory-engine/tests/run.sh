@@ -1189,6 +1189,169 @@ t_session_start_token() {
 	eq "$(count)" 1 "events"
 }
 
+# ---------------------------------------------------------------- the MCP channel's helper (#1028)
+
+# helper MODE < input: `me-hook headers MODE` as Claude Code runs a plugin's headersHelper: from the plugin root, on
+# the restricted PATH, with CLAUDE_PLUGIN_ROOT set. Its status is the caller's; stdout in $C/hout, stderr in $C/herr.
+helper() {
+	(cd "$C/plugin" && CLAUDE_PLUGIN_ROOT=$C/plugin PATH=$RB /bin/sh "$HB" headers "$1") >"$C/hout" 2>"$C/herr"
+}
+
+# helper_json: $C/hout as "Name: value" lines, after checking it is one JSON object of strings on one line.
+helper_json() {
+	py '
+import json, sys
+raw = open(sys.argv[1], "rb").read()
+assert raw.endswith(b"\n") and raw.count(b"\n") == 1, raw
+d = json.loads(raw)
+assert isinstance(d, dict) and all(isinstance(v, str) for v in d.values()), d
+for k, v in d.items():
+    print(k + ": " + v)
+' "$C/hout" || fail "headers output is not one JSON object of strings: $(cat "$C/hout")"
+}
+
+# helper_facts DIR: the ME-Project-* pairs `headers me` prints for DIR on its standard input.
+helper_facts() {
+	printf '%s\n' "$1" | helper me || fail "headers me exited $?: $(cat "$C/herr")"
+	helper_json | while IFS= read -r _h; do
+		case $_h in ME-Project-*) printf '%s\n' "$_h" ;; esac
+	done
+}
+
+t_headers_match_capture() {
+	token
+	mkrepo "$C/r"
+	git -C "$C/r" checkout -q -b feat/x
+	git -C "$C/r" remote add upstream git@example.org:up/proj.git
+	git -C "$C/r" remote add origin https://ci-user:not-a-secret@example.com/org/proj.git
+	git -C "$C/r" worktree add -q -b wt "$C/w"
+	mkdir -p "$C/r/a/b" "$C/real/plain"
+	ln -s "$C/real/plain" "$C/plainlink"
+	mkrepo "$C/d"
+	git -C "$C/d" checkout -q --detach
+	py 'import os, sys; os.makedirs(os.path.join(sys.argv[1], "enc", "x \x27\"%\\é日"))' "$C"
+	for d in "$C"/enc/*; do :; done
+	for dir in "$C/r" "$C/w" "$C/r/a/b" "$C/d" "$C/real/plain" "$C/plainlink" "$d"; do
+		want=$(facts_of "$dir")
+		[ -n "$want" ] || fail "no hook facts for $dir"
+		eq "$(helper_facts "$dir")" "$want" "helper facts for $dir"
+	done
+	! grep -q not-a-secret "$C/hout" || fail "userinfo reached the helper's output"
+}
+
+t_headers_json() {
+	token
+	mkrepo "$C/r"
+	git -C "$C/r" remote add upstream git@example.org:up/proj.git
+	git -C "$C/r" remote add origin https://example.com/org/proj.git
+	v=$(sed -n 's/^ME_VERSION=//p' "$PLUGIN/bin/me-hook")
+	printf '%s\n' "$C/r" | CLAUDE_PLUGIN_OPTION_DEV_ROOT=/x/dev CLAUDE_PLUGIN_OPTION_ME_URL=$URL helper me ||
+		fail "headers me exited $?"
+	eq "$(helper_json)" "Authorization: Bearer $TOKV
+ME-Harness: claude-code
+ME-Client-Version: $v
+ME-Project-Root: $(pct_oracle "$C/r")
+ME-Project-Upstream-Url: example.org:up/proj.git
+ME-Project-Origin-Url: https://example.com/org/proj.git
+ME-Project-Branch: main" "headers me"
+	[ ! -s "$C/herr" ] || fail "headers me wrote on stderr: $(cat "$C/herr")"
+}
+
+t_headers_stdin() {
+	token
+	mkrepo "$C/a"
+	mkrepo "$C/b"
+	v=$(sed -n 's/^ME_VERSION=//p' "$PLUGIN/bin/me-hook")
+	bare="Authorization: Bearer $TOKV
+ME-Harness: claude-code
+ME-Client-Version: $v"
+	CLAUDE_PROJECT_DIR=$C/a
+	export CLAUDE_PROJECT_DIR
+	for input in '' '\n' "$C/b\n$C/b\n" "$C/b" 'bin\n' "$C/missing\n" '${CLAUDE_PROJECT_DIR}\n'; do
+		printf "$input" | helper me || fail "headers me exited $? for [$input]"
+		eq "$(helper_json)" "$bare" "headers me for stdin [$input]"
+	done
+	eq "$(helper_facts "$C/b")" "ME-Project-Root: $(pct_oracle "$C/b")
+ME-Project-Branch: main" "stdin names the project, never the environment"
+}
+
+t_headers_bytes() {
+	token
+	py 'import os, sys; os.makedirs(os.path.join(sys.argv[1], "bytes", "s \x27\"%\\é日\t\x01z"))' "$C"
+	for d in "$C"/bytes/*; do :; done
+	eq "$(helper_facts "$d")" "ME-Project-Root: $(pct_oracle "$d")" "encoded root"
+}
+
+t_headers_token() {
+	mkdir -p "${TOKF%/*}"
+	helper me </dev/null && fail "headers me ran without a token file"
+	for bad in '' '\n' 'me_0000000000000000000000000000000\n' 'me_000000000000000000000000000000000\n' \
+		'me_0000000000000000000000000000000"\n' 'me_0000000000000000000000000000000\\\n' \
+		'me_00000000000000000000000000000000\r\n' 'xx_00000000000000000000000000000000\n' \
+		'me_0000000000000000000000000000000-\n'; do
+		printf "$bad" >"$TOKF"
+		for mode in me kb; do
+			if helper "$mode" </dev/null; then fail "headers $mode accepted token file [$bad]"; fi
+			[ ! -s "$C/hout" ] || fail "headers $mode printed for token file [$bad]: $(cat "$C/hout")"
+			eq "$(cat "$C/herr")" "me-hook: no usable token file" "stderr for token file [$bad]"
+		done
+	done
+	for good in "$TOKV" "$TOKV\n"; do
+		printf "$good" >"$TOKF"
+		helper kb </dev/null || fail "headers kb refused [$good]"
+		eq "$(helper_json)" "Authorization: Bearer $TOKV" "headers kb"
+	done
+	printf 'me_%s\n' 11111111111111111111111111111111 >"$TOKF"
+	helper kb </dev/null || fail "headers kb refused the rotated token"
+	eq "$(helper_json)" "Authorization: Bearer me_11111111111111111111111111111111" "a rotated token is read again"
+}
+
+t_headers_kb() {
+	token
+	mkrepo "$C/r"
+	rm "$RB/git"
+	printf '%s\n' "$C/r" | helper kb || fail "headers kb exited $?"
+	eq "$(cat "$C/hout")" "{\"Authorization\":\"Bearer $TOKV\"}" "headers kb"
+}
+
+t_headers_writes_nothing() {
+	token
+	mkrepo "$C/r"
+	for mode in me kb; do
+		printf '%s\n' "$C/r" | CLAUDE_PLUGIN_OPTION_ME_URL=$URL CLAUDE_PLUGIN_OPTION_DEV_ROOT=/x/dev helper "$mode" ||
+			fail "headers $mode exited $?"
+	done
+	settle
+	[ ! -e "$S" ] || fail "the helper wrote the state root"
+	[ ! -d "$FAKE_CURL_DIR/calls" ] || fail "the helper started a delivery"
+}
+
+# A repository's own git configuration runs no command for either channel: the facts use only rev-parse,
+# symbolic-ref and remote get-url.
+t_hostile_git_config() {
+	token
+	mkrepo "$C/r"
+	printf '#!/bin/sh\nexec /usr/bin/touch "%s/marker.$1"\n' "$C" >"$C/evil"
+	chmod 755 "$C/evil"
+	mkdir "$C/hooks"
+	for h in post-checkout reference-transaction post-index-change; do
+		printf '#!/bin/sh\n"%s/evil" hook-%s\n' "$C" "$h" >"$C/hooks/$h"
+		chmod 755 "$C/hooks/$h"
+	done
+	printf '[core]\n\tfsmonitor = %s/evil fsmonitor-inc\n' "$C" >"$C/inc.config"
+	git -C "$C/r" config core.fsmonitor "$C/evil fsmonitor"
+	git -C "$C/r" config core.pager "$C/evil pager"
+	git -C "$C/r" config core.hooksPath "$C/hooks"
+	git -C "$C/r" config core.sshCommand "$C/evil ssh"
+	git -C "$C/r" config credential.helper "!$C/evil credential"
+	git -C "$C/r" config include.path "$C/inc.config"
+	git -C "$C/r" remote add origin https://example.com/o/r.git
+	facts_of "$C/r" >/dev/null
+	helper_facts "$C/r" >/dev/null
+	set -- "$C"/marker.*
+	[ ! -e "$1" ] || fail "repository configuration ran a command: $*"
+}
+
 # ---------------------------------------------------------------- runner
 
 CASES=${CASES:-"
@@ -1203,6 +1366,8 @@ lock_live lock_dead lock_age lock_unreadable lock_stamp lock_killed lock_broken_
 release_race second_look no_second_look simultaneous prune
 stable_copy stable_copy_fails watcher_env_i watcher_no_plugin watcher_path no_root
 session_start_no_token session_start_empty_token session_start_token
+headers_match_capture headers_json headers_stdin headers_bytes headers_token headers_kb headers_writes_nothing
+hostile_git_config
 "}
 
 N=0
