@@ -16,12 +16,14 @@ drawn here, written to their files and never printed.
 import hashlib
 import json
 import os
+import queue
 import secrets
 import signal
 import socket
 import string
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -36,6 +38,7 @@ TOKEN_FILE = os.path.join(H, ".config", "memory-engine", "secrets", "token")
 HASHES = os.path.join(P, "tokens")
 MACHINE = CFG["machine"]
 PROCS = {}
+TURN_SECONDS = 300
 
 
 def draw_token():
@@ -171,8 +174,17 @@ def rotate():
     for s in servers():
         start(s)
     # What each server answers a bare POST /mcp with no token, the old one and the new one, after the rotation.
-    json.dump({s: [status(CFG[s + "_port"]), status(CFG[s + "_port"], old), status(CFG[s + "_port"], new)] for s in servers()},
-              open(os.path.join(OUT, "rotation.json"), "w"))
+    json.dump(
+        {
+            s: [
+                status(CFG[s + "_port"]),
+                status(CFG[s + "_port"], old),
+                status(CFG[s + "_port"], new),
+            ]
+            for s in servers()
+        },
+        open(os.path.join(OUT, "rotation.json"), "w"),
+    )
 
 
 def claude_env():
@@ -245,23 +257,48 @@ def session(argv, turns, stream_n):
         stdout=subprocess.PIPE,
         stderr=open(os.path.join(OUT, "streams", "%d.err" % stream_n), "w"),
         text=True,
+        start_new_session=True,
     )
+    PROCS["claude"] = proc
+    q = queue.Queue()
+
+    def read():
+        for raw in proc.stdout:
+            q.put(raw)
+        q.put(None)
+
+    threading.Thread(target=read, daemon=True).start()
     ok = True
+    timed_out = False
     for n, turn in turns:
         msg = {"type": "user", "message": {"role": "user", "content": turn["prompt"]}}
         proc.stdin.write(json.dumps(msg) + "\n")
         proc.stdin.flush()
         lines = []
-        deadline = time.time() + 300
-        for raw in proc.stdout:
+        deadline = time.time() + TURN_SECONDS
+        timed_out = False
+        while True:
+            try:
+                raw = q.get(timeout=max(0.0, deadline - time.time()))
+            except queue.Empty:
+                open(os.path.join(OUT, "precondition"), "w").write(
+                    "turn %d: no result within %d s\n" % (n, TURN_SECONDS)
+                )
+                timed_out = True
+                break
+            if raw is None:
+                break
             out.write(raw)
             out.flush()
             try:
                 lines.append(json.loads(raw))
             except ValueError:
                 continue
-            if lines[-1].get("type") == "result" or time.time() > deadline:
+            if lines[-1].get("type") == "result":
                 break
+        if timed_out:
+            ok = False
+            break
         if not record_turn(n, turn, lines):
             ok = False
             break
@@ -270,9 +307,23 @@ def session(argv, turns, stream_n):
         elif turn.get("after") == "rotate":
             rotate()
     proc.stdin.close()
-    for raw in proc.stdout:
+    if timed_out:
+        stop("claude")
+    drain_deadline = time.time() + 60
+    while time.time() < drain_deadline:
+        try:
+            raw = q.get(timeout=max(0.0, drain_deadline - time.time()))
+        except queue.Empty:
+            break
+        if raw is None:
+            break
         out.write(raw)
-    proc.wait(timeout=300)
+    out.flush()
+    try:
+        proc.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        pass
+    stop("claude")
     return ok
 
 
@@ -314,6 +365,7 @@ def flush():
 
 def main():
     global EMBED_PORT
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     for d in ("me", "kb", "emb", os.path.join("out", "streams")):
         os.makedirs(os.path.join(P, d), exist_ok=True)
     emb = subprocess.Popen(
@@ -532,7 +584,10 @@ def check(name):
         first = load("auth.json")
         assert all(first[s][0] == 401 and first[s][1] != 401 for s in first), first
         after = load("rotation.json")
-        assert all(after[s][0] == 401 and after[s][1] == 401 and after[s][2] != 401 for s in after), after
+        assert all(
+            after[s][0] == 401 and after[s][1] == 401 and after[s][2] != 401
+            for s in after
+        ), after
         print("before:", first, "after the rotation:", after)
     elif name == "rotation":
         assert load("leaks.json")["drawn"] == 2, load("leaks.json")
@@ -560,9 +615,13 @@ def check(name):
             not in open(os.path.join(OUT, "export.json")).read()
         )
     elif name == "resume":
-        streams = sorted(n for n in os.listdir(os.path.join(OUT, "streams")) if n.endswith(".jsonl"))
+        streams = sorted(
+            n for n in os.listdir(os.path.join(OUT, "streams")) if n.endswith(".jsonl")
+        )
         assert len(streams) == 2, streams
-        assert len({i["session_id"] for i in inits()}) == 1, [i["session_id"] for i in inits()]
+        assert len({i["session_id"] for i in inits()}) == 1, [
+            i["session_id"] for i in inits()
+        ]
         got = calls()[("R1", ME + "recall")]["text"]
         assert ("charlie-" + n) in got and expected_key() in got, got[:300]
     elif name == "leaks":
