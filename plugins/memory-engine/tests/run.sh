@@ -447,7 +447,8 @@ t_modes() {
 }
 
 t_real_no_token_argv() {
-	! grep -n 'CLAUDE_CODE_OAUTH_TOKEN=' "$HERE/real-claude.sh" || fail "real-claude.sh assigns the credential on a command line"
+	! grep -n 'CLAUDE_CODE_OAUTH_TOKEN=' "$HERE/real-claude.sh" "$HERE/real_mcp.py" ||
+		fail "the real run assigns the credential on a command line"
 	grep -q 'os.execve' "$HERE/real-claude.sh" || fail "real-claude.sh no longer builds the environment with execve"
 }
 
