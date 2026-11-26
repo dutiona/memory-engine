@@ -322,7 +322,7 @@ let policy = PrunePolicy {
     base_importance_weight: 0.2,
     ..PrunePolicy::default()
 };
-engine.prune(&policy)?;
+engine.prune(&policy).await?;
 ```
 
 This is a policy (parameter set), not a strategy (pluggable algorithm). See [Forgetting](forgetting.md) (the decay prune) for the full scoring formula.
