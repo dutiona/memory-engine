@@ -93,7 +93,7 @@ phase() {
 	) || return 1
 	run_claude plugin marketplace add "$MARKET" >"$P/market.log" 2>&1 || return 1
 	_cfg="--config me_url=http://127.0.0.1:$PORT"
-	[ -n "${2-}" ] && _cfg="$_cfg --config dev_root=$2"
+	[ -n "${2-}" ] && _cfg="$_cfg --config dev_root=$2 --config kb_url=http://127.0.0.1:$PORT/kb"
 	run_claude plugin install memory-engine@memory-engine $_cfg >"$P/install.log" 2>&1 || return 1
 	(cd "$H/dev/proj" && timeout 300 python3 -I -c "$LAUNCH" "$TOKFILE" "$H" "$R/bin:/usr/bin:/bin" "$R/bin/claude" \
 		-p --max-turns 1 'Reply with the single word: ok') >"$P/claude.out" 2>"$P/claude.err"
@@ -179,7 +179,46 @@ empty_outbox() {
 	for f; do [ ! -e "$f" ] || return 1; done
 }
 
+# mcp_wire STUB OUTBOX TOKEN DEVROOT: the MCP requests the stub recorded carry the hooks' own facts. Every /mcp request
+# holds the token, the envelope, the configured dev root and exactly the ME-Project-* values of a queued event; every
+# /kb/mcp request holds the token and no ME- header; no request holds userinfo.
+mcp_wire() {
+	python3 -I -c '
+import glob, os, sys
+stub, outbox, token, dev = sys.argv[1:5]
+def headers(path):
+    out = {}
+    for line in open(path, encoding="latin-1").read().splitlines():
+        if ": " in line:
+            k, v = line.split(": ", 1)
+            out[k.lower()] = v
+    return out
+paths = {}
+for k, line in enumerate(open(os.path.join(stub, "other.log")), 1):
+    paths.setdefault(line.split()[2], []).append(k)
+events = [headers(os.path.join(d, "headers")) for d in glob.glob(os.path.join(outbox, "[0-9]*"))]
+assert events, "no queued event to compare with"
+facts = {k: v for k, v in events[0].items() if k.startswith("me-project-")}
+me = [headers(os.path.join(stub, "other", "%d.headers" % k)) for k in paths.get("/mcp", [])]
+kb = [headers(os.path.join(stub, "other", "%d.headers" % k)) for k in paths.get("/kb/mcp", [])]
+assert me and kb, sorted(paths)
+for h in me:
+    assert h.get("authorization") == "Bearer " + token and h.get("me-harness") == "claude-code", sorted(h)
+    assert h.get("me-client-version"), sorted(h)
+    got = {k: v for k, v in h.items() if k.startswith("me-project-")}
+    assert got == facts and got.get("me-project-dev-root") == dev, (got, facts)
+for h in kb:
+    assert h.get("authorization") == "Bearer " + token, sorted(h)
+    assert not [k for k in h if k.startswith("me-")], sorted(h)
+for f in glob.glob(os.path.join(stub, "other", "*")):
+    assert b"secret" not in open(f, "rb").read(), f
+print("mcp requests:", len(me), "me,", len(kb), "kb")
+' "$@"
+}
+
 check "real: the stub answered only 503 during the run" only_503 "$R/A/stub"
+check "real: the MCP requests carry the token and the hooks' facts; KB's only the token" \
+	mcp_wire "$R/A/stub" "$O" me_00000000000000000000000000000000 "$R/A/home/dev"
 if [ -f "$R/A/stub/log" ]; then
 	_late=$(awk -v t="$(cat "$R/A/exited")" '$1 >= t * 1000' "$R/A/stub/log" | wc -l | tr -d ' ')
 	printf '# info: %s of %s requests reached the stub after claude -p exited\n' "$_late" "$(wc -l <"$R/A/stub/log" | tr -d ' ')"

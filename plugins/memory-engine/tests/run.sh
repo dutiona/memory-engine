@@ -183,10 +183,67 @@ p = json.load(open(sys.argv[1]))
 m = json.load(open(sys.argv[2]))
 assert p["version"] == sys.argv[3], (p["version"], sys.argv[3])
 assert [x["source"] for x in m["plugins"] if x["name"] == "memory-engine"] == ["./plugins/memory-engine"]
-assert set(p["userConfig"]) == {"me_url", "dev_root"}
+assert set(p["userConfig"]) == {"me_url", "kb_url", "dev_root"}
 assert not any(o.get("sensitive") or o.get("required") for o in p["userConfig"].values())
 ' "$PLUGIN/.claude-plugin/plugin.json" "$REPO/.claude-plugin/marketplace.json" "$v" ||
 		fail "plugin.json, marketplace.json and ME_VERSION disagree"
+}
+
+t_mcp_servers() {
+	py '
+import json, sys
+p = json.load(open(sys.argv[1]))
+helper = "exec /bin/sh \"$CLAUDE_PLUGIN_ROOT/bin/me-hook\" headers "
+want = {
+    "me": {"type": "http", "url": "${user_config.me_url}/mcp",
+           "headers": {"ME-Project-Dev-Root": "${user_config.dev_root}"},
+           "headersHelper": helper + "me <<\x27ME_PROJECT_DIR\x27\n${CLAUDE_PROJECT_DIR}\nME_PROJECT_DIR"},
+    "kb": {"type": "http", "url": "${user_config.kb_url}/mcp", "headersHelper": helper + "kb"},
+}
+assert p["mcpServers"] == want, p["mcpServers"]
+for name, server in p["mcpServers"].items():
+    assert "user_config" not in server["headersHelper"], name
+    assert "${CLAUDE_PLUGIN_ROOT}" not in server["headersHelper"], name
+assert all(not o.get("default") for o in p["userConfig"].values()), "a default names a host"
+' "$PLUGIN/.claude-plugin/plugin.json" || fail "mcpServers is not the me and kb servers of #1028"
+}
+
+# helper_cmd SERVER DIR [SHELL]: the server's headersHelper string from plugin.json, ${CLAUDE_PROJECT_DIR} substituted
+# textually as Claude Code does, run by SHELL -c from the plugin root on the restricted PATH.
+helper_cmd() {
+	py '
+import json, sys
+p = json.load(open(sys.argv[1]))
+sys.stdout.write(p["mcpServers"][sys.argv[2]]["headersHelper"].replace("${CLAUDE_PROJECT_DIR}", sys.argv[3]))
+' "$PLUGIN/.claude-plugin/plugin.json" "$1" "$2" >"$C/helper.cmd" || fail "no helper for $1"
+	(cd "$C/plugin" && CLAUDE_PLUGIN_ROOT=$C/plugin PATH=$RB "${3:-/bin/sh}" -c "$(cat "$C/helper.cmd")") >"$C/hout" 2>"$C/herr"
+}
+
+t_helper_command() {
+	token
+	py '
+import os, sys
+for name in ["p \x27q é", "m $(touch marker.sub)", "b `touch marker.bq`"]:
+    os.makedirs(os.path.join(sys.argv[1], "cmd", name))
+os.makedirs(os.path.join(sys.argv[1], "cut", "a\nME_PROJECT_DIR\ntouch marker.cut"))
+os.makedirs(os.path.join(sys.argv[1], "cut", "a"), exist_ok=True)
+' "$C"
+	# touch on the PATH, so that a path that did run as code would leave its marker.
+	ln -s "$(command -v touch)" "$RB/touch"
+	for sh in /bin/sh "$(command -v bash)" "$(command -v zsh)"; do
+		[ -n "$sh" ] || continue
+		for d in "$C"/cmd/*; do
+			helper_cmd me "$d" "$sh" || fail "$sh: the me helper exited $?: $(cat "$C/herr")"
+			eq "$(helper_json | sed -n 's/^ME-Project-Root: //p')" "$(pct_oracle "$d")" "$sh: root for [$d]"
+		done
+		d=$(py 'import os, sys; print([n for n in os.listdir(sys.argv[1]) if "\n" in n][0], end="")' "$C/cut")
+		helper_cmd me "$C/cut/$d" "$sh" || fail "$sh: the me helper exited $? on a forged delimiter"
+		eq "$(helper_json | sed -n 's/^ME-Project-Root: //p')" "$(pct_oracle "$C/cut/a")" "$sh: the cut path"
+		helper_cmd kb "$C" "$sh" || fail "$sh: the kb helper exited $?"
+		eq "$(helper_json)" "Authorization: Bearer $TOKV" "$sh: the kb helper"
+	done
+	set -- "$C"/marker.* "$C"/plugin/marker.*
+	for m; do [ ! -e "$m" ] || fail "a helper ran code from a path: $m"; done
 }
 
 # ---------------------------------------------------------------- item 2: enqueue
@@ -1355,7 +1412,7 @@ t_hostile_git_config() {
 # ---------------------------------------------------------------- runner
 
 CASES=${CASES:-"
-registration version
+registration version mcp_servers helper_command
 body_identical envelope order seq_taken seq_bound seq_concurrent pid_reuse id_collision rejected_collision tree_heals
 body_write_fail headers_write_fail endpoint options_absent side_duties_fail silent modes real_no_token_argv
 facts_repo facts_worktree facts_subdir facts_detached facts_non_git facts_cwd facts_insteadof userinfo encoding
