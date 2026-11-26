@@ -632,7 +632,7 @@ mod tests {
                 role: Some("assistant".into()),
                 content: Some(json!([
                     {"type": "text", "text": text},
-                    {"type": "tool_use", "name": tool_name, "input": {"cmd": "ls"}}
+                    {"type": "tool_use", "id": format!("toolu_{uuid}"), "name": tool_name, "input": {"cmd": "ls"}}
                 ])),
             }),
             tool_use_result: None,
@@ -662,7 +662,7 @@ mod tests {
     fn user_with_tool_result(
         uuid: &str,
         parent: &str,
-        text: &str,
+        tool_use_id: &str,
         stdout: Option<&str>,
         stderr: Option<&str>,
         is_error: bool,
@@ -678,7 +678,14 @@ mod tests {
             git_branch: None,
             message: Some(MessagePayload {
                 role: Some("user".into()),
-                content: Some(json!([{"type": "text", "text": text}])),
+                content: Some(json!([
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": stdout.or(stderr).unwrap_or(""),
+                        "is_error": is_error
+                    }
+                ])),
             }),
             tool_use_result: Some(ToolUseResult {
                 stdout: stdout.map(String::from),
@@ -692,7 +699,12 @@ mod tests {
         }
     }
 
-    fn user_with_interrupted_tool_result(uuid: &str, parent: &str, secs: i64) -> SessionEntry {
+    fn user_with_interrupted_tool_result(
+        uuid: &str,
+        parent: &str,
+        tool_use_id: &str,
+        secs: i64,
+    ) -> SessionEntry {
         SessionEntry {
             entry_type: EntryType::User,
             session_id: Some("sess-1".into()),
@@ -703,7 +715,14 @@ mod tests {
             git_branch: None,
             message: Some(MessagePayload {
                 role: Some("user".into()),
-                content: Some(json!([{"type": "text", "text": ""}])),
+                content: Some(json!([
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": "interrupted",
+                        "is_error": false
+                    }
+                ])),
             }),
             tool_use_result: Some(ToolUseResult {
                 stdout: None,
@@ -757,7 +776,7 @@ mod tests {
             user_entry("u1", "", "run ls", 100),
             assistant_with_tool("a1", "u1", "Sure, running ls", "Bash", 101),
             // Tool result entry: parent_uuid points to assistant, carries tool_use_result
-            user_with_tool_result("u2", "a1", "", Some("file.txt"), None, false, 102),
+            user_with_tool_result("u2", "a1", "toolu_a1", Some("file.txt"), None, false, 102),
         ];
         let turns = reconstruct_turns(&entries);
         assert_eq!(turns.len(), 1);
@@ -772,7 +791,7 @@ mod tests {
         let entries = vec![
             user_entry("u1", "", "run ls", 100),
             assistant_with_tool("a1", "u1", "Sure", "Bash", 101),
-            user_with_interrupted_tool_result("u2", "a1", 102),
+            user_with_interrupted_tool_result("u2", "a1", "toolu_a1", 102),
         ];
         let turns = reconstruct_turns(&entries);
         assert_eq!(turns.len(), 1);
@@ -785,8 +804,8 @@ mod tests {
     fn meta_summary_and_interrupt_lines_are_not_prompts() {
         let jsonl = [
             r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-03-19T10:00:00Z","uuid":"u1","parentUuid":null,"message":{"role":"user","content":"run ls"}}"#,
-            r#"{"type":"assistant","sessionId":"sess-1","timestamp":"2026-03-19T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"cmd":"ls"}}]}}"#,
-            r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-03-19T10:00:02Z","uuid":"u2","parentUuid":"a1","isMeta":true,"message":{"role":"user","content":"tool output"},"toolUseResult":"ok, ls ran"}"#,
+            r#"{"type":"assistant","sessionId":"sess-1","timestamp":"2026-03-19T10:00:01Z","uuid":"a1","parentUuid":"u1","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"cmd":"ls"}}]}}"#,
+            r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-03-19T10:00:02Z","uuid":"u2","parentUuid":"a1","isMeta":true,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"tool output"}]},"toolUseResult":"ok, ls ran"}"#,
             r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-03-19T10:01:00Z","uuid":"u3","parentUuid":null,"isMeta":true,"message":{"role":"user","content":"isMeta text"}}"#,
             r#"{"type":"assistant","sessionId":"sess-1","timestamp":"2026-03-19T10:01:01Z","uuid":"a2","parentUuid":"u3","message":{"role":"assistant","content":"reply to meta"}}"#,
             r#"{"type":"user","sessionId":"sess-1","timestamp":"2026-03-19T10:02:00Z","uuid":"u4","parentUuid":null,"isCompactSummary":true,"message":{"role":"user","content":"summary text"}}"#,
@@ -846,7 +865,7 @@ mod tests {
         let entries = vec![
             user_entry("u1", "", "run ls", 100),
             assistant_with_tool("a1", "u1", "Sure", "Bash", 101),
-            user_with_tool_result("u2", "a1", "", Some("ok"), None, false, 102),
+            user_with_tool_result("u2", "a1", "toolu_a1", Some("ok"), None, false, 102),
         ];
         let turns = reconstruct_turns(&entries);
         assert_eq!(turns.len(), 1);
@@ -870,8 +889,8 @@ mod tests {
             message: Some(MessagePayload {
                 role: Some("assistant".into()),
                 content: Some(json!([
-                    {"type": "tool_use", "name": "Bash", "input": {"cmd": "first"}},
-                    {"type": "tool_use", "name": "Read", "input": {"path": "second"}}
+                    {"type": "tool_use", "id": "t-first", "name": "Bash", "input": {"cmd": "first"}},
+                    {"type": "tool_use", "id": "t-second", "name": "Read", "input": {"path": "second"}}
                 ])),
             }),
             tool_use_result: None,
@@ -882,8 +901,8 @@ mod tests {
         let entries = vec![
             user_entry("u1", "", "do two things", 100),
             assistant,
-            user_with_tool_result("u2", "a1", "", Some("out-first"), None, false, 102),
-            user_with_tool_result("u3", "a1", "", Some("out-second"), None, false, 103),
+            user_with_tool_result("u2", "a1", "t-first", Some("out-first"), None, false, 102),
+            user_with_tool_result("u3", "a1", "t-second", Some("out-second"), None, false, 103),
         ];
         let turns = reconstruct_turns(&entries);
         assert_eq!(turns.len(), 1);
