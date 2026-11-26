@@ -15,7 +15,7 @@ use super::parse::{ContentBlock, EntryType, INTERRUPTED, SessionEntry, records_a
 // ---------------------------------------------------------------------------
 
 /// A conversation turn: a prompt, the assistant entries that answer it, and their tool calls, each
-/// paired with its result by `tool_use_id` ([`reconstruct_turns`]).
+/// paired with its result by `tool_use_id` (`reconstruct_turns`).
 #[derive(Debug, Clone)]
 pub struct ConversationTurn {
     pub timestamp: DateTime<Utc>,
