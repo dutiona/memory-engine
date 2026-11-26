@@ -45,7 +45,7 @@ ADR-0020 §3 says (each byte outside 0x21 to 0x7E, and `%`, `"` and `\`, as `%HH
 never encoded: the server drops one that is not plain absolute ASCII ([Project facts](reference/mcp-server.md#project-facts-and-the-project-key)).
 
 ```sh
-printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -sS -H @- \
+printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -q -sS --noproxy '*' -H @- \
   -H 'ME-Harness: claude-code' \
   -H 'ME-Backfill-Kind: transcript' \
   -H 'ME-Backfill-Mode: dry-run' \
@@ -57,6 +57,9 @@ printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -sS -H @- \
   --data-binary @<copy>/projects/<project-dir>/<session>.jsonl \
   https://<memory-host>/backfill/uploads > <report-dir>/<session>.dry.json
 ```
+
+`-q` keeps a `~/.curlrc` (a `verbose` line would print the `Authorization` header) out of the upload, and `--noproxy`
+keeps the token off a proxy, as the plugin's hook sends.
 
 A memory file is `ME-Backfill-Kind: memory-file` and carries the copy's modification time, which dates a memory with
 no frontmatter date and no date in its name: `-H "ME-Backfill-Mtime: $(date -u -r <file> +%Y-%m-%dT%H:%M:%SZ)"` with
