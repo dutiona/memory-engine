@@ -83,7 +83,8 @@ Read the dry run's report (`jq . <session>.dry.json`) before any write:
   calls, refusals by reason, and the counts by kind and actor.
 - **`tool_events` and `stubs`**: the tools called, and every call that touched a sensitive path, kept as a stub.
 - **`redaction`**: what was found, the stubs, the placeholders by rule; read the `facts.items[].preview` texts for
-  anything redaction missed.
+  anything redaction missed. The report previews facts only: prompts, tool excerpts and the other event texts are
+  counted by kind and actor, never shown, so a miss in them cannot be read here (#1170).
 - **`facts`**: what the write would create, reinforce or find blocked, each with its Home, type and date. An item with
   `hint: set_level` is a `user` memory filed at its project: after the write, a session raises it with `set_level`.
   A date after the harvest means the host's clock ran ahead or the entry's timestamp is bad: the memory keeps that
@@ -144,6 +145,9 @@ turns one store into one JSON Lines file per project, each one upload.
      tool calls, which live capture never records), and the empty and incomplete rows;
    - `events.live_overlap` and `events.superseded`, and each session's `held_by`: the other origins already holding it
      on the machine (`lifecycle`, `backfill`, the other store);
+     a dry run sees the store as it is, so a session another of the machine's files holds shows in `held_by` only once
+     that file is written: a machine reviewed whole before its first write finds that overlap from its reports'
+     `sessions[].id`;
    - the facts: every observation and summary is Episodic, a how-to note (`problem-solution`, `pattern`, `gotcha`)
      starting at importance 0.6, the others at 0.5.
 
