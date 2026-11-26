@@ -97,12 +97,13 @@ strip_userinfo() {
 facts() {
 	F_OK= F_ROOT= F_UPSTREAM= F_ORIGIN= F_BRANCH=
 	_dir=$1
-	[ -n "$_dir" ] || return 0
+	case $_dir in /*) ;; *) return 0 ;; esac
 	case $_dir in *"$NL"*) return 0 ;; esac
 	[ -d "$_dir" ] || return 0
-	F_OK=1
 	_out=$(git -C "$_dir" rev-parse --path-format=absolute --git-dir --git-common-dir --show-toplevel </dev/null 2>/dev/null) || {
-		F_ROOT=$_dir
+		# Physical, as git prints its top levels: the root and the dev root must share one path space.
+		F_ROOT=$(cd -P "$_dir" 2>/dev/null && pwd -P) || F_ROOT=
+		[ -n "$F_ROOT" ] && F_OK=1
 		return 0
 	}
 	_gd=${_out%%"$NL"*}
@@ -117,6 +118,7 @@ facts() {
 		*) F_ROOT=$_top ;;
 		esac
 	fi
+	F_OK=1
 	_b=$(git -C "$_dir" symbolic-ref -q HEAD </dev/null 2>/dev/null) && case $_b in refs/heads/?*) F_BRANCH=${_b#refs/heads/} ;; esac
 	_u=$(git -C "$_dir" remote get-url upstream </dev/null 2>/dev/null) && [ -n "$_u" ] && strip_userinfo "$_u" && F_UPSTREAM=$R
 	_u=$(git -C "$_dir" remote get-url origin </dev/null 2>/dev/null) && [ -n "$_u" ] && strip_userinfo "$_u" && F_ORIGIN=$R
