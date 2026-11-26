@@ -619,6 +619,21 @@ t_facts_physical() {
 ME-Project-Branch: main" "git root under a symlinked parent"
 }
 
+# A physical path that ends in a line feed is refused like any path with one: command substitution would strip it and
+# file the project under another directory's key. The link names carry no line feed, so only the resolution sees it.
+t_facts_physical_newline() {
+	token
+	py 'import os, sys; os.makedirs(os.path.join(sys.argv[1], "p\n")); os.makedirs(os.path.join(sys.argv[1], "q\n"))' "$C"
+	mkdir -p "$C/p"
+	ln -s "$C/p$NL" "$C/plink"
+	eq "$(facts_of "$C/plink")" "" "non-git root whose physical path ends in a line feed"
+	mkrepo "$C/q$NL/r"
+	ln -s "$C/q$NL" "$C/qlink"
+	eq "$(facts_of "$C/qlink/r")" "" "git root under a parent whose physical path ends in a line feed"
+	eq "$(helper_facts "$C/plink")" "" "helper facts, non-git"
+	eq "$(helper_facts "$C/qlink/r")" "" "helper facts, git"
+}
+
 t_facts_relative() {
 	mkdir -p "$C/rel"
 	eq "$(cd "$C" && facts_of rel)" "" "facts for a relative project directory"
@@ -1440,7 +1455,7 @@ registration version mcp_servers helper_command skill
 body_identical envelope order seq_taken seq_bound seq_concurrent pid_reuse id_collision rejected_collision tree_heals
 body_write_fail headers_write_fail endpoint options_absent side_duties_fail silent modes real_no_token_argv
 facts_repo facts_worktree facts_subdir facts_detached facts_non_git facts_cwd facts_insteadof userinfo encoding
-newline dev_root no_git facts_unborn facts_layouts facts_physical facts_relative
+newline dev_root no_git facts_unborn facts_layouts facts_physical facts_physical_newline facts_relative
 status_classes curl_exit queue_while_failing no_token token_channel token_forms endpoint_update_fail
 endpoint_changed_mid_flush parked_kept park_heals detached real_curl redirect proxy_bypassed no_curl
 lock_live lock_dead lock_age lock_unreadable lock_stamp lock_killed lock_broken_stops lock_steal renew_race
