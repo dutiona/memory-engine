@@ -342,6 +342,8 @@ fn prepare_event(
         Ok(Plan::Refuse(reason)) => {
             return Ok(Prepared::untaken(key, summary, Unstored::Refused(reason)));
         }
+        // Unreachable since the item is skipped above `prepare`; kept so the match is exhaustive
+        // over `Plan`, and it maps to the same disposition should the two ever disagree.
         Ok(Plan::Skip(reason)) => {
             return Ok(Prepared::untaken(key, summary, Unstored::Skipped(reason)));
         }

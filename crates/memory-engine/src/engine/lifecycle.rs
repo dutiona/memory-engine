@@ -310,9 +310,10 @@ async fn plan(
     if let Some(reason) = delivery_off_invariants(delivery) {
         return Ok(Plan::Refuse(reason));
     }
-    // A record the capture contract does not keep is answered before the record-level invariants:
-    // those bound what is written, and a skip writes nothing (#1171). Otherwise an oversized
-    // notification would be a 422, which the client parks for good.
+    // A record the capture contract does not keep is answered before the *record-level*
+    // invariants: those bound what is written, and a skip writes nothing (#1171). The delivery
+    // bound stays first because the route refuses a body over the limit before it parses one, so
+    // it is defence in depth rather than a path a notification takes.
     if let Ok(record) = &body
         && let Some(reason) = not_captured(record)
     {
@@ -840,10 +841,11 @@ mod tests {
 mod oversized_skip {
     use super::*;
 
-    /// A notification over the record-level text bound is still a skip, never a refusal: a 422
-    /// would be parked by the client for good, and a skip writes nothing for the bound to protect.
+    /// A record off the text bound is still a skip, never a refusal: a 422 would be parked by the
+    /// client for good, and a skip writes nothing for the bound to protect. Its `body_size` passes
+    /// the delivery's own bound, which is what a parsed body of that text could do.
     #[tokio::test]
-    async fn an_oversized_notification_is_a_skip_not_a_refusal() {
+    async fn a_record_off_the_text_bound_is_still_a_skip() {
         use chrono::TimeZone;
         let time = chrono::Utc.with_ymd_and_hms(2026, 3, 19, 10, 0, 0).unwrap();
         let delivery = Delivery {
