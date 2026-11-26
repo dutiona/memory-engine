@@ -313,3 +313,59 @@ async fn status_counts_quarantined_events() {
         .success()
         .stdout(predicate::str::contains("quarantined=2\n"));
 }
+
+/// The skip totals are read by reason and reach every rendering (#1171): the store's `skip.*` keys,
+/// the reader beside a live server, and the CLI's three formats.
+#[tokio::test]
+async fn status_reports_capture_skips_by_reason() {
+    use memory_engine::types::lifecycle::{
+        Actor, Content, Delivery, NeutralRecord, Recorded, TASK_NOTIFICATION,
+    };
+
+    let (_dir, db, mut engine) = store(&[]).await;
+    let now = chrono::Utc::now();
+    let delivery = Delivery {
+        machine: "laptop".into(),
+        event_id: "n1".into(),
+        time: now,
+        seq: 1,
+        harness: "claude-code".into(),
+        client_version: "1.0.0".into(),
+        body_sha256: [1; 32],
+        body_size: 40,
+        received_at: now,
+        home: "unscoped:laptop".into(),
+        provenance: serde_json::json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+    };
+    let notification = NeutralRecord {
+        session_id: "s1".into(),
+        actor: Actor::Main,
+        cwd: None,
+        harness_version: None,
+        content: Content::Prompt {
+            text: Some("<task-notification>\n<task-id>t1</task-id>\n".into()),
+        },
+    };
+    assert!(matches!(
+        engine
+            .record_lifecycle_event(&delivery, Ok(notification), &[])
+            .await
+            .unwrap(),
+        Recorded::Skipped(TASK_NOTIFICATION)
+    ));
+    engine.close().await.unwrap();
+
+    let json = stdout_json(cli(&db).args(["--format", "json", "status"]));
+    assert_eq!(json["skipped"][TASK_NOTIFICATION], 1, "{json}");
+    assert_eq!(json["quarantined"], 0, "a skip is not a quarantine: {json}");
+    cli(&db)
+        .args(["--format", "plain", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("skipped.task-notification=1\n"));
+    cli(&db)
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("skipped: task-notification 1"));
+}

@@ -310,6 +310,14 @@ async fn plan(
     if let Some(reason) = delivery_off_invariants(delivery) {
         return Ok(Plan::Refuse(reason));
     }
+    // A record the capture contract does not keep is answered before the record-level invariants:
+    // those bound what is written, and a skip writes nothing (#1171). Otherwise an oversized
+    // notification would be a 422, which the client parks for good.
+    if let Ok(record) = &body
+        && let Some(reason) = not_captured(record)
+    {
+        return Ok(Plan::Skip(reason));
+    }
     match body {
         Err(BodyFault::Unmappable(reason)) => Ok(Plan::Refuse(reason)),
         Err(BodyFault::Parse(failure)) => Ok(Plan::Write {
@@ -825,5 +833,50 @@ mod tests {
         let prompt = captured(&delivery, record, &capture);
         assert_eq!(prompt.event.payload["prompt"], "on [REDACTED:denylist]");
         assert_eq!(prompt.event.payload["machine"], "laptop");
+    }
+}
+
+#[cfg(test)]
+mod oversized_skip {
+    use super::*;
+
+    /// A notification over the record-level text bound is still a skip, never a refusal: a 422
+    /// would be parked by the client for good, and a skip writes nothing for the bound to protect.
+    #[tokio::test]
+    async fn an_oversized_notification_is_a_skip_not_a_refusal() {
+        use chrono::TimeZone;
+        let time = chrono::Utc.with_ymd_and_hms(2026, 3, 19, 10, 0, 0).unwrap();
+        let delivery = Delivery {
+            machine: "laptop".into(),
+            event_id: "e".into(),
+            time,
+            seq: 1,
+            harness: "claude-code".into(),
+            client_version: "0.1.0".into(),
+            body_sha256: [1; 32],
+            body_size: 10,
+            received_at: time,
+            home: "user:u/project:p".into(),
+            provenance: json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+        };
+        let huge = format!(
+            "<task-notification>{}",
+            "x".repeat(LIFECYCLE_BODY_BYTES + 1)
+        );
+        let record = NeutralRecord {
+            session_id: "s".into(),
+            actor: Actor::Main,
+            cwd: None,
+            harness_version: None,
+            content: Content::Prompt { text: Some(huge) },
+        };
+        assert!(
+            record_off_invariants(&record).is_some(),
+            "the bound does apply"
+        );
+        match plan(&delivery, Ok(record), &[]).await.unwrap() {
+            Plan::Skip(reason) => assert_eq!(reason, TASK_NOTIFICATION),
+            _ => panic!("an oversized notification is a skip"),
+        }
     }
 }

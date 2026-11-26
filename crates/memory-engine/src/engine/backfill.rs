@@ -23,7 +23,8 @@ use crate::types::lifecycle::{
 use crate::types::{EventType, NewEvent, NewFact};
 
 use super::lifecycle::{
-    Capture, Origin, Plan, delivery_off_invariants, holds_a_token, prepare, record_off_invariants,
+    Capture, Origin, Plan, delivery_off_invariants, holds_a_token, not_captured, prepare,
+    record_off_invariants,
 };
 use super::{MemoryEngine, spawn_join_err};
 
@@ -321,6 +322,11 @@ fn prepare_event(
         home: upload.home.clone(),
         provenance: upload.provenance.clone(),
     };
+    // Before the invariants: a record the capture contract does not keep writes nothing, so the
+    // bounds on what is written do not apply to it (#1171).
+    if let Some(reason) = not_captured(&record) {
+        return Ok(Prepared::untaken(key, summary, Unstored::Skipped(reason)));
+    }
     if let Some(reason) =
         delivery_off_invariants(&delivery).or_else(|| record_off_invariants(&record))
     {
