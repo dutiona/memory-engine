@@ -217,6 +217,12 @@ fn apply_one(
     }
     match write {
         DeliveryWrite::Check => Ok(Applied::Absent),
+        // The capture contract does not keep it (#1171): nothing is applied, no key is held, and
+        // the one durable fact is the store-wide skip total, raised in this same transaction.
+        DeliveryWrite::Skip(reason) => {
+            count_skip(tx, reason)?;
+            Ok(Applied::Skipped(reason))
+        }
         DeliveryWrite::Quarantine(record) => {
             insert_receipt(tx, key, None, None, Some(&record.to_string()))?;
             Ok(Applied::Quarantined)
@@ -578,6 +584,47 @@ fn step_segments(
         end_segment(tx, segment, EndedBy::SessionEnd, &now)?;
     }
     Ok(())
+}
+
+/// The `config` key a skip total lives under (#1171): one per reason, so a report can name it.
+const SKIP_PREFIX: &str = "skip.";
+
+/// Raise `reason`'s skip total by one, in the delivery's own transaction.
+fn count_skip(tx: &Transaction<'_>, reason: &'static str) -> Result<()> {
+    let key = format!("{SKIP_PREFIX}{reason}");
+    tx.execute(
+        "INSERT INTO config (key, value) VALUES (?1, '1')
+         ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)",
+        params![key],
+    )
+    .map_err(classify)?;
+    Ok(())
+}
+
+/// Every skip total the store holds, by reason, in key order (#1171).
+///
+/// # Errors
+///
+/// `Storage(Backend)` on a read failure or a total that is not a count.
+pub fn read_skips(tx: &Transaction<'_>) -> Result<BTreeMap<String, u64>> {
+    let mut statement = tx
+        .prepare("SELECT key, value FROM config WHERE substr(key, 1, 5) = ?1 ORDER BY key")
+        .map_err(classify)?;
+    let rows = statement
+        .query_map(params![SKIP_PREFIX], |r| {
+            let key: String = r.get(0)?;
+            let value: String = r.get(1)?;
+            Ok((key, value))
+        })
+        .map_err(classify)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(classify)?;
+    let mut totals = BTreeMap::new();
+    for (key, value) in rows {
+        let total = value.parse::<u64>().map_err(StorageError::backend)?;
+        totals.insert(key[SKIP_PREFIX.len()..].to_owned(), total);
+    }
+    Ok(totals)
 }
 
 /// How many quarantine records the store holds.

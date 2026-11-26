@@ -15,7 +15,7 @@ use crate::limits::{LIFECYCLE_BODY_BYTES, MAX_PAYLOAD_BYTES};
 use crate::redact;
 use crate::types::lifecycle::{
     Actor, Applied, BodyFault, CaptureWrite, Content, Delivery, DeliveryWrite, IDLE, Kind,
-    NeutralRecord, OrderKey, ParseClass, Recorded, StopOutcome, ToolOutcome,
+    NeutralRecord, OrderKey, ParseClass, Recorded, StopOutcome, TASK_NOTIFICATION, ToolOutcome,
 };
 use crate::types::{EventType, FactType, NewActivity, NewEvent, NewFact, OutcomeClass};
 
@@ -25,6 +25,11 @@ use super::{MemoryEngine, spawn_join_err};
 
 /// The longest session ID, in bytes.
 const MAX_SESSION_ID_BYTES: usize = 256;
+
+/// What Claude Code writes a prompt for when one of its own background tasks finishes (#1171). Its
+/// spelling is undocumented (ADR-0020 §11, pinned by `a_task_notification_is_not_a_capture`), and it
+/// is the only marker the live hook can see: the hook input carries nothing else.
+const TASK_NOTIFICATION_MARKER: &str = "<task-notification>";
 
 /// The start sources that begin a new run (ADR-0020 §5, rule 2).
 const BOUNDARY_SOURCES: [&str; 4] = ["startup", "resume", "clear", "fork"];
@@ -70,6 +75,9 @@ impl<'a> Origin<'a> {
 pub(super) enum Plan {
     /// The engine cannot apply it: the store only says whether the key is held.
     Refuse(&'static str),
+    /// The capture contract does not keep it (#1171): the store counts one skip under this reason
+    /// and holds no key.
+    Skip(&'static str),
     /// Write this, with the secrets it lost and the stubs it made.
     Write {
         write: DeliveryWrite,
@@ -160,6 +168,7 @@ impl MemoryEngine {
         let plan = plan(delivery, body, denylist).await?;
         let (write, refusal, found, stubbed) = match plan {
             Plan::Refuse(reason) => (DeliveryWrite::Check, Some(reason), 0, 0),
+            Plan::Skip(reason) => (DeliveryWrite::Skip(reason), None, 0, 0),
             Plan::Write {
                 write,
                 found,
@@ -178,6 +187,7 @@ impl MemoryEngine {
             .await?;
         match (applied, refusal) {
             (Applied::Absent, Some(reason)) => Ok(Recorded::Refused(reason)),
+            (Applied::Skipped(reason), _) => Ok(Recorded::Skipped(reason)),
             (Applied::Duplicate, _) => Ok(Recorded::Duplicate),
             (Applied::Collision, _) => Ok(Recorded::Collision),
             (Applied::Quarantined, _) => Ok(Recorded::Quarantined),
@@ -305,6 +315,18 @@ const fn parse_class(class: ParseClass) -> &'static str {
         ParseClass::NotUtf8 => "not_utf8",
         ParseClass::NotJson => "not_json",
         ParseClass::NotObject => "not_object",
+    }
+}
+
+/// The reason this record is not captured at all, if it is one the harness wrote for itself
+/// (ADR-0020 §6). The marker is read from the text as sent: after redaction the first bytes may no
+/// longer be the marker.
+pub(super) fn not_captured(record: &NeutralRecord) -> Option<&'static str> {
+    match &record.content {
+        Content::Prompt { text: Some(text) } if text.starts_with(TASK_NOTIFICATION_MARKER) => {
+            Some(TASK_NOTIFICATION)
+        }
+        _ => None,
     }
 }
 
@@ -502,6 +524,9 @@ pub(super) fn prepare(
     record: NeutralRecord,
     capture: &Capture<'_>,
 ) -> Result<Plan> {
+    if let Some(reason) = not_captured(&record) {
+        return Ok(Plan::Skip(reason));
+    }
     let main = matches!(record.actor, Actor::Main);
     let kind = record.content.kind();
     let mut payload = Map::new();
@@ -698,6 +723,54 @@ mod tests {
             origin: Origin::Backfill,
         };
         assert!(!captured(&delivery, final_message(None), &backfill).copy);
+    }
+
+    /// A prompt the harness wrote for itself is not captured (#1171). The marker is read from the
+    /// text as sent, anchored on the first bytes, and everything else stays a prompt.
+    #[test]
+    fn a_task_notification_is_not_a_capture() {
+        let delivery = delivery();
+        let capture = Capture {
+            denylist: &[],
+            origin: Origin::Live,
+        };
+        let prompt = |text: Option<&str>| NeutralRecord {
+            content: Content::Prompt {
+                text: text.map(str::to_owned),
+            },
+            ..final_message(None)
+        };
+        let skipped = |record| match prepare(&delivery, record, &capture) {
+            Ok(Plan::Skip(reason)) => assert_eq!(reason, TASK_NOTIFICATION),
+            _ => panic!("not a skip"),
+        };
+        let written = |record| match prepare(&delivery, record, &capture) {
+            Ok(Plan::Write { .. }) => {}
+            _ => panic!("not a capture"),
+        };
+
+        // The shape the live hook sends, and the bare marker.
+        skipped(prompt(Some("<task-notification>")));
+        skipped(prompt(Some(
+            "<task-notification>\n<task-id>t1</task-id>\n<status>completed</status>\n</task-notification>",
+        )));
+        // Anchored on the start: a mention, a leading space, an empty text are prompts.
+        written(prompt(Some("x <task-notification>")));
+        written(prompt(Some(" <task-notification>")));
+        written(prompt(Some("")));
+        written(prompt(Some("a prompt")));
+        // No text is a subagent turn starting, never a notification.
+        written(prompt(None));
+        // A denylisted literal cannot defeat the rule: it reads the text before redaction.
+        let denylist = [TASK_NOTIFICATION.to_owned()];
+        let redacted = Capture {
+            denylist: &denylist,
+            origin: Origin::Live,
+        };
+        match prepare(&delivery, prompt(Some("<task-notification>\nx")), &redacted) {
+            Ok(Plan::Skip(reason)) => assert_eq!(reason, TASK_NOTIFICATION),
+            _ => panic!("a denylisted marker is still a skip"),
+        }
     }
 
     /// The denylist reaches the prompt, never the identifiers.

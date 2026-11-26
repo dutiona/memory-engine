@@ -212,6 +212,67 @@ async fn every_fixture_is_stored_once() {
     assert_eq!(server.number(RECEIPTS), count);
 }
 
+/// The store-wide skip total of one reason (#1171).
+fn skips(server: &TestServer, reason: &str) -> i64 {
+    rusqlite::Connection::open(server.db())
+        .unwrap()
+        .query_row(
+            "SELECT COALESCE(CAST(value AS INTEGER), 0) FROM config WHERE key = ?1",
+            [format!("skip.{reason}")],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// A task notification is answered 204 `skipped`: nothing is stored, no key is held, one skip is
+/// counted, and the turn's stop and its final-message fact still land (#1171).
+#[tokio::test]
+async fn a_notification_delivery_is_skipped() {
+    let server = TestServer::start().await;
+    let before = effects(&server);
+    let notification = saying(
+        event("user-prompt-submit", "n1", 0, 1),
+        "prompt",
+        "<task-notification>\n<task-id>t1</task-id>\n<status>completed</status>\n</task-notification>",
+    );
+
+    let posted = server.post_event("laptop", &notification).await;
+    assert!(posted.is(204, Some("skipped")), "{posted:?}");
+    assert_eq!(
+        effects(&server),
+        before,
+        "a skip stores no event, fact or segment"
+    );
+    assert_eq!(server.number(RECEIPTS), 0, "a skip holds no key");
+    assert_eq!(skips(&server, "task-notification"), 1);
+
+    // A delivery whose 204 was lost is skipped again, never refused and never a conflict.
+    let again = server.post_event("laptop", &notification).await;
+    assert!(again.is(204, Some("skipped")), "{again:?}");
+    assert_eq!(skips(&server, "task-notification"), 2);
+
+    // The turn the notification started keeps its stop and its memory.
+    stored(
+        &server,
+        &saying(event("stop", "n2", 1, 1), "last_assistant_message", "Done."),
+    )
+    .await;
+    assert_eq!(
+        server.number("SELECT COUNT(*) FROM facts"),
+        before.1 + 1,
+        "the stop still makes its final-message fact"
+    );
+
+    // A human prompt that merely mentions the marker is a prompt.
+    let human = saying(
+        event("user-prompt-submit", "n3", 2, 1),
+        "prompt",
+        "why did <task-notification> land there?",
+    );
+    let posted = server.post_event("laptop", &human).await;
+    assert!(posted.is(204, Some("stored")), "{posted:?}");
+}
+
 #[tokio::test]
 async fn a_stored_event_survives_a_restart_as_a_duplicate() {
     let mut server = TestServer::start().await;

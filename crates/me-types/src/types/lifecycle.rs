@@ -19,6 +19,10 @@ pub const IDLE: TimeDelta = TimeDelta::minutes(30);
 
 const TIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%SZ";
 
+/// The reason a harness's own background-task message is not captured (#1171), counted under this
+/// name in the live `status` totals and in the backfill report.
+pub const TASK_NOTIFICATION: &str = "task-notification";
+
 /// The order key of ADR-0020 §5: `(ME-Event-Time, ME-Event-Seq as a number, ME-Event-Id)`.
 ///
 /// The derived [`Ord`] compares the fields in that order. The time has the second resolution of
@@ -319,6 +323,9 @@ pub enum Recorded {
     Quarantined,
     /// The engine cannot apply this record; nothing was written and no key is held.
     Refused(&'static str),
+    /// The record is one the capture contract does not keep (#1171): nothing was written, no key
+    /// is held, and the store counted one skip under this reason.
+    Skipped(&'static str),
 }
 
 /// What the engine hands the store for one delivery, beside the key (ADR-0020 §3, §5).
@@ -333,6 +340,9 @@ pub enum DeliveryWrite {
     Capture(Box<CaptureWrite>),
     /// An imported memory and its event (#1026).
     Memory(Box<MemoryWrite>),
+    /// A record the capture contract does not keep (#1171): the store counts one skip under this
+    /// reason and holds no key, since nothing is applied.
+    Skip(&'static str),
 }
 
 impl DeliveryWrite {
@@ -341,7 +351,7 @@ impl DeliveryWrite {
         match self {
             Self::Capture(capture) => capture.fact.is_some(),
             Self::Memory(_) => true,
-            Self::Check | Self::Quarantine(_) => false,
+            Self::Check | Self::Quarantine(_) | Self::Skip(_) => false,
         }
     }
 }
@@ -436,6 +446,9 @@ pub fn preview_digest(context: &[u8; 32], items: &[Keyed], applied: &[Applied]) 
                 Applied::Quarantined => ("quarantined", "none"),
                 Applied::LiveOverlap => ("live_overlap", "none"),
                 Applied::Superseded => ("superseded", "none"),
+                // A batch's skipped item is never keyed, so no item carries it here; the arm is
+                // exhaustive rather than reachable.
+                Applied::Skipped(_) => ("skipped", "none"),
                 Applied::Stored {
                     fact: Some(_),
                     reinforced,
@@ -526,6 +539,9 @@ pub enum Applied {
     /// A copy's capture whose actor and kind another import already holds in its session and
     /// machine, so nothing was written (#1117).
     Superseded,
+    /// A record the capture contract does not keep (#1171): one skip was counted under this
+    /// reason, and no key is held.
+    Skipped(&'static str),
 }
 
 /// One upload to the backfill route (#1026): what the route knows of it before the engine
@@ -620,6 +636,9 @@ pub enum ImportOutcome {
     Superseded,
     /// The engine cannot apply it (a fixed phrase): skipped, no key held.
     Refused(&'static str),
+    /// The capture contract does not keep it (#1171): no key held, and the report counts it under
+    /// this reason rather than among the refusals.
+    Skipped(&'static str),
 }
 
 /// What an imported item is, read from what the store would hold of it: every text redacted.

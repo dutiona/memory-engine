@@ -33,12 +33,20 @@ const BACKFILL: &str = "backfill";
 /// Why a text cannot be stored: redaction did not settle on it.
 const UNSETTLED: &str = "a text does not settle under redaction";
 
+/// An item the store never sees, and why: a refusal is the engine's judgement on a bad item, a
+/// skip is the capture contract not keeping it (#1171). The report counts them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unstored {
+    Refused(&'static str),
+    Skipped(&'static str),
+}
+
 /// One item, prepared: what the store writes and what the report says of it.
 struct Prepared {
     key: Option<OrderKey>,
     summary: ItemSummary,
-    /// What the store writes, or why the engine refused the item, which the store never sees.
-    write: std::result::Result<Keyed, &'static str>,
+    /// What the store writes, or why it writes nothing, which the store never sees.
+    write: std::result::Result<Keyed, Unstored>,
     /// The memory it makes, before the store says whether it was created.
     fact: Option<FactPreview>,
     found: u64,
@@ -46,11 +54,11 @@ struct Prepared {
 }
 
 impl Prepared {
-    const fn refused(key: Option<OrderKey>, summary: ItemSummary, reason: &'static str) -> Self {
+    const fn untaken(key: Option<OrderKey>, summary: ItemSummary, why: Unstored) -> Self {
         Self {
             key,
             summary,
-            write: Err(reason),
+            write: Err(why),
             fact: None,
             found: 0,
             stubbed: 0,
@@ -178,7 +186,8 @@ impl MemoryEngine {
         let mut chains = Vec::new();
         for p in prepared {
             let outcome = match p.write {
-                Err(reason) => ImportOutcome::Refused(reason),
+                Err(Unstored::Refused(reason)) => ImportOutcome::Refused(reason),
+                Err(Unstored::Skipped(reason)) => ImportOutcome::Skipped(reason),
                 Ok(_) => match applied.next() {
                     Some(Applied::Stored {
                         fact,
@@ -315,7 +324,7 @@ fn prepare_event(
     if let Some(reason) =
         delivery_off_invariants(&delivery).or_else(|| record_off_invariants(&record))
     {
-        return Ok(Prepared::refused(key, summary, reason));
+        return Ok(Prepared::untaken(key, summary, Unstored::Refused(reason)));
     }
     let capture = Capture { denylist, origin };
     let (write, found, stubbed) = match prepare(&delivery, record, &capture) {
@@ -324,14 +333,23 @@ fn prepare_event(
             found,
             stubbed,
         }) => (write, found, stubbed),
-        Ok(Plan::Refuse(reason)) => return Ok(Prepared::refused(key, summary, reason)),
+        Ok(Plan::Refuse(reason)) => {
+            return Ok(Prepared::untaken(key, summary, Unstored::Refused(reason)));
+        }
+        Ok(Plan::Skip(reason)) => {
+            return Ok(Prepared::untaken(key, summary, Unstored::Skipped(reason)));
+        }
         Ok(Plan::Write { .. }) => {
             return Err(MemoryError::Internal(
                 "a record was prepared as another write than a capture".into(),
             ));
         }
         Err(MemoryError::Conflict(ConflictError::Redaction(_))) => {
-            return Ok(Prepared::refused(key, summary, UNSETTLED));
+            return Ok(Prepared::untaken(
+                key,
+                summary,
+                Unstored::Refused(UNSETTLED),
+            ));
         }
         Err(e) => return Err(e),
     };
@@ -406,11 +424,8 @@ fn prepare_memory(
         placeholders: BTreeMap::new(),
     };
     if holds_a_token(&event_id) {
-        return Ok(Prepared::refused(
-            None,
-            summary,
-            "the event ID holds a machine token",
-        ));
+        let why = Unstored::Refused("the event ID holds a machine token");
+        return Ok(Prepared::untaken(None, summary, why));
     }
     let mut metadata = item.metadata;
     let scrub_metadata = |m: &mut Value| redact::scrub_metadata(m, denylist, METADATA_NAMES);
@@ -419,18 +434,19 @@ fn prepare_memory(
     let (text, found) = match scrubbed {
         Ok(scrubbed) => scrubbed,
         Err(MemoryError::Conflict(ConflictError::Redaction(_))) => {
-            return Ok(Prepared::refused(None, summary, UNSETTLED));
+            return Ok(Prepared::untaken(
+                None,
+                summary,
+                Unstored::Refused(UNSETTLED),
+            ));
         }
         Err(e) => return Err(e),
     };
     if check_str_size(&text, "fact content").is_err()
         || check_json_size(&metadata, "fact metadata").is_err()
     {
-        return Ok(Prepared::refused(
-            None,
-            summary,
-            "the memory is over the write limit",
-        ));
+        let why = Unstored::Refused("the memory is over the write limit");
+        return Ok(Prepared::untaken(None, summary, why));
     }
     if let Value::Object(members) = &mut metadata {
         members.insert("machine".to_owned(), json!(upload.machine));
@@ -561,11 +577,18 @@ fn context_digest(
         .collect::<Result<Vec<_>>>()?;
     let refused: Vec<Value> = prepared
         .iter()
-        .filter_map(|p| {
-            p.write
-                .as_ref()
-                .err()
-                .map(|r| json!([p.summary.event_id, r]))
+        .filter_map(|p| match p.write.as_ref().err() {
+            Some(Unstored::Refused(reason)) => Some(json!([p.summary.event_id, reason])),
+            _ => None,
+        })
+        .collect();
+    // A skip is not an effect, but it is not an absence either: the preview binds which items the
+    // capture contract set aside, so a dry run and its write agree on that too.
+    let skipped: Vec<Value> = prepared
+        .iter()
+        .filter_map(|p| match p.write.as_ref().err() {
+            Some(Unstored::Skipped(reason)) => Some(json!([p.summary.event_id, reason])),
+            _ => None,
         })
         .collect();
     let context = json!({
@@ -577,6 +600,7 @@ fn context_digest(
         "census": upload.census,
         "items": items,
         "refused": refused,
+        "skipped": skipped,
     });
     Ok(Sha256::digest(context.to_string().as_bytes()).into())
 }
@@ -590,7 +614,7 @@ fn effects(item: &Keyed) -> Result<Value> {
             capture.fact.as_ref(),
         ),
         DeliveryWrite::Memory(memory) => (None, &memory.home, &memory.event, Some(&memory.fact)),
-        DeliveryWrite::Check | DeliveryWrite::Quarantine(_) => {
+        DeliveryWrite::Check | DeliveryWrite::Quarantine(_) | DeliveryWrite::Skip(_) => {
             return Err(MemoryError::Internal(
                 "an imported item is a capture or a memory".into(),
             ));

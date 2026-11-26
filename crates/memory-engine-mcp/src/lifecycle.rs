@@ -497,6 +497,7 @@ impl MemoryMcpServer {
             Ok(Recorded::Stored { .. }) => Answer::done("stored"),
             Ok(Recorded::Duplicate) => Answer::done("duplicate"),
             Ok(Recorded::Quarantined) => Answer::done("quarantined"),
+            Ok(Recorded::Skipped(_)) => Answer::done("skipped"),
             Ok(Recorded::Collision) => Answer::status(StatusCode::CONFLICT),
             Ok(Recorded::Refused(_)) => Answer::status(StatusCode::UNPROCESSABLE_ENTITY),
             Err(error) => {
