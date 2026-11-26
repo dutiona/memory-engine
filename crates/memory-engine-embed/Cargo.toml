@@ -1,6 +1,6 @@
 [package]
 name = "memory-engine-embed"
-version = "0.2.0-rc.4"
+version = "0.2.0-rc.5"
 edition = "2024"
 rust-version.workspace = true
 description = "HTTP embedding provider for memory-engine — OpenAI and Ollama compatible"

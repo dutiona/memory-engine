@@ -1,6 +1,6 @@
 [package]
 name = "me-cognitive"
-version = "0.2.0-rc.4"
+version = "0.2.0-rc.5"
 edition = "2024"
 rust-version.workspace = true
 description = "Cognitive/dream-cycle primitive: Phase 5a DreamCycle orchestration over MemoryCtx + the DreamCtx capability trait (Wave 2 #816 / S5, sub-PR 2)"

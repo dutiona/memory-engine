@@ -1,6 +1,6 @@
 [package]
 name = "memory-engine-mcp"
-version = "0.2.0-rc.4"
+version = "0.2.0-rc.5"
 edition = "2024"
 rust-version.workspace = true
 description = "MCP server for memory-engine — exposes agent memory as MCP tools over streamable HTTP"
