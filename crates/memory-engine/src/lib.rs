@@ -177,7 +177,7 @@ pub use bootstrap::{BootstrapConfig, BootstrapReport, KeywordExtractor, SessionE
 pub use engine::activity_filter::{ActivityFilterConfig, ActivityFilterDecision, PromoteAction};
 pub use engine::builder::{File, InMemory, MemoryEngineBuilder};
 pub use engine::embed_queue::{Backoff, Settled, read_embed_queue_status};
-pub use engine::lifecycle::read_quarantined;
+pub use engine::lifecycle::{read_capture_skips, read_quarantined};
 pub use engine::read_recorded_embedding;
 pub use engine::redaction_counts::read_redaction_counts;
 pub use engine::{EngineConfig, MemoryEngine};

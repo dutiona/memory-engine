@@ -103,6 +103,11 @@ async fn status_reports_the_queue() {
     assert!(json["last_success_at"].is_string());
     assert!(json["last_error_at"].is_string());
     assert_eq!(json["last_error"], "embedder: 401 \u{1b}[2J");
+    assert_eq!(
+        json["skipped"],
+        serde_json::json!({}),
+        "no skip yet (#1171)"
+    );
 
     cli(&db)
         .args(["--format", "plain", "status"])

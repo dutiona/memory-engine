@@ -24,6 +24,9 @@ struct StatusReport {
     stubbed: u64,
     /// Lifecycle events whose body did not parse, held as metadata only (#1025).
     quarantined: u64,
+    /// Deliveries the capture contract did not keep, by reason (#1171): store-wide, and it
+    /// survives `erase --machine`.
+    skipped: std::collections::BTreeMap<String, u64>,
 }
 
 /// Report the deferred-embedding queue (#1021), the redaction counters (#1024) and the
@@ -38,6 +41,7 @@ pub fn run(db: &Path, format: OutputFormat) -> anyhow::Result<()> {
     let status = memory_engine::read_embed_queue_status(db)?;
     let counts = memory_engine::read_redaction_counts(db)?;
     let quarantined = memory_engine::read_quarantined(db)?;
+    let skipped = memory_engine::read_capture_skips(db)?;
     let time = |t: Option<DateTime<Utc>>| t.map(|t| t.to_rfc3339());
     let report = StatusReport {
         waiting: status.waiting,
@@ -53,6 +57,7 @@ pub fn run(db: &Path, format: OutputFormat) -> anyhow::Result<()> {
         redacted: counts.redacted,
         stubbed: counts.stubbed,
         quarantined,
+        skipped,
     };
 
     match format {
@@ -80,6 +85,9 @@ pub fn run(db: &Path, format: OutputFormat) -> anyhow::Result<()> {
             println!("redacted={}", report.redacted);
             println!("stubbed={}", report.stubbed);
             println!("quarantined={}", report.quarantined);
+            for (reason, total) in &report.skipped {
+                println!("skipped.{reason}={total}");
+            }
         }
     }
     Ok(())
@@ -117,7 +125,11 @@ fn print_table(report: &StatusReport) {
         "redaction: {} redacted, {} stubbed",
         report.redacted, report.stubbed
     );
-    println!("lifecycle: {} quarantined", report.quarantined);
+    print!("lifecycle: {} quarantined", report.quarantined);
+    for (reason, total) in &report.skipped {
+        print!("; skipped: {reason} {total}");
+    }
+    println!();
 }
 
 /// ADR-0020 §10's age: the largest whole unit of minutes, hours or days.

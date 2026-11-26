@@ -5,6 +5,7 @@
 //! The core knows no tool by name and no harness field by name: an adapter hands it a
 //! [`NeutralRecord`].
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use chrono::SecondsFormat;
@@ -265,6 +266,39 @@ pub fn read_quarantined(db: &Path) -> Result<u64> {
         .map_err(StorageError::backend)?;
     crate::store::schema::validate_schema_version(&tx)?;
     crate::store::lifecycle::count_quarantined(&tx)
+}
+
+/// Every capture skip the store holds, by reason, read beside a live server (#1171).
+///
+/// A skip total is store-wide and survives `erase --machine`, as the redaction totals do. The
+/// count is of *skipped deliveries*: a delivery whose 204 was lost is skipped again and counted
+/// again, because a skip holds no receipt to recognise it by.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Storage` if the file cannot be opened read-only or a total is not a
+/// count, and `MemoryError::Migration` if its schema version is not this binary's.
+///
+/// # Examples
+///
+/// ```
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// let dir = tempfile::tempdir().unwrap();
+/// let db = dir.path().join("memory.db");
+/// let mut engine = memory_engine::MemoryEngine::builder(4).path(&db).build()?;
+/// engine.close().await?;
+///
+/// assert!(memory_engine::read_capture_skips(&db)?.is_empty());
+/// # Ok::<(), memory_engine::MemoryError>(())
+/// # }).unwrap();
+/// ```
+pub fn read_capture_skips(db: &Path) -> Result<BTreeMap<String, u64>> {
+    let conn = open_status_connection(db)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
+    crate::store::schema::validate_schema_version(&tx)?;
+    crate::store::lifecycle::read_skips(&tx)
 }
 
 /// Decide what the store is asked to write. Redacting a body of up to 16 MiB is blocking work.
