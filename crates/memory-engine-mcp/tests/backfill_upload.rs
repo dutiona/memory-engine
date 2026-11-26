@@ -22,6 +22,16 @@ fn transcript() -> Vec<u8> {
     .unwrap()
 }
 
+/// The resumed session's file (#1173).
+const RESUMED: &str = "e3b7a1c4-5d2f-4a86-9c1e-7f40b2d8a915";
+
+fn resumed() -> Vec<u8> {
+    std::fs::read(fixtures_dir().join(format!(
+        "claude-code-transcripts/-work-fixture-p/{RESUMED}.jsonl"
+    )))
+    .unwrap()
+}
+
 /// The subagent file of the main session.
 fn subagent() -> Vec<u8> {
     std::fs::read(fixtures_dir().join(format!(
@@ -45,6 +55,15 @@ impl Upload {
     /// A dry run of the main session file, with the project facts of its manifest row.
     fn transcript() -> Self {
         Self::of("transcript", SOURCE, transcript())
+    }
+
+    /// A dry run of the resumed session's file.
+    fn resumed() -> Self {
+        Self::of(
+            "transcript",
+            &format!("projects/-work-fixture-p/{RESUMED}.jsonl"),
+            resumed(),
+        )
     }
 
     /// A dry run of the memory file `name`, copied at `mtime`.
@@ -1053,6 +1072,47 @@ async fn a_forks_repeated_message_is_a_duplicate_of_the_original() {
         .collect();
     assert_eq!(stops.len(), 1);
     assert_eq!(stops[0]["message"], "part one\npart two");
+}
+
+/// A resumed session's file replays a block of its entries (#1173): each is imported once, at
+/// its first occurrence, so the file writes, uploads again as duplicates, and a copy taken before
+/// the resume meets the grown file with no collision.
+#[tokio::test]
+async fn a_resumed_sessions_replay_is_imported_once() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let (dry, write) = dry_run_then_write(&server, &Upload::resumed()).await;
+    assert_eq!(dry["events"]["collision"], 0, "{dry}");
+    assert_eq!(dry["census"]["skipped"]["replayed entry"], 5, "{dry}");
+    assert_eq!(write["events"]["stored"], 5, "{write}");
+    let events = imported_events(&server);
+    let tool = events.iter().find(|p| p["kind"] == "tool_use").unwrap();
+    assert!(
+        tool["result"]
+            .as_str()
+            .is_some_and(|r| r.contains("3 passed")),
+        "the original's output: {tool}"
+    );
+    assert!(
+        events.iter().any(|p| p["kind"] == "stop"
+            && p["message"] == "The three tests pass.\nNothing else changed."),
+        "the stop at its original entry, its text once"
+    );
+
+    let (again, _) = dry_run_then_write(&server, &Upload::resumed()).await;
+    assert_eq!(again["events"]["collision"], 0, "{again}");
+    assert_eq!(again["events"]["stored"], 0, "{again}");
+    assert_eq!(again["events"]["duplicate"], 5, "{again}");
+
+    let fresh = TestServer::start_with_denylist(&[]).await;
+    let file = resumed();
+    let text = std::str::from_utf8(&file).unwrap();
+    let mut before: String = text.lines().take(5).collect::<Vec<_>>().join("\n");
+    before.push('\n');
+    dry_run_then_write(&fresh, &Upload::resumed().body(before)).await;
+    let (grown, _) = dry_run_then_write(&fresh, &Upload::resumed()).await;
+    assert_eq!(grown["events"]["collision"], 0, "{grown}");
+    assert_eq!(grown["events"]["duplicate"], 3, "{grown}");
+    assert_eq!(grown["events"]["stored"], 2, "{grown}");
 }
 
 /// With the embedder down an upload stores and queues its memories: full-text recall finds them
