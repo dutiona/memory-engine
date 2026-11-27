@@ -475,6 +475,7 @@ struct Session {
 struct Tally<'a> {
     outcomes: BTreeMap<&'static str, usize>,
     refused: BTreeMap<&'static str, usize>,
+    skipped: BTreeMap<&'static str, usize>,
     by_kind: BTreeMap<&'static str, usize>,
     by_actor: BTreeMap<&'static str, usize>,
     tools: BTreeMap<&'a str, BTreeMap<&'a str, usize>>,
@@ -496,6 +497,10 @@ impl<'a> Tally<'a> {
                 ImportOutcome::Superseded => "superseded",
                 ImportOutcome::Refused(reason) => {
                     *tally.refused.entry(reason).or_default() += 1;
+                    continue;
+                }
+                ImportOutcome::Skipped(reason) => {
+                    *tally.skipped.entry(reason).or_default() += 1;
                     continue;
                 }
             };
@@ -545,6 +550,7 @@ impl Report<'_> {
         let Tally {
             outcomes,
             refused,
+            skipped,
             by_kind,
             by_actor,
             tools,
@@ -608,6 +614,7 @@ impl Report<'_> {
                 "superseded": count("superseded"),
                 "pending": census.pending,
                 "refused": refused,
+                "skipped": skipped,
                 "by_kind": by_kind,
                 "by_actor": by_actor,
             },

@@ -409,6 +409,7 @@ ignores `Content-Type`.
 | The key `(machine, event ID)` is held with this body | 204, `ME-Event-Outcome: duplicate` |
 | The key is held with another body | 409 |
 | The body is not UTF-8, not JSON or not a JSON object | 204, `ME-Event-Outcome: quarantined` |
+| The record is one the capture contract does not keep (ADR-0020 §6: a prompt that begins with `<task-notification>`, the harness's own background-task message) | 204, `ME-Event-Outcome: skipped`; counted in `status`, no key held |
 | The body is an object the adapter cannot map (an unknown `hook_event_name`, no `session_id`, no `tool_name` on a tool hook, no non-empty `compact_summary` on `PostCompact`), or an identifier holds a machine token | 422, no key held |
 | Applying the event fails for any other reason, an unexpected error or a panic included | 422, nothing written |
 | The store is busy, locked, full, failing I/O or cannot be opened | 503, nothing written |
@@ -563,11 +564,11 @@ API error, and a compaction summary with its trigger each become one neutral rec
 same capture path as [lifecycle events](#lifecycle-events): the same payload, redaction (with the denylist), 512-byte
 tool excerpts, sensitive-path stubs and memories. An imported event has `source` `backfill` (a plugin store's, the
 store's kind) and `origin_node_id` `backfill`, its entry's time as `timestamp`, the upload's receipt as `created_at`,
-and its `harness_version` from the entry; its memory is dated by its event. Thinking, meta entries, interrupt markers,
-Claude Code's own `<synthetic>` messages and every other entry type are skipped and counted. A tool call whose result is
-not in the file yet is `pending`, and a turn with no completed message is an `incomplete_turn`: a later upload of the
-grown file brings them. A transcript records no session start or end, so its events open segments by the rules of
-ADR-0020 §5 and the idle sweep ends them.
+and its `harness_version` from the entry; its memory is dated by its event. Thinking, meta entries, task notifications
+(`origin.kind`), interrupt markers, Claude Code's own `<synthetic>` messages and every other entry type are skipped
+and counted. A tool call whose result is not in the file yet is `pending`, and a turn with no completed message is an
+`incomplete_turn`: a later upload of the grown file brings them. A transcript records no session start or end, so its
+events open segments by the rules of ADR-0020 §5 and the idle sweep ends them.
 
 **What a memory file stores.** `MEMORY.md` (the index) and a frontmatter-only stub are skipped with a 200 and write
 nothing. Any other file is one fact by ADR-0009's memory-file rules: `feedback` Procedural, `project` Episodic, any
@@ -640,9 +641,9 @@ write connection while an upload's insert phase runs.
 | `body` | `{bytes, sha256}` of the body |
 | `denylist_literals` | How many literals the server holds |
 | `project` | `{home, key, rules, dropped}`: the Home every item is filed at and how the facts gave it |
-| `census` | `{lines, malformed, skipped, incomplete_turn}`, `skipped` by reason |
+| `census` | `{lines, malformed, skipped, incomplete_turn}`, `skipped` by reason: the lines the reader did not map (`origin.kind` for a task notification, `isMeta`, `interrupt`, …) |
 | `sessions` | `[{id, first, last, events, live_since, superseded, held_by}]`, `held_by` the sorted `source`s of the other origins holding the session on this machine (`lifecycle`, `backfill`, a store's kind) |
-| `events` | `{stored, duplicate, collision, live_overlap, superseded, pending, refused, by_kind, by_actor}`, `refused` by reason |
+| `events` | `{stored, duplicate, collision, live_overlap, superseded, pending, refused, skipped, by_kind, by_actor}`, `refused` and `skipped` by reason: what the engine did not store, a skip being a record the capture contract does not keep rather than a bad one |
 | `tool_events` | Stored tool calls, per tool and per outcome |
 | `stubs` | `[{tool, path, time}]` of the sensitive-path stubs |
 | `redaction` | `{found, stubbed, placeholders}`, the placeholders counted by rule in the stored texts |

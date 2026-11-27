@@ -584,7 +584,7 @@ async fn a_plugin_store_imports_as_if_captured_live() {
             assert!(facts.iter().all(|f| f.content != "Three callers found."));
             for (reason, n) in [
                 ("narration", 2),
-                ("notification", 1),
+                ("task-notification", 1),
                 ("interrupt", 1),
                 ("interrupted turn", 1),
                 ("empty message", 1),

@@ -128,8 +128,12 @@ lifecycle: 0 quarantined
 - `redaction`: the store-wide totals of secrets redacted on write and of activities stored as sensitive-path stubs
   (#1024, [what they count](redaction.md#counters)).
 - `lifecycle`: the lifecycle events whose body did not parse, held as metadata only (ADR-0020 §3, #1025).
+- `skipped`: appended to the `lifecycle:` line, one `; skipped: <reason> <n>` per reason of a delivery the capture
+  contract did not keep (ADR-0020 §6, #1171), and nothing when nothing was skipped; store-wide, it survives `erase --machine` as the redaction totals do, and it counts skipped
+  deliveries (a delivery whose 204 was lost counts again).
 
-`--format json` prints `{"waiting","oldest_age_secs","failed","paused_since","pause_error","last_success_at","last_error_at","last_error","redacted","stubbed","quarantined"}`,
+`--format json` prints `{"waiting","oldest_age_secs","failed","paused_since","pause_error","last_success_at","last_error_at","last_error","redacted","stubbed","quarantined","skipped"}`,
+`skipped` an object of reason to count (plain: one `skipped.<reason>=<n>` line each),
 each absent value `null`; `--format plain` prints the same keys as `key=value` lines, an absent value empty. Error
 texts come from the embedder, so their control characters are escaped in the table and plain formats. `status` exits 0
 in every queue state; the alarm is in the output.

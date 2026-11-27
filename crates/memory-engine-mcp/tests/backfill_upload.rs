@@ -1563,3 +1563,45 @@ async fn backfill_upload_latency() {
         upload.body.len()
     );
 }
+
+/// A prompt the capture contract does not keep is reported under its own counter, never among the
+/// refusals, and a human prompt that mentions the marker still imports (#1171).
+#[tokio::test]
+async fn a_prompt_the_engine_skips_is_reported() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let body = br#"{"type":"user","uuid":"u1","sessionId":"s1","timestamp":"2026-03-19T10:00:00.000Z","message":{"content":"<task-notification>\n<task-id>t1</task-id>\n"}}
+{"type":"user","uuid":"u2","sessionId":"s1","timestamp":"2026-03-19T10:00:01.000Z","message":{"content":"why did <task-notification> land there?"}}
+"#
+    .to_vec();
+    let upload = Upload::of("transcript", "projects/-work-fixture-p/s1.jsonl", body);
+
+    let (status, report) = send(&server, "laptop", &upload).await;
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(
+        report["events"]["skipped"]["task-notification"], 1,
+        "the engine's skip is counted by its reason: {report}"
+    );
+    assert_eq!(
+        report["events"]["refused"],
+        json!({}),
+        "a skip is not a refusal: {report}"
+    );
+    assert_eq!(
+        report["census"]["skipped"],
+        json!({}),
+        "the reader holds no copy of the prefix rule: {report}"
+    );
+    assert_eq!(
+        report["events"]["stored"], 1,
+        "the human prompt stores: {report}"
+    );
+
+    // A dry run and its write agree, skipped item included.
+    let preview = report["preview"].as_str().unwrap().to_owned();
+    let (status, write) = send(&server, "laptop", &upload.write(&preview)).await;
+    assert_eq!(status, 200, "{write}");
+    assert_eq!(
+        write["events"]["skipped"]["task-notification"], 1,
+        "{write}"
+    );
+}

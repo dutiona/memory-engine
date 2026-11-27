@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use memory_engine::bootstrap::parse_timestamp;
-use memory_engine::types::lifecycle::{Actor, Content, NeutralRecord, StopOutcome};
+use memory_engine::types::lifecycle::{
+    Actor, Content, NeutralRecord, StopOutcome, TASK_NOTIFICATION,
+};
 use serde_json::{Map, Value, json};
 
 use super::INTERRUPTED;
@@ -151,8 +153,8 @@ fn message(line: usize, object: &Map<String, Value>) -> Option<Message<'_>> {
 /// `completed`, unless an interrupt marker ended the turn, which live capture closes with no
 /// stop (`interrupted turn`); the other assistant messages are the narration between tool
 /// calls, which live capture never records (`narration`). A `user` message is a `prompt`,
-/// unless it is a task notification (`notification`), an interrupt marker (`interrupt`) or
-/// empty (`empty message`). A subagent session's records are its main session's, with the
+/// unless it is a task notification (`task-notification`, the one reason every reader counts it
+/// under), an interrupt marker (`interrupt`) or empty (`empty message`). A subagent session's records are its main session's, with the
 /// subagent as their actor. A record's event ID is `bf.claude-memory.<message uuid>.p` or `.s`,
 /// its digest the SHA-256 of the canonical JSON of the message's `role`, `content`,
 /// `timestamp` and `is_notification`, and its order key the transcript reader's.
@@ -244,7 +246,7 @@ fn turns(
             }
         }
         if message.notification {
-            skip("notification");
+            skip(TASK_NOTIFICATION);
         } else if interrupt {
             skip("interrupt");
         } else if message.content.trim().is_empty() {
@@ -411,7 +413,7 @@ mod tests {
                 ("interrupt", 1),
                 ("interrupted turn", 1),
                 ("narration", 2),
-                ("notification", 1),
+                ("task-notification", 1),
             ])
         );
         assert_eq!(

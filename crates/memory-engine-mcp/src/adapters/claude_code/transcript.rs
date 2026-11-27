@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use memory_engine::bootstrap::{parse_timestamp, records_an_interrupt};
-use memory_engine::types::lifecycle::{Actor, Content, NeutralRecord, StopOutcome, ToolOutcome};
+use memory_engine::types::lifecycle::{
+    Actor, Content, NeutralRecord, StopOutcome, TASK_NOTIFICATION, ToolOutcome,
+};
 use serde_json::{Map, Value, json};
 
 use super::{INTERRUPTED, result_text, tool_content};
@@ -29,6 +31,14 @@ fn text<'a>(object: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
 
 fn flag(object: &Map<String, Value>, name: &str) -> bool {
     object.get(name).and_then(Value::as_bool) == Some(true)
+}
+
+/// The kind the harness itself put on an entry (`origin.kind`), when it put one.
+fn origin_kind(object: &Map<String, Value>) -> Option<&str> {
+    object
+        .get("origin")
+        .and_then(Value::as_object)
+        .and_then(|origin| text(origin, "kind"))
 }
 
 /// The members every imported entry needs.
@@ -330,6 +340,12 @@ impl Reader {
             let summary = joined(&blocks).unwrap_or_default();
             let trigger = self.trigger.take();
             return self.push(line, entry, "c", Content::Compact { trigger, summary });
+        }
+        // The one marker the capture contract cannot see (#1171). A notification can arrive while a
+        // turn runs, so it books the turn without counting an open one as incomplete.
+        if origin_kind(entry.object) == Some(TASK_NOTIFICATION) {
+            self.turns.insert(entry.turn());
+            return self.skip(TASK_NOTIFICATION);
         }
         if flag(entry.object, "isMeta") {
             return self.skip("meta");
@@ -850,6 +866,125 @@ mod tests {
         .unwrap();
         assert_eq!(table(&mapped).len(), 1, "the prompt only");
         assert_eq!((mapped.incomplete_turns, mapped.pending), (1, 1));
+    }
+
+    /// A row the harness marked as its own task notification is skipped under its reason, and its
+    /// turn is booked exactly as the emitted path books it (#1171): same turns, same stop, same
+    /// `incomplete_turns`. The prefix is the engine's rule, not the reader's.
+    #[test]
+    fn a_row_the_harness_marked_a_task_notification_is_skipped() {
+        let marked = |uuid: &str, time: &str, text: &str| {
+            entry(
+                "user",
+                uuid,
+                time,
+                &json!({ "origin": { "kind": "task-notification" },
+                         "message": { "role": "user", "content": text } }),
+            )
+        };
+        let body_of = |prompt: String| {
+            body(&[
+                prompt,
+                assistant(
+                    "a1",
+                    "2026-03-19T10:00:05.000Z",
+                    "m1",
+                    &json!([{ "type": "text", "text": "Ran it." }]),
+                    Some("end_turn"),
+                ),
+            ])
+        };
+
+        // Marked by the harness, with and without the marker's text.
+        for text in [
+            "<task-notification>\n<task-id>t1</task-id>\n",
+            "some other text",
+        ] {
+            let mapped = read(&body_of(marked("u1", "2026-03-19T10:00:00.000Z", text))).unwrap();
+            let rows = table(&mapped);
+            assert_eq!(rows.len(), 1, "the stop only");
+            assert_eq!(rows[0].1, "stop");
+            assert_eq!(mapped.skipped.get("task-notification"), Some(&1));
+            assert_eq!(mapped.incomplete_turns, 0, "the stop completes the turn");
+        }
+
+        // The same text without `origin.kind` is a prompt here: the prefix is the engine's rule.
+        let mapped = read(&body_of(user_text(
+            "u1",
+            "2026-03-19T10:00:00.000Z",
+            "<task-notification>\n<task-id>t1</task-id>\n",
+        )))
+        .unwrap();
+        assert_eq!(table(&mapped).len(), 2, "a prompt and its stop");
+        assert!(mapped.skipped.is_empty());
+
+        // And both markers book the turn identically.
+        let marked_turns = read(&body_of(marked("u1", "2026-03-19T10:00:00.000Z", "hi"))).unwrap();
+        let plain_turns =
+            read(&body_of(user_text("u1", "2026-03-19T10:00:00.000Z", "hi"))).unwrap();
+        assert_eq!(marked_turns.incomplete_turns, plain_turns.incomplete_turns);
+        assert_eq!(
+            table(&marked_turns)
+                .into_iter()
+                .filter(|(_, kind, _)| *kind == "stop")
+                .collect::<Vec<_>>(),
+            table(&plain_turns)
+                .into_iter()
+                .filter(|(_, kind, _)| *kind == "stop")
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A notification can arrive mid-turn, between a tool call and its result, while the turn is
+    /// still running: the turn completes normally, and the notification did not count it
+    /// incomplete (#1171).
+    #[test]
+    fn a_task_notification_mid_turn_leaves_the_turn_complete() {
+        let marked = |uuid: &str, time: &str, text: &str| {
+            entry(
+                "user",
+                uuid,
+                time,
+                &json!({ "origin": { "kind": "task-notification" },
+                         "message": { "role": "user", "content": text } }),
+            )
+        };
+        let mapped = read(&body(&[
+            user_text("u1", "2026-03-19T10:00:00.000Z", "run it"),
+            assistant(
+                "a1",
+                "2026-03-19T10:00:01.000Z",
+                "m1",
+                &json!([{ "type": "tool_use", "id": "t1", "name": "Bash", "input": {} }]),
+                Some("tool_use"),
+            ),
+            marked(
+                "n1",
+                "2026-03-19T10:00:02.000Z",
+                "<task-notification>\n<task-id>t1</task-id>\n",
+            ),
+            result("r1", "2026-03-19T10:00:03.000Z", "t1", "ok", false),
+            assistant(
+                "a2",
+                "2026-03-19T10:00:04.000Z",
+                "m2",
+                &json!([{ "type": "text", "text": "done" }]),
+                Some("end_turn"),
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(mapped.skipped.get("task-notification"), Some(&1));
+        assert_eq!(mapped.pending, 0);
+        assert_eq!(mapped.incomplete_turns, 0, "the stop completes the turn");
+        assert_eq!(
+            table(&mapped),
+            [
+                (1, "prompt", String::new()),
+                (4, "tool_use", "Bash Success".to_owned()),
+                (5, "stop", "Completed".to_owned()),
+            ]
+        );
     }
 
     #[test]

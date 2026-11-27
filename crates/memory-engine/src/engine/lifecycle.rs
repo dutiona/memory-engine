@@ -5,6 +5,7 @@
 //! The core knows no tool by name and no harness field by name: an adapter hands it a
 //! [`NeutralRecord`].
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use chrono::SecondsFormat;
@@ -15,7 +16,7 @@ use crate::limits::{LIFECYCLE_BODY_BYTES, MAX_PAYLOAD_BYTES};
 use crate::redact;
 use crate::types::lifecycle::{
     Actor, Applied, BodyFault, CaptureWrite, Content, Delivery, DeliveryWrite, IDLE, Kind,
-    NeutralRecord, OrderKey, ParseClass, Recorded, StopOutcome, ToolOutcome,
+    NeutralRecord, OrderKey, ParseClass, Recorded, StopOutcome, TASK_NOTIFICATION, ToolOutcome,
 };
 use crate::types::{EventType, FactType, NewActivity, NewEvent, NewFact, OutcomeClass};
 
@@ -25,6 +26,11 @@ use super::{MemoryEngine, spawn_join_err};
 
 /// The longest session ID, in bytes.
 const MAX_SESSION_ID_BYTES: usize = 256;
+
+/// What Claude Code writes a prompt for when one of its own background tasks finishes (#1171). Its
+/// spelling is undocumented (ADR-0020 §11, pinned by `a_task_notification_is_not_a_capture`), and it
+/// is the only marker the live hook can see: the hook input carries nothing else.
+const TASK_NOTIFICATION_MARKER: &str = "<task-notification>";
 
 /// The start sources that begin a new run (ADR-0020 §5, rule 2).
 const BOUNDARY_SOURCES: [&str; 4] = ["startup", "resume", "clear", "fork"];
@@ -70,6 +76,9 @@ impl<'a> Origin<'a> {
 pub(super) enum Plan {
     /// The engine cannot apply it: the store only says whether the key is held.
     Refuse(&'static str),
+    /// The capture contract does not keep it (#1171): the store counts one skip under this reason
+    /// and holds no key.
+    Skip(&'static str),
     /// Write this, with the secrets it lost and the stubs it made.
     Write {
         write: DeliveryWrite,
@@ -160,6 +169,7 @@ impl MemoryEngine {
         let plan = plan(delivery, body, denylist).await?;
         let (write, refusal, found, stubbed) = match plan {
             Plan::Refuse(reason) => (DeliveryWrite::Check, Some(reason), 0, 0),
+            Plan::Skip(reason) => (DeliveryWrite::Skip(reason), None, 0, 0),
             Plan::Write {
                 write,
                 found,
@@ -178,6 +188,7 @@ impl MemoryEngine {
             .await?;
         match (applied, refusal) {
             (Applied::Absent, Some(reason)) => Ok(Recorded::Refused(reason)),
+            (Applied::Skipped(reason), _) => Ok(Recorded::Skipped(reason)),
             (Applied::Duplicate, _) => Ok(Recorded::Duplicate),
             (Applied::Collision, _) => Ok(Recorded::Collision),
             (Applied::Quarantined, _) => Ok(Recorded::Quarantined),
@@ -257,6 +268,39 @@ pub fn read_quarantined(db: &Path) -> Result<u64> {
     crate::store::lifecycle::count_quarantined(&tx)
 }
 
+/// Every capture skip the store holds, by reason, read beside a live server (#1171).
+///
+/// A skip total is store-wide and survives `erase --machine`, as the redaction totals do. The
+/// count is of *skipped deliveries*: a delivery whose 204 was lost is skipped again and counted
+/// again, because a skip holds no receipt to recognise it by.
+///
+/// # Errors
+///
+/// Returns `MemoryError::Storage` if the file cannot be opened read-only or a total is not a
+/// count, and `MemoryError::Migration` if its schema version is not this binary's.
+///
+/// # Examples
+///
+/// ```
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// let dir = tempfile::tempdir().unwrap();
+/// let db = dir.path().join("memory.db");
+/// let mut engine = memory_engine::MemoryEngine::builder(4).path(&db).build()?;
+/// engine.close().await?;
+///
+/// assert!(memory_engine::read_capture_skips(&db)?.is_empty());
+/// # Ok::<(), memory_engine::MemoryError>(())
+/// # }).unwrap();
+/// ```
+pub fn read_capture_skips(db: &Path) -> Result<BTreeMap<String, u64>> {
+    let conn = open_status_connection(db)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(StorageError::backend)?;
+    crate::store::schema::validate_schema_version(&tx)?;
+    crate::store::lifecycle::read_skips(&tx)
+}
+
 /// Decide what the store is asked to write. Redacting a body of up to 16 MiB is blocking work.
 async fn plan(
     delivery: &Delivery,
@@ -265,6 +309,15 @@ async fn plan(
 ) -> Result<Plan> {
     if let Some(reason) = delivery_off_invariants(delivery) {
         return Ok(Plan::Refuse(reason));
+    }
+    // A record the capture contract does not keep is answered before the *record-level*
+    // invariants: those bound what is written, and a skip writes nothing (#1171). The delivery
+    // bound stays first because the route refuses a body over the limit before it parses one, so
+    // it is defence in depth rather than a path a notification takes.
+    if let Ok(record) = &body
+        && let Some(reason) = not_captured(record)
+    {
+        return Ok(Plan::Skip(reason));
     }
     match body {
         Err(BodyFault::Unmappable(reason)) => Ok(Plan::Refuse(reason)),
@@ -305,6 +358,18 @@ const fn parse_class(class: ParseClass) -> &'static str {
         ParseClass::NotUtf8 => "not_utf8",
         ParseClass::NotJson => "not_json",
         ParseClass::NotObject => "not_object",
+    }
+}
+
+/// The reason this record is not captured at all, if it is one the harness wrote for itself
+/// (ADR-0020 §6). The marker is read from the text as sent: after redaction the first bytes may no
+/// longer be the marker.
+pub(super) fn not_captured(record: &NeutralRecord) -> Option<&'static str> {
+    match &record.content {
+        Content::Prompt { text: Some(text) } if text.starts_with(TASK_NOTIFICATION_MARKER) => {
+            Some(TASK_NOTIFICATION)
+        }
+        _ => None,
     }
 }
 
@@ -502,6 +567,9 @@ pub(super) fn prepare(
     record: NeutralRecord,
     capture: &Capture<'_>,
 ) -> Result<Plan> {
+    if let Some(reason) = not_captured(&record) {
+        return Ok(Plan::Skip(reason));
+    }
     let main = matches!(record.actor, Actor::Main);
     let kind = record.content.kind();
     let mut payload = Map::new();
@@ -700,6 +768,54 @@ mod tests {
         assert!(!captured(&delivery, final_message(None), &backfill).copy);
     }
 
+    /// A prompt the harness wrote for itself is not captured (#1171). The marker is read from the
+    /// text as sent, anchored on the first bytes, and everything else stays a prompt.
+    #[test]
+    fn a_task_notification_is_not_a_capture() {
+        let delivery = delivery();
+        let capture = Capture {
+            denylist: &[],
+            origin: Origin::Live,
+        };
+        let prompt = |text: Option<&str>| NeutralRecord {
+            content: Content::Prompt {
+                text: text.map(str::to_owned),
+            },
+            ..final_message(None)
+        };
+        let skipped = |record| match prepare(&delivery, record, &capture) {
+            Ok(Plan::Skip(reason)) => assert_eq!(reason, TASK_NOTIFICATION),
+            _ => panic!("not a skip"),
+        };
+        let written = |record| match prepare(&delivery, record, &capture) {
+            Ok(Plan::Write { .. }) => {}
+            _ => panic!("not a capture"),
+        };
+
+        // The shape the live hook sends, and the bare marker.
+        skipped(prompt(Some("<task-notification>")));
+        skipped(prompt(Some(
+            "<task-notification>\n<task-id>t1</task-id>\n<status>completed</status>\n</task-notification>",
+        )));
+        // Anchored on the start: a mention, a leading space, an empty text are prompts.
+        written(prompt(Some("x <task-notification>")));
+        written(prompt(Some(" <task-notification>")));
+        written(prompt(Some("")));
+        written(prompt(Some("a prompt")));
+        // No text is a subagent turn starting, never a notification.
+        written(prompt(None));
+        // A denylisted literal cannot defeat the rule: it reads the text before redaction.
+        let denylist = [TASK_NOTIFICATION.to_owned()];
+        let redacted = Capture {
+            denylist: &denylist,
+            origin: Origin::Live,
+        };
+        match prepare(&delivery, prompt(Some("<task-notification>\nx")), &redacted) {
+            Ok(Plan::Skip(reason)) => assert_eq!(reason, TASK_NOTIFICATION),
+            _ => panic!("a denylisted marker is still a skip"),
+        }
+    }
+
     /// The denylist reaches the prompt, never the identifiers.
     #[test]
     fn a_capture_scrubs_its_content_with_the_denylist() {
@@ -718,5 +834,51 @@ mod tests {
         let prompt = captured(&delivery, record, &capture);
         assert_eq!(prompt.event.payload["prompt"], "on [REDACTED:denylist]");
         assert_eq!(prompt.event.payload["machine"], "laptop");
+    }
+}
+
+#[cfg(test)]
+mod oversized_skip {
+    use super::*;
+
+    /// A record off the text bound is still a skip, never a refusal: a 422 would be parked by the
+    /// client for good, and a skip writes nothing for the bound to protect. Its `body_size` passes
+    /// the delivery's own bound, which is what a parsed body of that text could do.
+    #[tokio::test]
+    async fn a_record_off_the_text_bound_is_still_a_skip() {
+        use chrono::TimeZone;
+        let time = chrono::Utc.with_ymd_and_hms(2026, 3, 19, 10, 0, 0).unwrap();
+        let delivery = Delivery {
+            machine: "laptop".into(),
+            event_id: "e".into(),
+            time,
+            seq: 1,
+            harness: "claude-code".into(),
+            client_version: "0.1.0".into(),
+            body_sha256: [1; 32],
+            body_size: 10,
+            received_at: time,
+            home: "user:u/project:p".into(),
+            provenance: json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+        };
+        let huge = format!(
+            "<task-notification>{}",
+            "x".repeat(LIFECYCLE_BODY_BYTES + 1)
+        );
+        let record = NeutralRecord {
+            session_id: "s".into(),
+            actor: Actor::Main,
+            cwd: None,
+            harness_version: None,
+            content: Content::Prompt { text: Some(huge) },
+        };
+        assert!(
+            record_off_invariants(&record).is_some(),
+            "the bound does apply"
+        );
+        match plan(&delivery, Ok(record), &[]).await.unwrap() {
+            Plan::Skip(reason) => assert_eq!(reason, TASK_NOTIFICATION),
+            _ => panic!("an oversized notification is a skip"),
+        }
     }
 }

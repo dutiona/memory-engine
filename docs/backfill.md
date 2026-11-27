@@ -79,11 +79,12 @@ Read the dry run's report (`jq . <session>.dry.json`) before any write:
 
 - **`project`**: the Home and key you expect for this file; any `dropped` fact explained.
 - **`denylist_literals`**: the count you loaded.
-- **`census`**: the lines, the malformed ones, what was skipped by reason, and the `incomplete_turn` count.
+- **`census`**: the lines, the malformed ones, what the reader did not map, by reason, and the `incomplete_turn` count.
 - **`sessions`**: each session's first and last time and its stored events; a `live_since` means the plugin captured
   that session live from then, and only what came before imports.
 - **`events`**: stored, duplicates (a re-upload, or a forked session's repeated entries), `live_overlap`, `pending`
-  calls, refusals by reason, and the counts by kind and actor.
+  calls, refusals by reason, **skips by reason** (a record the capture contract does not keep, such as a task
+  notification; never summed with the refusals), and the counts by kind and actor.
 - **`tool_events` and `stubs`**: the tools called, and every call that touched a sensitive path, kept as a stub.
 - **`redaction`**: what was found, the stubs, the placeholders by rule; read the `facts.items[].preview` texts for
   anything redaction missed. The report previews facts only: prompts, tool excerpts and the other event texts are
@@ -144,8 +145,10 @@ turns one store into one JSON Lines file per project, each one upload.
    when exactly one does; otherwise none, and `project.home` shows the machine's bucket.
 4. **Order per machine**: its transcripts and memory files first, then claude-mem, then claude-memory.
 5. **Review** as above, and also:
-   - `census.skipped`: `notification`, `interrupt`, `interrupted turn`, `narration` (the assistant messages between
-     tool calls, which live capture never records), and the empty and incomplete rows;
+   - `census.skipped`: `task-notification` (a row the store flagged as the harness's own background-task message),
+     `interrupt`, `interrupted turn`, `narration` (the assistant messages between tool calls, which live capture never
+     records), and the empty and incomplete rows; a prompt that only *starts* with the marker reaches the engine and is
+     counted in `events.skipped["task-notification"]` instead;
    - `events.live_overlap` and `events.superseded`, and each session's `held_by`: the other origins already holding it
      on the machine (`lifecycle`, `backfill`, the other store);
      a dry run sees the store as it is, so a session another of the machine's files holds shows in `held_by` only once
@@ -180,8 +183,8 @@ No source is deleted before its ingestion and a verified backup taken after it.
   - a session's last turn gives a stop whether or not it completed: the store keeps no stop reason;
   - a synthetic user message claude-memory does not mark (a compaction summary, a command echo) imports as a prompt,
     in the event log only;
-  - a task notification that arrived mid-turn splits that turn in two and gives a stop live capture would not have
-    fired;
+  - a task notification that arrived mid-turn splits that turn in two, and the stop it gives is the store's own: live
+    capture keeps the notification turn's stop and its final-message fact, and never stores the prompt;
   - a re-export of a grown session whose last turn gained assistant messages adds a second stop for that turn;
   - a row edited at the source between two exports collides and stops its file;
   - a project file over 256 MiB is refused whole;

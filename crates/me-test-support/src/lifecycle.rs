@@ -145,6 +145,50 @@ pub async fn a_key_is_held_once<F: ConformanceBackend>(f: &F) {
     );
 }
 
+/// A skipped delivery (#1171) is answered `Applied::Skipped` with its reason, holds no key (a
+/// later capture of the same key stores), and a key already held still answers `Duplicate` first.
+///
+/// The skip total itself is the store's, read through its own status path: the port is
+/// backend-agnostic and does not expose it.
+pub async fn a_skipped_delivery_holds_no_key<F: ConformanceBackend>(f: &F) {
+    let be = f.make().await;
+    let name = f.name();
+
+    let skipped = deliver(
+        &be,
+        "laptop",
+        "s1",
+        1,
+        DeliveryWrite::Skip("task-notification"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(skipped, Applied::Skipped("task-notification"), "[{name}]");
+    let later = deliver(&be, "laptop", "s1", 1, capture("s", "s1"))
+        .await
+        .unwrap();
+    assert!(
+        matches!(later, Applied::Stored { .. }),
+        "[{name}] a skip holds no key"
+    );
+
+    let held = deliver(
+        &be,
+        "laptop",
+        "s1",
+        1,
+        DeliveryWrite::Skip("task-notification"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        held,
+        Applied::Duplicate,
+        "[{name}] the held key answers first"
+    );
+    assert_eq!(events(&be).await, 1, "[{name}] the skip wrote no event");
+}
+
 /// A delivery that faults at its last step leaves nothing of the earlier ones: no event, no
 /// activity, no memory, no queue row and no key.
 pub async fn a_delivery_commits_whole_or_not_at_all<F: ConformanceBackend>(f: &F) {

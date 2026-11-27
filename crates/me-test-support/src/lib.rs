@@ -150,6 +150,7 @@ macro_rules! all_behaviors_into {
             erase_of_a_missing_fact_deletes_nothing => retraction::erase_of_a_missing_fact_deletes_nothing,
             erase_machine_takes_its_lifecycle_rows => retraction::erase_machine_takes_its_lifecycle_rows,
             a_key_is_held_once => lifecycle::a_key_is_held_once,
+            a_skipped_delivery_holds_no_key => lifecycle::a_skipped_delivery_holds_no_key,
             a_delivery_commits_whole_or_not_at_all => lifecycle::a_delivery_commits_whole_or_not_at_all,
             a_busy_store_is_unavailable => lifecycle::a_busy_store_is_unavailable,
             idle_segments_end_once => lifecycle::idle_segments_end_once,
