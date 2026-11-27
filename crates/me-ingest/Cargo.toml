@@ -1,6 +1,6 @@
 [package]
 name = "me-ingest"
-version = "0.2.0-rc.5"
+version = "0.2.0-rc.6"
 edition = "2024"
 rust-version.workspace = true
 description = "Ingest primitive: event-log append + fact derivation over MemoryCtx (Wave 2 #816 / S4, sub-PR 1)"
