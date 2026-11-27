@@ -1432,7 +1432,7 @@ mod tests {
             Some("end_turn"),
         );
 
-        let original = [prompt.clone(), a1.clone(), r1.clone(), a2.clone()];
+        let original = [prompt.clone(), a1.clone(), r1, a2.clone()];
         let mut resumed = original.to_vec();
         resumed.splice(2..2, [replay(&prompt), replay(&a1)]);
         let mapped = read(&body(&resumed)).unwrap();
@@ -1457,9 +1457,10 @@ mod tests {
             )
         };
         let notification = marked("n1", "2026-03-19T10:00:00.000Z", "hi");
-        let original = [notification.clone(), a2.clone()];
+        let original = [notification.clone(), a2];
         let mut resumed = original.to_vec();
-        resumed.splice(1..1, [replay(&notification)]);
+        // After the stop, where a resume's block lands: undropped, it would open a turn nothing closes.
+        resumed.push(replay(&notification));
         let mapped = read(&body(&resumed)).unwrap();
         assert_eq!(mapped.skipped.get("task-notification"), Some(&1));
         assert_eq!(mapped.skipped.get("replayed entry"), Some(&1));
