@@ -19,7 +19,6 @@ import os
 import queue
 import secrets
 import signal
-import socket
 import string
 import subprocess
 import sys
