@@ -564,11 +564,11 @@ API error, and a compaction summary with its trigger each become one neutral rec
 same capture path as [lifecycle events](#lifecycle-events): the same payload, redaction (with the denylist), 512-byte
 tool excerpts, sensitive-path stubs and memories. An imported event has `source` `backfill` (a plugin store's, the
 store's kind) and `origin_node_id` `backfill`, its entry's time as `timestamp`, the upload's receipt as `created_at`,
-and its `harness_version` from the entry; its memory is dated by its event. Thinking, meta entries, interrupt markers,
-Claude Code's own `<synthetic>` messages and every other entry type are skipped and counted. A tool call whose result is
-not in the file yet is `pending`, and a turn with no completed message is an `incomplete_turn`: a later upload of the
-grown file brings them. A transcript records no session start or end, so its events open segments by the rules of
-ADR-0020 §5 and the idle sweep ends them.
+and its `harness_version` from the entry; its memory is dated by its event. Thinking, meta entries, task notifications
+(`origin.kind`), interrupt markers, Claude Code's own `<synthetic>` messages and every other entry type are skipped
+and counted. A tool call whose result is not in the file yet is `pending`, and a turn with no completed message is an
+`incomplete_turn`: a later upload of the grown file brings them. A transcript records no session start or end, so its
+events open segments by the rules of ADR-0020 §5 and the idle sweep ends them.
 
 **What a memory file stores.** `MEMORY.md` (the index) and a frontmatter-only stub are skipped with a 200 and write
 nothing. Any other file is one fact by ADR-0009's memory-file rules: `feedback` Procedural, `project` Episodic, any
