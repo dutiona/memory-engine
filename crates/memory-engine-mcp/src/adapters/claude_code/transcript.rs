@@ -245,9 +245,9 @@ fn replays(objects: &[(usize, Value)]) -> HashSet<usize> {
 /// JSON without its session ID and working directory, so a forked session repeating an entry
 /// meets it as a duplicate. An entry whose `sessionId`, `uuid` and message (its content, ID, model
 /// and stop reason; not its token usage) an earlier entry holds is a resume's replay, counted
-/// `replayed entry`, so its first occurrence alone makes its records. Its order key is its entry's time to the second, and
-/// `seq = millisecond × 1,000 + rank`, the rank in file order among the file's records of that
-/// millisecond: the 1,001st record of a millisecond is refused and counted.
+/// `replayed entry`, so its first occurrence alone makes its records. Its order key is its entry's
+/// time to the second, and `seq = millisecond × 1,000 + rank`, the rank in file order among the
+/// file's records of that millisecond: the 1,001st record of a millisecond is refused and counted.
 ///
 /// # Errors
 ///
