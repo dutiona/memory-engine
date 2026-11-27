@@ -341,12 +341,10 @@ impl Reader {
             let trigger = self.trigger.take();
             return self.push(line, entry, "c", Content::Compact { trigger, summary });
         }
-        // The one marker the capture contract cannot see (#1171). The turn is booked exactly as
-        // the emitted path books it, so both markers give the same stops and `incomplete_turns`.
+        // The one marker the capture contract cannot see (#1171). A notification can arrive while a
+        // turn runs, so it books the turn without counting an open one as incomplete.
         if origin_kind(entry.object) == Some(TASK_NOTIFICATION) {
-            if !self.turns.insert(entry.turn()) {
-                self.incomplete += 1;
-            }
+            self.turns.insert(entry.turn());
             return self.skip(TASK_NOTIFICATION);
         }
         if flag(entry.object, "isMeta") {
@@ -934,6 +932,58 @@ mod tests {
                 .into_iter()
                 .filter(|(_, kind, _)| *kind == "stop")
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// A notification can arrive mid-turn, between a tool call and its result, while the turn is
+    /// still running: the turn completes normally, and the notification did not count it
+    /// incomplete (#1171).
+    #[test]
+    fn a_task_notification_mid_turn_leaves_the_turn_complete() {
+        let marked = |uuid: &str, time: &str, text: &str| {
+            entry(
+                "user",
+                uuid,
+                time,
+                &json!({ "origin": { "kind": "task-notification" },
+                         "message": { "role": "user", "content": text } }),
+            )
+        };
+        let mapped = read(&body(&[
+            user_text("u1", "2026-03-19T10:00:00.000Z", "run it"),
+            assistant(
+                "a1",
+                "2026-03-19T10:00:01.000Z",
+                "m1",
+                &json!([{ "type": "tool_use", "id": "t1", "name": "Bash", "input": {} }]),
+                Some("tool_use"),
+            ),
+            marked(
+                "n1",
+                "2026-03-19T10:00:02.000Z",
+                "<task-notification>\n<task-id>t1</task-id>\n",
+            ),
+            result("r1", "2026-03-19T10:00:03.000Z", "t1", "ok", false),
+            assistant(
+                "a2",
+                "2026-03-19T10:00:04.000Z",
+                "m2",
+                &json!([{ "type": "text", "text": "done" }]),
+                Some("end_turn"),
+            ),
+        ]))
+        .unwrap();
+
+        assert_eq!(mapped.skipped.get("task-notification"), Some(&1));
+        assert_eq!(mapped.pending, 0);
+        assert_eq!(mapped.incomplete_turns, 0, "the stop completes the turn");
+        assert_eq!(
+            table(&mapped),
+            [
+                (1, "prompt", String::new()),
+                (4, "tool_use", "Bash Success".to_owned()),
+                (5, "stop", "Completed".to_owned()),
+            ]
         );
     }
 
