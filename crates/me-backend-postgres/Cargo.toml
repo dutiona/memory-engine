@@ -1,6 +1,6 @@
 [package]
 name = "me-backend-postgres"
-version = "0.2.0-rc.5"
+version = "0.2.0-rc.6"
 edition = "2024"
 rust-version.workspace = true
 description = "PostgreSQL persistence backend for the memory-engine workspace (Wave 2 #816 / S2, sub-PR 3)"
