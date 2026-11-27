@@ -8,14 +8,19 @@ This pipeline is the embedded library's, run on a store no server holds (`memory
 
 ```rust
 # use std::io::Cursor;
+# use std::sync::Arc;
 # use memory_engine::{MemoryEngine, MemoryError};
 # use memory_engine::bootstrap::{KeywordExtractor, BootstrapConfig};
 # use memory_engine::EmbeddingProvider;
+# use memory_engine::EmbeddingFingerprint;
 #
 # struct MyEmbedder;
 # impl EmbeddingProvider for MyEmbedder {
 #     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
 #         Ok(vec![0.0; 384])
+#     }
+#     fn fingerprint(&self) -> EmbeddingFingerprint {
+#         EmbeddingFingerprint::new("mock", "test", 384)
 #     }
 # }
 #
@@ -28,11 +33,12 @@ let jsonl_data = std::fs::read("~/.claude/projects/.../session.jsonl")?;
 let reader = Cursor::new(jsonl_data);
 let report = engine.bootstrap_session(
     reader,
-    &MyEmbedder,
-    &extractor,
+    Arc::new(MyEmbedder),
+    Arc::new(extractor),
     &config,
     None, // no auto-pin classifier
-)?;
+)
+.await?;
 
 println!("Processed {} sessions, created {} facts",
     report.sessions_processed, report.facts_created);
@@ -42,14 +48,19 @@ To bootstrap an entire directory of session logs at once:
 
 ```rust
 # use std::path::Path;
+# use std::sync::Arc;
 # use memory_engine::{MemoryEngine, MemoryError};
 # use memory_engine::bootstrap::{KeywordExtractor, BootstrapConfig};
 # use memory_engine::EmbeddingProvider;
+# use memory_engine::EmbeddingFingerprint;
 #
 # struct MyEmbedder;
 # impl EmbeddingProvider for MyEmbedder {
 #     fn embed(&self, _text: &str) -> Result<Vec<f32>, MemoryError> {
 #         Ok(vec![0.0; 384])
+#     }
+#     fn fingerprint(&self) -> EmbeddingFingerprint {
+#         EmbeddingFingerprint::new("mock", "test", 384)
 #     }
 # }
 #
@@ -58,14 +69,15 @@ To bootstrap an entire directory of session logs at once:
 # let config = BootstrapConfig::default();
 let report = engine.bootstrap_directory(
     Path::new("~/.claude/projects/my-project/sessions/"),
-    &MyEmbedder,
-    &extractor,
+    Arc::new(MyEmbedder),
+    Arc::new(extractor),
     &config,
     None,
-)?;
+)
+.await?;
 ```
 
-`bootstrap_directory` discovers top-level `*.jsonl` files (skipping subdirectories like `subagents/`) and processes each independently. Individual session failures are logged and skipped -- they do not abort the batch.
+`bootstrap_directory` discovers `*.jsonl` files at any depth (skipping subdirectories like `subagents/`) and processes each independently. Individual session failures are logged and skipped -- they do not abort the batch.
 
 ## Writing a custom `SessionExtractor`
 
@@ -106,18 +118,19 @@ The extractor receives a `CandidateEpisode` (pre-filtered turns with matched key
 
 ```rust
 # use memory_engine::bootstrap::BootstrapConfig;
-let config = BootstrapConfig {
-    scope: Some("project:my-app".into()),
-    max_turns: 100,
-    skip_existing: true, // default
-};
+let mut config = BootstrapConfig::default();
+config.scope = Some("project:my-app".into());
+config.max_turns = 100;
 ```
 
-| Field           | Type             | Default | Description                                                                                                 |
-| --------------- | ---------------- | ------- | ----------------------------------------------------------------------------------------------------------- |
-| `scope`         | `Option<String>` | `None`  | Scope path for ingested facts (e.g., `"project:my-app"`). `None` uses the root scope.                       |
-| `max_turns`     | `usize`          | `0`     | Maximum turns to process per session. `0` means no limit.                                                   |
-| `skip_existing` | `bool`           | `true`  | Skip sessions that have already been bootstrapped (idempotency). Set to `false` to allow duplicate imports. |
+| Field               | Type             | Default                                   | Description                                                                                                 |
+| ------------------- | ---------------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `scope`             | `Option<String>` | `None`                                    | Scope path for ingested facts (e.g., `"project:my-app"`). `None` uses the root scope.                       |
+| `max_turns`         | `usize`          | `0`                                       | Maximum turns to process per session. `0` means no limit.                                                   |
+| `skip_existing`     | `bool`           | `true`                                    | Skip sessions that have already been bootstrapped (idempotency). Set to `false` to allow duplicate imports. |
+| `denylist`          | `Vec<String>`    | `Vec::new()`                              | Author-seeded known-secret literals (see `load_secret_denylist`); augments the signature detectors.         |
+| `max_session_bytes` | `u64`            | `DEFAULT_MAX_SESSION_BYTES` (256 MiB)     | Maximum bytes read from a single session stream before parsing stops. `0` means no limit.                   |
+| `max_entries`       | `usize`          | `DEFAULT_MAX_ENTRIES` (1,000,000)         | Maximum parsed entries retained from a single session before parsing stops. `0` means no limit.            |
 
 ## Reading reports
 
@@ -134,6 +147,9 @@ let config = BootstrapConfig {
 | `facts_created`       | `usize`          | Facts inserted into the engine.                                   |
 | `facts_reinforced`    | `usize`          | Active facts with the same content reinforced instead of duplicated. |
 | `facts_blocked`       | `usize`          | Facts not written: a forget's tombstone blocks their content.     |
+| `secrets_redacted`    | `usize`          | Secret/PII findings scrubbed before any content reaches an extractor, the embedder, or storage. |
+| `memory_files_parsed` | `usize`          | Native `.md` memory files parsed (the `--memory-dir` path only).  |
+| `memory_files_skipped`| `usize`          | Native `.md` memory files skipped — unreadable, the `MEMORY.md` index, or no parseable body (the `--memory-dir` path only). |
 | `events_ingested`     | `usize`          | Marker events inserted (one per session).                         |
 | `outcome_counts`      | `OutcomeCounts`  | Breakdown by session outcome (success/failure/indeterminate).     |
 | `category_counts`     | `CategoryCounts` | Breakdown by episode category (bug/decision/convention/learning). |
@@ -169,12 +185,16 @@ Setting `skip_existing: false` disables this check and allows duplicate imports 
 The bootstrap pipeline runs in five stages:
 
 1. **Parse** -- Read JSONL entries from the session log. Malformed lines are skipped with a `tracing::warn`.
-2. **Reconstruct** -- Pair user and assistant entries into `ConversationTurn`s using UUID linkage with sequential fallback. Noise entries (progress, queue operations, file history snapshots) are filtered out.
+2. **Reconstruct** -- A turn is a prompt, its first assistant entry (by UUID linkage, with sequential fallback) and every entry linked beneath it up to the next prompt; each `tool_result` answers the call its `tool_use_id` names, the backfill reader's rule (#1159). Its assistant text is the visible text of those entries, never their thinking, and nothing from the rows Claude Code writes itself (a `<synthetic>` message, an API error). Noise entries (progress, queue operations, file history snapshots) make no prompt.
 3. **Classify** -- Determine the session outcome (Success, Failure, Indeterminate) from heuristic signals: git commits, passing tests, error loops, interruptions, and user sentiment.
 4. **Filter** -- Apply keyword pre-filter to surface candidate episodes in four categories: Bug, Decision, Convention, and Learning.
 5. **Extract** -- Pass each candidate episode to the `SessionExtractor` to produce facts, then ingest them with backdated `t_created` and `last_accessed` timestamps for correct Ebbinghaus decay.
 
 The entire ingest phase (marker event + facts) runs within a SQLite savepoint for crash safety. On failure, the savepoint is rolled back with no side effects.
+
+A fact's content is its turns' `User:` and `Assistant:` text, cut to its first 2,000 bytes (on a character boundary), so a long multi-row turn can lose its last words.
+
+Facts stored before the assistant text became visible text only are not rewritten: a session with a bootstrap marker is skipped, so its facts keep the text they were stored with, thinking included where the turn's first row was a thinking block. A `--reprocess` run rebuilds the session's facts from visible text; their content differs from the old facts', so no twin is reinforced and each candidate turn gets a new fact beside its old one, which stays active. Erase a session's old bootstrap facts before reprocessing it if they must go.
 
 ## Limitations
 

@@ -54,6 +54,10 @@ pub struct SessionEntry {
     pub is_meta: Option<serde_json::Value>,
     #[serde(default)]
     pub is_compact_summary: Option<serde_json::Value>,
+    /// Set on the row Claude Code writes for a failed API call: its text is Claude Code's, not
+    /// the model's (raw, so a wrong-typed value never fails the line).
+    #[serde(default)]
+    pub is_api_error_message: Option<serde_json::Value>,
     #[serde(default)]
     #[allow(dead_code)] // schema field, parsed but not yet consumed
     pub data: Option<serde_json::Value>,
@@ -65,6 +69,10 @@ pub struct MessagePayload {
     #[allow(dead_code)] // schema field; role is inferred from `EntryType` instead
     pub role: Option<String>,
     pub content: Option<serde_json::Value>,
+    /// The model that wrote the message; `<synthetic>` marks one Claude Code wrote itself (raw,
+    /// so a wrong-typed value never fails the line).
+    #[serde(default)]
+    pub model: Option<serde_json::Value>,
 }
 
 /// The prefix Claude Code writes when the user interrupts a turn; both
@@ -122,8 +130,8 @@ pub struct ToolUseResult {
 
 /// Deserialize a `toolUseResult` of any JSON shape into an `Option<ToolUseResult>`.
 ///
-/// Every non-null value is `Some`: a `None` would turn a tool-result row into a
-/// prompt and shift `extract_tool_calls`' positional pairing. An object keeps
+/// Every non-null value is `Some`: a `None` would make a result row that carries
+/// no `tool_result` block a prompt. An object keeps
 /// its fields when they are typed (a string `stdout`/`stderr`, a bool `isError`;
 /// `interrupted` is [`records_an_interrupt`] of the whole value); a wrong-typed
 /// field is dropped, never an error. A string becomes `stdout`; any other value
@@ -166,6 +174,8 @@ fn tool_use_result<'de, D: serde::Deserializer<'de>>(
 pub enum ContentBlock {
     Text(String),
     ToolUse {
+        /// The block's `id`, which the `tool_result` answering it names (#1159).
+        id: Option<String>,
         name: String,
         input: serde_json::Value,
     },
@@ -177,7 +187,7 @@ pub enum ContentBlock {
         #[allow(dead_code)]
         is_error: bool,
     },
-    Thinking(String),
+    /// Any other block, `thinking` included: the bootstrap never reads a model's reasoning.
     Other,
 }
 
@@ -500,7 +510,11 @@ fn parse_single_block(obj: &serde_json::Value) -> ContentBlock {
                 .unwrap_or("")
                 .to_owned();
             let input = obj.get("input").cloned().unwrap_or(serde_json::Value::Null);
-            ContentBlock::ToolUse { name, input }
+            let id = obj
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            ContentBlock::ToolUse { id, name, input }
         }
         "tool_result" => {
             let content = match obj.get("content") {
@@ -513,14 +527,6 @@ fn parse_single_block(obj: &serde_json::Value) -> ContentBlock {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             ContentBlock::ToolResult { content, is_error }
-        }
-        "thinking" => {
-            let text = obj
-                .get("thinking")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_owned();
-            ContentBlock::Thinking(text)
         }
         _ => ContentBlock::Other,
     }
@@ -810,7 +816,7 @@ mod tests {
         let blocks = parse_content_blocks(&content);
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
-            ContentBlock::ToolUse { name, input } => {
+            ContentBlock::ToolUse { name, input, .. } => {
                 assert_eq!(name, "Read");
                 assert_eq!(input["path"], "/tmp");
             }
@@ -819,12 +825,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_content_blocks_thinking() {
+    fn parse_content_blocks_skip_thinking() {
         let content =
             serde_json::json!([{"type": "thinking", "thinking": "let me reason about this"}]);
         let blocks = parse_content_blocks(&content);
         assert_eq!(blocks.len(), 1);
-        assert!(matches!(&blocks[0], ContentBlock::Thinking(t) if t == "let me reason about this"));
+        assert!(matches!(&blocks[0], ContentBlock::Other));
     }
 
     #[test]

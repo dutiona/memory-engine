@@ -104,7 +104,7 @@ impl SessionExtractor for KeywordExtractor {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Build content string from episode turns, truncated to `MAX_LEN` chars.
+/// Build content string from episode turns, truncated to `MAX_LEN` bytes on a char boundary.
 fn build_content(episode: &CandidateEpisode) -> String {
     const MAX_LEN: usize = 2000;
 

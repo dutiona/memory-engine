@@ -65,7 +65,7 @@ pub struct ConflictResolution {
 
 ```rust
 use memory_engine::traits::{ConflictArbiter, CrudDecision};
-use memory_engine::types::Fact;
+use memory_engine::types::{Fact, FactType, NewFact};
 use memory_engine::error::Result;
 
 struct RecencyArbiter;
@@ -82,7 +82,8 @@ impl ConflictArbiter for RecencyArbiter {
 }
 
 // Resolve: arbiter decides, engine executes
-let result = engine.resolve_conflict(&RecencyArbiter, old_fact_id, &new_fact)?;
+let candidate = NewFact::builder("new content", vec![0.1; 4], FactType::Semantic).build();
+let result = engine.resolve_conflict(&RecencyArbiter, old_fact_id, &candidate).await?;
 match result.decision {
     CrudDecision::Update => println!("replaced fact {}", result.old_fact_id),
     CrudDecision::Noop => println!("kept existing fact"),

@@ -359,7 +359,8 @@ impl Reader {
         self.push(line, entry, "p", Content::Prompt { text: Some(text) });
     }
 
-    /// A `tool_result` block: the record of the call it names, at this entry.
+    /// A `tool_result` block: the record of the call it names, at this entry. The CLI bootstrap
+    /// pairs by this same rule (`memory_engine` `bootstrap/filter.rs`, #1159).
     fn result(&mut self, line: usize, entry: &Entry<'_>, block: &Value) {
         let Some(call) = block
             .get("tool_use_id")
@@ -1227,6 +1228,387 @@ mod tests {
             if (backfill, bootstrap) != (expected, expected) {
                 wrong.push(format!(
                     "{name}: expected {expected}, backfill {backfill}, bootstrap {bootstrap}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// Both transcript readers pair a tool result with the call its `tool_use_id` names (#1159),
+    /// held to one expected table: two readers wrong the same way would agree.
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // one table, seven cases
+    async fn both_readers_pair_results_by_tool_use_id() {
+        use std::collections::BTreeMap;
+
+        use memory_engine::bootstrap::{
+            CandidateEpisode, ExtractedFact, SessionExtractor, SessionOutcome,
+        };
+
+        struct Recorder(std::sync::Mutex<Vec<(String, Option<String>)>>);
+
+        impl SessionExtractor for Recorder {
+            fn extract(
+                &self,
+                episode: &CandidateEpisode,
+                _outcome: &SessionOutcome,
+            ) -> memory_engine::Result<Vec<ExtractedFact>> {
+                for turn in &episode.turns {
+                    for call in &turn.tool_calls {
+                        self.0
+                            .lock()
+                            .unwrap()
+                            .push((call.tool_name.clone(), call.stdout.clone()));
+                    }
+                }
+                Ok(Vec::new())
+            }
+        }
+
+        struct Case {
+            name: &'static str,
+            lines: Vec<String>,
+            backfill: Vec<(&'static str, Option<&'static str>)>,
+            bootstrap: Vec<(&'static str, Option<&'static str>)>,
+            orphan: bool,
+        }
+
+        fn table(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
+            pairs
+                .iter()
+                .map(|(t, r)| (t.to_string(), r.map(str::to_owned)))
+                .collect()
+        }
+
+        let call = |id: &str, name: &str| -> Value {
+            json!({ "type": "tool_use", "id": id, "name": name, "input": {} })
+        };
+
+        let prompt = |time: &str| -> String {
+            entry(
+                "user",
+                "u1",
+                time,
+                &json!({
+                    "parentUuid": null,
+                    "message": { "role": "user", "content": "Fix the parser." },
+                }),
+            )
+        };
+
+        let a = |uuid: &str, time: &str, parent: &str, id: &str, blocks: Value| -> String {
+            entry(
+                "assistant",
+                uuid,
+                time,
+                &json!({
+                    "parentUuid": parent,
+                    "message": {
+                        "id": id,
+                        "role": "assistant",
+                        "model": "claude-sonnet-4-5",
+                        "content": blocks,
+                        "stop_reason": "tool_use",
+                    },
+                }),
+            )
+        };
+
+        let r = |uuid: &str,
+                 time: &str,
+                 parent: &str,
+                 id: &str,
+                 text: &str,
+                 with_result: bool|
+         -> String {
+            let mut row = json!({
+                "parentUuid": parent,
+                "message": {
+                    "role": "user",
+                    "content": [{ "type": "tool_result", "tool_use_id": id, "content": text }],
+                },
+            });
+            if with_result {
+                row["toolUseResult"] = json!(text);
+            }
+            entry("user", uuid, time, &row)
+        };
+
+        let cases = vec![
+            Case {
+                name: "native reverse",
+                lines: vec![
+                    prompt("2026-03-19T10:00:00.000Z"),
+                    a(
+                        "a1",
+                        "2026-03-19T10:00:01.000Z",
+                        "u1",
+                        "m1",
+                        json!([call("t_read", "Read"), call("t_grep", "Grep")]),
+                    ),
+                    r(
+                        "r1",
+                        "2026-03-19T10:00:02.000Z",
+                        "a1",
+                        "t_grep",
+                        "out-grep",
+                        true,
+                    ),
+                    r(
+                        "r2",
+                        "2026-03-19T10:00:03.000Z",
+                        "a1",
+                        "t_read",
+                        "out-read",
+                        true,
+                    ),
+                ],
+                backfill: vec![("Grep", Some("out-grep")), ("Read", Some("out-read"))],
+                bootstrap: vec![("Grep", Some("out-grep")), ("Read", Some("out-read"))],
+                orphan: false,
+            },
+            Case {
+                name: "split rows",
+                lines: vec![
+                    prompt("2026-03-19T10:00:00.000Z"),
+                    a(
+                        "a0",
+                        "2026-03-19T10:00:01.000Z",
+                        "u1",
+                        "m1",
+                        json!([json!({ "type": "thinking", "thinking": "think" })]),
+                    ),
+                    a(
+                        "a1",
+                        "2026-03-19T10:00:02.000Z",
+                        "a0",
+                        "m1",
+                        json!([call("t_read", "Read")]),
+                    ),
+                    a(
+                        "a2",
+                        "2026-03-19T10:00:03.000Z",
+                        "a1",
+                        "m1",
+                        json!([call("t_grep", "Grep")]),
+                    ),
+                    r(
+                        "r1",
+                        "2026-03-19T10:00:04.000Z",
+                        "a2",
+                        "t_grep",
+                        "out-grep",
+                        true,
+                    ),
+                    r(
+                        "r2",
+                        "2026-03-19T10:00:05.000Z",
+                        "a1",
+                        "t_read",
+                        "out-read",
+                        true,
+                    ),
+                ],
+                backfill: vec![("Grep", Some("out-grep")), ("Read", Some("out-read"))],
+                bootstrap: vec![("Grep", Some("out-grep")), ("Read", Some("out-read"))],
+                orphan: false,
+            },
+            Case {
+                name: "no toolUseResult",
+                lines: vec![
+                    prompt("2026-03-19T10:00:00.000Z"),
+                    a(
+                        "a1",
+                        "2026-03-19T10:00:01.000Z",
+                        "u1",
+                        "m1",
+                        json!([call("t_read", "Read"), call("t_grep", "Grep")]),
+                    ),
+                    r(
+                        "r1",
+                        "2026-03-19T10:00:02.000Z",
+                        "a1",
+                        "t_grep",
+                        "out-grep",
+                        true,
+                    ),
+                    r(
+                        "r2",
+                        "2026-03-19T10:00:03.000Z",
+                        "a1",
+                        "t_read",
+                        "out-read",
+                        false,
+                    ),
+                ],
+                backfill: vec![("Grep", Some("out-grep")), ("Read", Some("out-read"))],
+                bootstrap: vec![("Grep", Some("out-grep")), ("Read", None)],
+                orphan: false,
+            },
+            Case {
+                name: "orphan",
+                lines: vec![
+                    prompt("2026-03-19T10:00:00.000Z"),
+                    a(
+                        "a1",
+                        "2026-03-19T10:00:01.000Z",
+                        "u1",
+                        "m1",
+                        json!([call("t_read", "Read")]),
+                    ),
+                    r(
+                        "r1",
+                        "2026-03-19T10:00:02.000Z",
+                        "a1",
+                        "t_none",
+                        "out-none",
+                        true,
+                    ),
+                    r(
+                        "r2",
+                        "2026-03-19T10:00:03.000Z",
+                        "a1",
+                        "t_read",
+                        "out-read",
+                        true,
+                    ),
+                ],
+                backfill: vec![("Read", Some("out-read"))],
+                bootstrap: vec![("Read", Some("out-read"))],
+                orphan: true,
+            },
+            Case {
+                name: "duplicate id",
+                lines: vec![
+                    prompt("2026-03-19T10:00:00.000Z"),
+                    a(
+                        "a1",
+                        "2026-03-19T10:00:01.000Z",
+                        "u1",
+                        "m1",
+                        json!([call("t_dup", "Read")]),
+                    ),
+                    a(
+                        "a2",
+                        "2026-03-19T10:00:02.000Z",
+                        "a1",
+                        "m1",
+                        json!([call("t_dup", "Grep")]),
+                    ),
+                    r(
+                        "r1",
+                        "2026-03-19T10:00:03.000Z",
+                        "a2",
+                        "t_dup",
+                        "out-grep",
+                        true,
+                    ),
+                ],
+                backfill: vec![("Grep", Some("out-grep"))],
+                bootstrap: vec![("Grep", Some("out-grep")), ("Read", None)],
+                orphan: false,
+            },
+            Case {
+                name: "never answered",
+                lines: vec![
+                    prompt("2026-03-19T10:00:00.000Z"),
+                    a(
+                        "a1",
+                        "2026-03-19T10:00:01.000Z",
+                        "u1",
+                        "m1",
+                        json!([call("t_read", "Read"), call("t_grep", "Grep")]),
+                    ),
+                    r(
+                        "r1",
+                        "2026-03-19T10:00:02.000Z",
+                        "a1",
+                        "t_read",
+                        "out-read",
+                        true,
+                    ),
+                ],
+                backfill: vec![("Read", Some("out-read"))],
+                bootstrap: vec![("Grep", None), ("Read", Some("out-read"))],
+                orphan: false,
+            },
+            Case {
+                name: "result before call",
+                lines: vec![
+                    prompt("2026-03-19T10:00:00.000Z"),
+                    r(
+                        "r1",
+                        "2026-03-19T10:00:01.000Z",
+                        "u1",
+                        "t_read",
+                        "out-read",
+                        true,
+                    ),
+                    a(
+                        "a1",
+                        "2026-03-19T10:00:02.000Z",
+                        "u1",
+                        "m1",
+                        json!([call("t_read", "Read")]),
+                    ),
+                ],
+                backfill: vec![],
+                bootstrap: vec![("Read", None)],
+                orphan: false,
+            },
+        ];
+
+        let mut wrong: Vec<String> = Vec::new();
+        for case in cases {
+            let bytes = body(&case.lines);
+
+            let mapped = read(&bytes).unwrap();
+            let backfill: BTreeMap<String, Option<String>> = events(&mapped)
+                .iter()
+                .filter_map(|e| match &e.record.content {
+                    Content::ToolUse { tool, result, .. } => Some((tool.clone(), result.clone())),
+                    _ => None,
+                })
+                .collect();
+            let expected = table(&case.backfill);
+            if backfill != expected {
+                wrong.push(format!(
+                    "{}: backfill {backfill:?}, expected {expected:?}",
+                    case.name
+                ));
+            }
+            if case.orphan {
+                let got = mapped.skipped.get("orphan tool_result");
+                if got != Some(&1) {
+                    wrong.push(format!("{}: orphan skipped {got:?}", case.name));
+                }
+            }
+
+            let engine = memory_engine::MemoryEngine::builder(4).build().unwrap();
+            let recorder = std::sync::Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+            let report = engine
+                .bootstrap_session(
+                    std::io::Cursor::new(bytes.clone()),
+                    std::sync::Arc::new(Zero),
+                    recorder.clone(),
+                    &memory_engine::BootstrapConfig::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+            if report.turns_reconstructed != 1 {
+                wrong.push(format!(
+                    "{}: turns_reconstructed = {}",
+                    case.name, report.turns_reconstructed
+                ));
+            }
+            let bootstrap: BTreeMap<String, Option<String>> =
+                recorder.0.lock().unwrap().iter().cloned().collect();
+            let expected = table(&case.bootstrap);
+            if bootstrap != expected {
+                wrong.push(format!(
+                    "{}: bootstrap {bootstrap:?}, expected {expected:?}",
+                    case.name
                 ));
             }
         }

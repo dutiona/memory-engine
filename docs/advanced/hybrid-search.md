@@ -155,16 +155,10 @@ FTS/Vector sources → RRF merge → collect top-N facts → Reranker → trunca
 `rerank_depth` controls how many candidates the reranker sees before the final truncation to `limit`. It is clamped to at least `limit` -- it can only widen the candidate pool, never shrink it.
 
 ```rust
-let query = SearchQuery {
-    text: Some("memory consolidation".into()),
-    embedding: Some(embedder.embed("memory consolidation")?),
-    mode: SearchMode::Hybrid,
-    limit: 10,
-    rerank_depth: Some(50),  // reranker sees 50 candidates, output truncated to 10
-    valid_at: None,
-    fact_type: None,
-    scope: None,
-};
+let query = SearchQuery::new(SearchMode::Hybrid, 10)
+    .text("memory consolidation")
+    .embedding(embedder.embed("memory consolidation")?)
+    .rerank_depth(50);  // reranker sees 50 candidates, output truncated to 10
 ```
 
 When `rerank_depth` is `None`, falls back to `limit` (no over-fetch beyond temporal 3x).
@@ -195,18 +189,14 @@ Facts are content-hashed with Blake3 at insertion time. The 32-character hex has
 ## Usage
 
 ```rust
-let query = SearchQuery {
-    text: Some("memory consolidation".into()),
-    embedding: Some(embedder.embed("memory consolidation")?),
-    mode: SearchMode::Hybrid,
-    limit: 10,
-    rerank_depth: None,                       // or Some(50) to over-fetch for reranker
-    valid_at: Some(Utc::now()),
-    fact_type: Some(FactType::Semantic),
-    scope: None,
-};
+// Add `.rerank_depth(50)` to over-fetch for the reranker.
+let query = SearchQuery::new(SearchMode::Hybrid, 10)
+    .text("memory consolidation")
+    .embedding(embedder.embed("memory consolidation")?)
+    .valid_at(Utc::now())
+    .fact_type(FactType::Semantic);
 
-let results = engine.query(&query)?;
+let results = engine.query(&query).await?;
 for r in &results {
     println!("[{:.4}] {:?} — {}", r.score, r.match_type, r.fact.content);
 }

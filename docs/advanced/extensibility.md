@@ -25,6 +25,8 @@ Called during `add_fact()` to compute the embedding vector for new facts. The en
 ```rust
 pub trait EmbeddingProvider {
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
+    /// The embedding model's identity, checked against the store's (ADR 0015).
+    fn fingerprint(&self) -> EmbeddingFingerprint;
 }
 ```
 
@@ -44,6 +46,10 @@ impl EmbeddingProvider for OnnxEmbedder {
         // Run ONNX inference, extract pooled output
         // ...
         Ok(embedding)
+    }
+
+    fn fingerprint(&self) -> EmbeddingFingerprint {
+        EmbeddingFingerprint::new("onnx-model", "onnx", self.dim)
     }
 }
 ```
@@ -127,8 +133,8 @@ Called during `add_fact()` to decide whether a newly inserted fact should be pin
 ```rust
 pub trait PersistenceClassifier {
     /// Decide if a fact should be pinned (never forgotten).
-    fn should_pin(&self, fact: &Fact) -> bool {
-        let _ = fact;
+    fn should_pin(&self, input: &ClassifierInput) -> bool {
+        let _ = input;
         false
     }
 }
@@ -136,22 +142,22 @@ pub trait PersistenceClassifier {
 
 The default implementation returns `false` — opt-in, zero behavior change for existing consumers.
 
-**Classifier input caveat:** The `Fact` passed to `should_pin()` during `add_fact()` is a pre-insert synthetic with `id=0`, `scope_id=0`, and `importance_score` seeded from the base `importance`. Classifiers should only rely on `content`, `fact_type`, `importance` (caller hint), and `metadata` — not on `id`, `scope_id`, `importance_score`, or `access_count`.
+**Classifier input:** `should_pin()` receives a `ClassifierInput`, an owned view of the four fields a classifier may read: `content`, `fact_type`, `base_importance` (the caller's hint) and `metadata`. The fact is not inserted yet, so its id, scope and score are not offered.
 
 Implementation example:
 
 ```rust
 use memory_engine::traits::PersistenceClassifier;
-use memory_engine::types::Fact;
+use memory_engine::ClassifierInput;
 
 struct KeywordPinner {
     keywords: Vec<String>,
 }
 
 impl PersistenceClassifier for KeywordPinner {
-    fn should_pin(&self, fact: &Fact) -> bool {
+    fn should_pin(&self, input: &ClassifierInput) -> bool {
         // Pin facts containing critical keywords
-        self.keywords.iter().any(|kw| fact.content.contains(kw))
+        self.keywords.iter().any(|kw| input.content.contains(kw))
     }
 }
 ```
@@ -276,7 +282,7 @@ pub trait VectorSearchStrategy: Send + Sync {
               fact_type: Option<&FactType>, scope_ids: Option<&[i64]>,
     ) -> Result<Vec<VectorResult>>;
 
-    fn notify_insert(&self, _fact_id: i64, _embedding: &[f32]) {}
+    fn notify_insert(&self, _fact_id: i64, _embedding: &[f32]) -> Result<()> { Ok(()) }
     fn notify_expire(&self, _fact_id: i64) {}
 
     fn name(&self) -> &str;
@@ -316,7 +322,7 @@ let policy = PrunePolicy {
     base_importance_weight: 0.2,
     ..PrunePolicy::default()
 };
-engine.prune(&policy)?;
+engine.prune(&policy).await?;
 ```
 
 This is a policy (parameter set), not a strategy (pluggable algorithm). See [Forgetting](forgetting.md) (the decay prune) for the full scoring formula.

@@ -96,6 +96,10 @@ async fn bootstrap_success_session() {
         "should classify as success or indeterminate"
     );
     assert_eq!(report.events_ingested, 1, "one marker event per session");
+    assert_eq!(
+        report.outcome_counts.success, 1,
+        "the test and commit calls make it a success"
+    );
 }
 
 #[tokio::test]
@@ -189,6 +193,10 @@ async fn bootstrap_failure_session() {
     assert_eq!(report.sessions_processed, 1);
     assert!(report.entries_parsed > 0);
     assert_eq!(report.events_ingested, 1);
+    assert_eq!(
+        report.outcome_counts.failure, 1,
+        "three equal error stderrs make it a failure"
+    );
 }
 
 #[tokio::test]
@@ -798,6 +806,137 @@ async fn bootstrap_mixed_session_fixture() {
             .all(|f| f.content.contains("User:") || f.content.contains("Assistant:")),
         "every fact's content must come from reconstructed turn text"
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // eight transcript rows, written out
+async fn bootstrap_facts_never_store_thinking() {
+    // A turn's assistant_text is the non-empty visible text blocks of every
+    // assistant row it owns, joined by "\n": never a thinking block, never a
+    // row Claude Code writes itself (a `<synthetic>` model or an
+    // `isApiErrorMessage` row). Stored facts must not leak any of them.
+    use std::sync::Mutex;
+
+    use memory_engine::bootstrap::{
+        CandidateEpisode, ExtractedFact, SessionExtractor, SessionOutcome,
+    };
+
+    struct RecordingKeywordExtractor {
+        contents: Mutex<Vec<String>>,
+    }
+
+    impl SessionExtractor for RecordingKeywordExtractor {
+        fn extract(
+            &self,
+            episode: &CandidateEpisode,
+            outcome: &SessionOutcome,
+        ) -> memory_engine::Result<Vec<ExtractedFact>> {
+            let facts = KeywordExtractor.extract(episode, outcome).unwrap();
+            self.contents
+                .lock()
+                .unwrap()
+                .extend(facts.iter().map(|f| f.content.clone()));
+            Ok(facts)
+        }
+    }
+
+    let jsonl = [
+        serde_json::json!({
+            "type": "user", "sessionId": "thinking-sess",
+            "timestamp": "2026-03-19T10:00:00Z", "uuid": "u1", "parentUuid": null,
+            "message": {"role": "user", "content": [{"type": "text", "text": "Fix the parser."}]},
+        }),
+        serde_json::json!({
+            "type": "assistant", "sessionId": "thinking-sess",
+            "timestamp": "2026-03-19T10:00:01Z", "uuid": "a0", "parentUuid": "u1",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "PRIVATE-REASONING"}],
+            },
+        }),
+        serde_json::json!({
+            "type": "assistant", "sessionId": "thinking-sess",
+            "timestamp": "2026-03-19T10:00:02Z", "uuid": "a1", "parentUuid": "a0",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "first"}]},
+        }),
+        serde_json::json!({
+            "type": "assistant", "sessionId": "thinking-sess",
+            "timestamp": "2026-03-19T10:00:03Z", "uuid": "a2", "parentUuid": "a1",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+            },
+        }),
+        serde_json::json!({
+            "type": "user", "sessionId": "thinking-sess",
+            "timestamp": "2026-03-19T10:00:04Z", "uuid": "r1", "parentUuid": "a2",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
+            },
+            "toolUseResult": "ok",
+        }),
+        serde_json::json!({
+            "type": "assistant", "sessionId": "thinking-sess",
+            "timestamp": "2026-03-19T10:00:05Z", "uuid": "a3", "parentUuid": "r1",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+        }),
+        serde_json::json!({
+            "type": "assistant", "sessionId": "thinking-sess",
+            "timestamp": "2026-03-19T10:00:06Z", "uuid": "a4", "parentUuid": "a3",
+            "message": {
+                "role": "assistant",
+                "model": "<synthetic>",
+                "content": [{"type": "text", "text": "No response requested."}],
+            },
+        }),
+        serde_json::json!({
+            "type": "assistant", "sessionId": "thinking-sess",
+            "timestamp": "2026-03-19T10:00:07Z", "uuid": "a5", "parentUuid": "a4",
+            "isApiErrorMessage": true,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "API Error: overloaded"}],
+            },
+        }),
+    ]
+    .iter()
+    .map(serde_json::Value::to_string)
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    let engine = engine();
+    let recorder = std::sync::Arc::new(RecordingKeywordExtractor {
+        contents: Mutex::new(Vec::new()),
+    });
+    let config = BootstrapConfig::default();
+
+    engine
+        .bootstrap_session(
+            Cursor::new(jsonl),
+            std::sync::Arc::new(TestEmbedder) as std::sync::Arc<dyn EmbeddingProvider>,
+            recorder.clone() as std::sync::Arc<dyn SessionExtractor>,
+            &config,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let contents = recorder.contents.lock().unwrap().clone();
+    assert!(
+        !contents.is_empty(),
+        "an extractor must have been offered a candidate"
+    );
+    for content in &contents {
+        assert!(content.contains("first"), "visible text lost: {content}");
+        assert!(content.contains("done"), "visible text lost: {content}");
+        for forbidden in ["PRIVATE-REASONING", "No response requested.", "API Error"] {
+            assert!(
+                !content.contains(forbidden),
+                "forbidden text leaked into a fact: {content}"
+            );
+        }
+    }
 }
 
 /// #1024 (decision 6): a session bootstrap adds its reported `secrets_redacted`, turns scrubbed

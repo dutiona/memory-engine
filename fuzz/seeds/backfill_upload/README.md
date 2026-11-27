@@ -13,11 +13,14 @@ it, so `MEMORY.md` and the stub reach their own skips):
   `crates/memory-engine-mcp/tests/fixtures/plugin-stores/`, the plugin-store export input.
 
 Each is a dry run: the target replays a dry run that answers 200 as the write of its preview, so the commit path runs
-too. Seeds are source, not fuzzer output (`fuzz/.gitignore` ignores `corpus/`), so they live here and the run names
-them after the corpus directory: libFuzzer writes every new input to the first directory it is given.
+too. Seeds are source, so they live here, and the run names them after the corpus directory: libFuzzer writes every
+new input to the first directory it is given. That directory is `fuzz/target/corpus/backfill_upload`, under the
+directory cargo marks with `CACHEDIR.TAG`, so the fuzzer's output goes with the build output; the empty
+`fuzz/artifacts/backfill_upload/` cargo-fuzz always creates is removed after a clean run, and a crash's artifact
+stays there to be read (#1161).
 
 ```sh
-cargo +nightly fuzz run backfill_upload fuzz/corpus/backfill_upload fuzz/seeds/backfill_upload -- -create_missing_dirs=1 -max_total_time=60 -timeout=10
+cargo +nightly fuzz run backfill_upload fuzz/target/corpus/backfill_upload fuzz/seeds/backfill_upload -- -create_missing_dirs=1 -max_total_time=60 -timeout=10 && find fuzz/artifacts -type d -empty -delete
 ```
 
 Regenerating, from the repository root, after a fixture changes:

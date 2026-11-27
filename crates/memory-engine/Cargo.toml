@@ -205,8 +205,9 @@ path = "../../tests/all_features_store.rs"
 name = "gate_matrix_parity"
 path = "../../tests/gate_matrix_parity.rs"
 
-# #1092: every signature docs/reference/api.md documents is the code's. Runs inside
-# cargo test --workspace --all-features; registered by hand (autotests off).
+# #1092: every signature docs/reference/api.md documents is the code's; #1160: so are the
+# guides' trait/impl fences and api.md's field lists. Runs inside cargo test --workspace
+# --all-features; registered by hand (autotests off).
 [[test]]
 name = "api_doc_parity"
 path = "../../tests/api_doc_parity.rs"
