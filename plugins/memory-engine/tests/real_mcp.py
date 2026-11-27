@@ -148,22 +148,32 @@ def start(name):
     raise SystemExit(name + " not ready in 30 s")
 
 
+def signal_group(pgid, sig):
+    """Send sig to the group; False when no member is left (an unreaped leader still counts)."""
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+
+
 def stop(name):
-    """SIGTERM the child's process group, then SIGKILL it after 60 s. Never raises, so a final cleanup reaches
+    """SIGTERM the child's process group, then SIGKILL whatever is left of the group after 60 s: the leader exiting
+    first does not end the wait, since a descendant may ignore SIGTERM. Never raises, so a final cleanup reaches
     every child."""
     proc = PROCS.get(name)
     if proc is None:
         return
-    for sig, grace in ((signal.SIGTERM, 60), (signal.SIGKILL, None)):
-        try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
-            pass
-        try:
-            proc.wait(timeout=grace)
+    signal_group(proc.pid, signal.SIGTERM)
+    end = time.monotonic() + 60
+    while time.monotonic() < end:
+        proc.poll()
+        if not signal_group(proc.pid, 0):
             break
-        except subprocess.TimeoutExpired:
-            pass
+        time.sleep(0.1)
+    else:
+        signal_group(proc.pid, signal.SIGKILL)
+    proc.wait()
     del PROCS[name]
 
 
