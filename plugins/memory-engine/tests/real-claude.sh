@@ -1,7 +1,12 @@
 #!/bin/sh
 # real-claude.sh: the plugin under a real `claude -p`, against tests/stub_server.py. Desktop only.
 #
-#   ME_TEST_CLAUDE_TOKEN_FILE=<file> sh tests/real-claude.sh [--marketplace <source>]
+#   ME_TEST_CLAUDE_TOKEN_FILE=<file> ME_TEST_KB_DIR=<dir> [ME_TEST_ME_BIN=<file>] sh tests/real-claude.sh [--marketplace <source>]
+#
+# Phases A and U run against tests/stub_server.py. Phases M and L (#1028) run the plugin's MCP servers against a local
+# memory-engine-mcp (ME_TEST_ME_BIN, default target/debug/memory-engine-mcp of this checkout, with memory-engine-cli
+# beside it) and a local knowledge-base (ME_TEST_KB_DIR, a knowledge-base checkout whose .venv was synced with
+# `uv sync --locked`), on loopback ports, through tests/real_mcp.py. Nothing here builds, syncs or downloads.
 #
 # The file holds a token from `claude setup-token`, bare or as a `NAME=token` line (mode 0600, outside the
 # repository). Every `claude` call runs under a scratch HOME, in an environment built from nothing: the token reaches
@@ -18,7 +23,16 @@ TOKFILE=${ME_TEST_CLAUDE_TOKEN_FILE:-$HOME/.config/memory-engine/test-secrets/cl
 	printf 'missing prerequisite: a readable ME_TEST_CLAUDE_TOKEN_FILE\n' >&2
 	exit 2
 }
-for tool in claude python3 git timeout; do
+ME_BIN=${ME_TEST_ME_BIN:-$REPO/target/debug/memory-engine-mcp}
+CLI_BIN=${ME_BIN%/*}/memory-engine-cli
+KB_BIN=${ME_TEST_KB_DIR:+$ME_TEST_KB_DIR/.venv/bin/knowledge-base}
+for f in "$ME_BIN" "$CLI_BIN" "${KB_BIN:-ME_TEST_KB_DIR}"; do
+	[ -x "$f" ] || {
+		printf 'missing prerequisite: %s\n' "$f" >&2
+		exit 2
+	}
+done
+for tool in claude python3 git timeout curl; do
 	command -v "$tool" >/dev/null 2>&1 || {
 		printf 'missing prerequisite: %s\n' "$tool" >&2
 		exit 2
@@ -93,7 +107,7 @@ phase() {
 	) || return 1
 	run_claude plugin marketplace add "$MARKET" >"$P/market.log" 2>&1 || return 1
 	_cfg="--config me_url=http://127.0.0.1:$PORT"
-	[ -n "${2-}" ] && _cfg="$_cfg --config dev_root=$2"
+	[ -n "${2-}" ] && _cfg="$_cfg --config dev_root=$2 --config kb_url=http://127.0.0.1:$PORT/kb"
 	run_claude plugin install memory-engine@memory-engine $_cfg >"$P/install.log" 2>&1 || return 1
 	(cd "$H/dev/proj" && timeout 300 python3 -I -c "$LAUNCH" "$TOKFILE" "$H" "$R/bin:/usr/bin:/bin" "$R/bin/claude" \
 		-p --max-turns 1 'Reply with the single word: ok') >"$P/claude.out" 2>"$P/claude.err"
@@ -179,7 +193,46 @@ empty_outbox() {
 	for f; do [ ! -e "$f" ] || return 1; done
 }
 
+# mcp_wire STUB OUTBOX TOKEN DEVROOT: the MCP requests the stub recorded carry the hooks' own facts. Every /mcp request
+# holds the token, the envelope, the configured dev root and exactly the ME-Project-* values of a queued event; every
+# /kb/mcp request holds the token and no ME- header; no request holds userinfo.
+mcp_wire() {
+	python3 -I -c '
+import glob, os, sys
+stub, outbox, token, dev = sys.argv[1:5]
+def headers(path):
+    out = {}
+    for line in open(path, encoding="latin-1").read().splitlines():
+        if ": " in line:
+            k, v = line.split(": ", 1)
+            out[k.lower()] = v
+    return out
+paths = {}
+for k, line in enumerate(open(os.path.join(stub, "other.log")), 1):
+    paths.setdefault(line.split()[2], []).append(k)
+events = [headers(os.path.join(d, "headers")) for d in glob.glob(os.path.join(outbox, "[0-9]*"))]
+assert events, "no queued event to compare with"
+facts = {k: v for k, v in events[0].items() if k.startswith("me-project-")}
+me = [headers(os.path.join(stub, "other", "%d.headers" % k)) for k in paths.get("/mcp", [])]
+kb = [headers(os.path.join(stub, "other", "%d.headers" % k)) for k in paths.get("/kb/mcp", [])]
+assert me and kb, sorted(paths)
+for h in me:
+    assert h.get("authorization") == "Bearer " + token and h.get("me-harness") == "claude-code", sorted(h)
+    assert h.get("me-client-version"), sorted(h)
+    got = {k: v for k, v in h.items() if k.startswith("me-project-")}
+    assert got == facts and got.get("me-project-dev-root") == dev, (got, facts)
+for h in kb:
+    assert h.get("authorization") == "Bearer " + token, sorted(h)
+    assert not [k for k in h if k.startswith("me-")], sorted(h)
+for f in glob.glob(os.path.join(stub, "other", "*")):
+    assert b"secret" not in open(f, "rb").read(), f
+print("mcp requests:", len(me), "me,", len(kb), "kb")
+' "$@"
+}
+
 check "real: the stub answered only 503 during the run" only_503 "$R/A/stub"
+check "real: the MCP requests carry the token and the hooks' facts; KB's only the token" \
+	mcp_wire "$R/A/stub" "$O" me_00000000000000000000000000000000 "$R/A/home/dev"
 if [ -f "$R/A/stub/log" ]; then
 	_late=$(awk -v t="$(cat "$R/A/exited")" '$1 >= t * 1000' "$R/A/stub/log" | wc -l | tr -d ' ')
 	printf '# info: %s of %s requests reached the stub after claude -p exited\n' "$_late" "$(wc -l <"$R/A/stub/log" | tr -d ' ')"
@@ -205,5 +258,138 @@ phase U || {
 check "real: hooks run and queue with an option unset" hooks_queued "$O" SessionStart SessionEnd
 check "real: no dev root is sent when dev_root is unset" headers_have "$O" "!ME-Project-Dev-Root"
 
+# ---------------------------------------------------------------- phases M and L: the MCP servers (#1028)
+
+# free_port: a loopback port nothing listens on now; kept for the phase, because the plugin's URLs are fixed at install.
+free_port() {
+	python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+}
+
+# mcp_phase NAME physical|link yes|no: a scratch HOME whose dev root dev-real is also reached through the symlink dev,
+# the remote-less project "café 'x" and the repository other under it, and the plugin installed against a local ME,
+# and a local KB when the third argument is yes. dev_root is the README's `cd ~/dev && pwd -P` (physical), or the
+# symlink itself (link). Sets P H O PROJ Q MP KP DEVROOT.
+mcp_phase() {
+	P=$R/$1
+	H=$P/home
+	O=$H/.local/state/memory-engine/outbox
+	PROJ="$H/dev-real/café 'x"
+	Q=$H/dev-real/other
+	mkdir -p "$PROJ" "$Q" "$H/.config/memory-engine/secrets" || return 1
+	ln -s "$H/dev-real" "$H/dev" || return 1
+	(
+		HOME=$H GIT_CONFIG_NOSYSTEM=1
+		export HOME GIT_CONFIG_NOSYSTEM
+		for d in "$PROJ" "$Q"; do
+			git init -q -b main "$d" &&
+				git -C "$d" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init || exit 1
+		done
+		git -C "$Q" remote add origin https://example.com/example/other.git
+	) || return 1
+	DEVROOT=$H/dev
+	[ "$2" = physical ] && DEVROOT=$(cd "$H/dev" && pwd -P)
+	MP=$(free_port) || return 1
+	KP=
+	if [ "$3" = yes ]; then KP=$(free_port) || return 1; fi
+	run_claude plugin marketplace add "$MARKET" >"$P/market.log" 2>&1 || return 1
+	_cfg="--config me_url=http://127.0.0.1:$MP --config dev_root=$DEVROOT"
+	[ -n "$KP" ] && _cfg="$_cfg --config kb_url=http://127.0.0.1:$KP"
+	run_claude plugin install memory-engine@memory-engine $_cfg >"$P/install.log" 2>&1
+}
+
+# mcp_run TURNS RESUME KB-QUERIES SERVERS (JSON each): real_mcp.py over this phase; SERVERS maps each plugin server to
+# the status its init event must show.
+mcp_run() {
+	python3 -I -c '
+import json, sys
+keys = ["dir", "home", "project", "pwd", "claude", "claude_token_file", "path", "me_bin", "cli_bin", "kb_bin",
+        "stub_embedder", "me_port", "kb_port", "machine", "add_dir", "dev_root", "nonce"]
+cfg = dict(zip(keys, sys.argv[1:18]))
+cfg["me_port"] = int(cfg["me_port"])
+cfg["kb_port"] = int(cfg["kb_port"]) if cfg["kb_port"] else None
+cfg["add_dirs"] = [cfg.pop("add_dir")]
+cfg["turns"], cfg["resume"], cfg["kb_queries"], cfg["want_servers"] = (json.loads(a) for a in sys.argv[18:22])
+tools = ["mcp__plugin_memory-engine_me__" + t for t in ("recall", "remember", "forget", "set_level")]
+tools += ["mcp__plugin_memory-engine_kb__" + t for t in ("search_index", "ingest_text", "ingest_url")]
+cfg["allowed_tools"] = tools + ["Bash(cd:*)", "Bash(pwd)"]
+json.dump(cfg, open(cfg["dir"] + "/config.json", "w"), ensure_ascii=False, indent=1)
+' "$P" "$H" "$PROJ" "$H/dev/café 'x" "$R/bin/claude" "$TOKFILE" "$R/bin:/usr/bin:/bin" "$ME_BIN" "$CLI_BIN" \
+		"${KB_BIN-}" "$HERE/stub_embedder.py" "$MP" "$KP" realrun "$Q" "$DEVROOT" "$NONCE" "$1" "$2" "$3" "$4" || return 1
+	timeout 1800 python3 -I "$HERE/real_mcp.py" "$P/config.json" >"$P/driver.log" 2>&1
+}
+
+# turns NONCE OTHER: the scripted turns of phase M, each naming its exact tool calls (real_mcp.py checks that the model
+# made them before anything else is judged).
+turns() {
+	python3 -I -c '
+import json, sys
+n, q = sys.argv[1:3]
+me, kb = "mcp__plugin_memory-engine_me__", "mcp__plugin_memory-engine_kb__"
+only = "Call nothing else, then reply with the single word: done"
+def t(label, prompt, expect, after=None):
+    return {"label": label, "prompt": prompt + " " + only, "expect": expect, "after": after}
+recall = "Call %srecall with query \"alpha-%s\". Then call %ssearch_index with query \"bravo-%s\"." % (me, n, kb, n)
+both = [[me + "recall", "alpha-" + n], [kb + "search_index", "bravo-" + n]]
+print(json.dumps([
+    t("T1", "Call %sremember with content \"alpha-%s is the codename of this test\". Then call %singest_text with "
+      "name \"note-%s\" and content \"bravo-%s is a document about this test\"." % (me, n, kb, n, n),
+      [[me + "remember", "alpha-" + n], [kb + "ingest_text", "bravo-" + n]], "restart"),
+    t("T2", recall, both, "rotate"),
+    t("T3", recall, both),
+    t("T4", "Run the Bash command: cd %s && pwd. Then call %sremember with content \"charlie-%s is the second fact "
+      "of this test\"." % (json.dumps(q), me, n), [["Bash", "other"], [me + "remember", "charlie-" + n]]),
+]))
+print(json.dumps(t("R1", "Call %srecall with query \"charlie-%s\"." % (me, n), [[me + "recall", "charlie-" + n]])))
+' "$@"
+}
+
+NONCE=$(python3 -I -c 'import secrets; print(secrets.token_hex(4))')
+mcheck() {
+	_name=$1
+	shift
+	check "$_name" python3 -I "$HERE/real_mcp.py" "$P/config.json" "$@"
+}
+
+mcp_phase M physical yes || {
+	printf 'not ok - phase M setup failed\n'
+	cat "$R/M/market.log" "$R/M/install.log" 2>/dev/null | sed 's/^/#   /'
+	exit 1
+}
+turns "$NONCE" "$Q" >"$P/turns.txt"
+mcp_run "$(sed -n 1p "$P/turns.txt")" "$(sed -n 2p "$P/turns.txt")" "[\"bravo-$NONCE\"]" \
+	'{"plugin:memory-engine:me": "connected", "plugin:memory-engine:kb": "connected"}'
+if [ -e "$P/out/precondition" ] || [ ! -s "$P/out/export.json" ]; then
+	printf 'not ok - phase M did not complete: %s\n' "$(cat "$P/out/precondition" 2>/dev/null || tail -n 3 "$P/driver.log")"
+	exit 1
+fi
+mcheck "real: ME and KB refuse a request without a token, and a rotated-out token, and take the current one" auth
+mcheck "real: the init events list exactly the me and kb servers, connected, and the seven tools" tools
+mcheck "real: every scripted MCP call answered without error, each ME answer opening with its call line" calls
+mcheck "real: every hook event and every MCP call record has the hooks' key, physical root and dev root" key
+mcheck "real: after restarting ME and KB, recall and search_index find what the session filed" restart
+mcheck "real: every ME call record is linked to its session; every KB call is captured in it" session
+mcheck "real: after a token rotation the same session keeps working (the helper read the new token)" rotation
+mcheck "real: after a cd into another repository, remember still files under the session's project" cd
+mcheck "real: a --resume of the session recalls what it filed, under the same session" resume
+check "real: the outbox and rejected/ are empty after the flush" empty_outbox
+mcheck "real: no machine token or Claude token in any file the phase wrote" leaks
+python3 -I "$HERE/real_mcp.py" "$P/config.json" cwd-info
+
+# Phase L: dev_root configured through the symlink, and no kb_url. One outcome on both channels: no key at all.
+mcp_phase L link no || {
+	printf 'not ok - phase L setup failed\n'
+	exit 1
+}
+mcp_run "[$(python3 -I -c '
+import json, sys
+print(json.dumps({"label": "L1", "prompt": "Call mcp__plugin_memory-engine_me__remember with content \"delta-%s is a fact\". Call nothing else, then reply with the single word: done" % sys.argv[1],
+                  "expect": [["mcp__plugin_memory-engine_me__remember", "delta-" + sys.argv[1]]], "after": None}))' "$NONCE")]" null '[]' \
+	'{"plugin:memory-engine:me": "connected", "plugin:memory-engine:kb": "failed"}'
+[ -s "$P/out/export.json" ] || {
+	printf 'not ok - phase L did not complete: %s\n' "$(tail -n 3 "$P/driver.log")"
+	exit 1
+}
+mcheck "real: without kb_url, only the kb server fails" tools
+mcheck "real: a dev root configured through a symlink gives no key on either channel, never two" unscoped
 printf '# %d checks, %d not ok\n' "$N" "$BAD"
 [ "$BAD" -eq 0 ]

@@ -6,7 +6,7 @@
     {
       "name": "memory-engine",
       "source": "./plugins/memory-engine",
-      "description": "Queue every Claude Code lifecycle event in a local outbox and deliver it to a memory-engine server"
+      "description": "Queue every Claude Code lifecycle event in a local outbox and deliver it to a memory-engine server, and give the model memory-engine and knowledge-base tools over MCP"
     }
   ]
 }

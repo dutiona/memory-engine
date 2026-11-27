@@ -5,7 +5,7 @@ LC_ALL=C
 export LC_ALL
 umask 077
 unset GIT_DIR GIT_WORK_TREE
-ME_VERSION=0.1.0
+ME_VERSION=0.2.0
 NL='
 '
 
@@ -27,7 +27,7 @@ O=$S/outbox
 TOKEN=$H/.config/memory-engine/secrets/token
 
 usage() {
-	printf 'usage: me-hook capture|session-start|flush\n' >&2
+	printf 'usage: me-hook capture|session-start|flush|headers me|kb\n' >&2
 	exit 1
 }
 
@@ -93,22 +93,29 @@ strip_userinfo() {
 	esac
 }
 
-# facts: F_ROOT F_UPSTREAM F_ORIGIN F_BRANCH from CLAUDE_PROJECT_DIR only; F_OK when there is a project at all.
+# facts DIR: F_ROOT F_UPSTREAM F_ORIGIN F_BRANCH of the project directory DIR; F_OK when there is a project at all.
 facts() {
 	F_OK= F_ROOT= F_UPSTREAM= F_ORIGIN= F_BRANCH=
-	_dir=${CLAUDE_PROJECT_DIR-}
-	[ -n "$_dir" ] || return 0
+	_dir=$1
+	case $_dir in /*) ;; *) return 0 ;; esac
 	case $_dir in *"$NL"*) return 0 ;; esac
 	[ -d "$_dir" ] || return 0
-	F_OK=1
-	_out=$(git -C "$_dir" rev-parse --path-format=absolute --git-dir --git-common-dir --show-toplevel </dev/null 2>/dev/null) || {
-		F_ROOT=$_dir
+	# Each capture ends in a sentinel, because command substitution strips every trailing line feed: a physical path
+	# ending in one would otherwise lose it and name another directory. A resolved path holding one is refused.
+	_out=$(git -C "$_dir" rev-parse --path-format=absolute --git-dir --git-common-dir --show-toplevel </dev/null 2>/dev/null && echo .) || {
+		# Physical, as git prints its top levels: the root and the dev root must share one path space.
+		F_ROOT=$(cd -P "$_dir" 2>/dev/null && pwd -P && echo .) || return 0
+		F_ROOT=${F_ROOT%"$NL".}
+		case $F_ROOT in "" | *"$NL"*) F_ROOT= && return 0 ;; esac
+		F_OK=1
 		return 0
 	}
+	_out=${_out%"$NL".}
 	_gd=${_out%%"$NL"*}
 	_rest=${_out#*"$NL"}
 	_cd=${_rest%%"$NL"*}
 	_top=${_rest#*"$NL"}
+	case $_top in *"$NL"*) return 0 ;; esac
 	if [ "$_gd" = "$_cd" ]; then
 		F_ROOT=$_top
 	else
@@ -117,6 +124,7 @@ facts() {
 		*) F_ROOT=$_top ;;
 		esac
 	fi
+	F_OK=1
 	_b=$(git -C "$_dir" symbolic-ref -q HEAD </dev/null 2>/dev/null) && case $_b in refs/heads/?*) F_BRANCH=${_b#refs/heads/} ;; esac
 	_u=$(git -C "$_dir" remote get-url upstream </dev/null 2>/dev/null) && [ -n "$_u" ] && strip_userinfo "$_u" && F_UPSTREAM=$R
 	_u=$(git -C "$_dir" remote get-url origin </dev/null 2>/dev/null) && [ -n "$_u" ] && strip_userinfo "$_u" && F_ORIGIN=$R
@@ -131,15 +139,16 @@ dev_root_ok() {
 	return 0
 }
 
-# fact_lines: the ME-Project-* header lines, an absent fact omitted; fails when a write fails.
+# fact_lines FMT: each present ME-Project-* fact as printf FMT NAME VALUE, an absent fact omitted; fails when a write
+# fails. Both channels print through it, so they send the same values.
 fact_lines() {
 	[ -n "$F_OK" ] || return 0
 	pct "$F_ROOT"
-	printf 'ME-Project-Root: %s\n' "$R" || return 1
-	if dev_root_ok; then printf 'ME-Project-Dev-Root: %s\n' "$DEV" || return 1; fi
-	if [ -n "$F_UPSTREAM" ]; then pct "$F_UPSTREAM" && printf 'ME-Project-Upstream-Url: %s\n' "$R" || return 1; fi
-	if [ -n "$F_ORIGIN" ]; then pct "$F_ORIGIN" && printf 'ME-Project-Origin-Url: %s\n' "$R" || return 1; fi
-	if [ -n "$F_BRANCH" ]; then pct "$F_BRANCH" && printf 'ME-Project-Branch: %s\n' "$R" || return 1; fi
+	printf "$1" ME-Project-Root "$R" || return 1
+	if dev_root_ok; then printf "$1" ME-Project-Dev-Root "$DEV" || return 1; fi
+	if [ -n "$F_UPSTREAM" ]; then pct "$F_UPSTREAM" && printf "$1" ME-Project-Upstream-Url "$R" || return 1; fi
+	if [ -n "$F_ORIGIN" ]; then pct "$F_ORIGIN" && printf "$1" ME-Project-Origin-Url "$R" || return 1; fi
+	if [ -n "$F_BRANCH" ]; then pct "$F_BRANCH" && printf "$1" ME-Project-Branch "$R" || return 1; fi
 	return 0
 }
 
@@ -190,7 +199,7 @@ capture() {
 	[ -e "$_t" ] && rm -rf "$_t"
 	mkdir "$_t" || { heal && mkdir "$_t"; } || exit 0
 	record_endpoint "$ME_URL"
-	facts
+	facts "${CLAUDE_PROJECT_DIR-}"
 	cat >"$_t/body" || abandon
 	_d=$(date -u '+%s %Y-%m-%dT%H:%M:%SZ') || abandon
 	_ep=${_d%% *}
@@ -226,7 +235,7 @@ capture() {
 			printf 'ME-Event-Seq: %s\n' "$_seq" &&
 			printf 'ME-Harness: claude-code\n' &&
 			printf 'ME-Client-Version: %s\n' "$ME_VERSION" &&
-			fact_lines
+			fact_lines '%s: %s\n'
 	} >"$_t/headers" || abandon
 	[ "$SUB" = session-start ] && count_outbox
 	mv "$_t" "$O/$_id" || abandon
@@ -237,6 +246,49 @@ capture() {
 		rm -f "$O/tmp/$$.me-hook"
 	# A new process, not a subshell, so that the flusher's $$ is its own pid.
 	/bin/sh "$0" flush </dev/null >/dev/null 2>&1 &
+	exit 0
+}
+
+# ---------------------------------------------------------------- the MCP channel (ADR-0020 §12)
+
+# read_token: TOK := the token file's first line, only when it has ADR-0020 §4's shape. The shape is what makes
+# printing the token into the helper's JSON safe.
+read_token() {
+	read_line "$TOKEN" || return 1
+	case $RL in me_*) ;; *) return 1 ;; esac
+	_b=${RL#me_}
+	[ "${#_b}" -eq 32 ] || return 1
+	case $_b in *[!0-9A-Za-z]*) return 1 ;; esac
+	TOK=$RL
+}
+
+# headers me|kb: Claude Code's headersHelper for the plugin's two MCP servers. It prints one JSON object of string
+# pairs and writes nothing. Every value is printable ASCII without " or \ (the token's shape, constants, pct), so
+# nothing needs escaping. The project directory comes only from standard input, as exactly one line: the
+# here-document's ${CLAUDE_PROJECT_DIR}. The dev root is never printed here: the manifest's static header carries it,
+# and a dynamic header of the same name would override it.
+headers() {
+	read_token || {
+		printf 'me-hook: no usable token file\n' >&2
+		exit 1
+	}
+	if [ "$1" = kb ]; then
+		printf '{"Authorization":"Bearer %s"}\n' "$TOK" || exit 1
+		exit 0
+	fi
+	_p= _x=
+	if IFS= read -r _p; then
+		if IFS= read -r _x || [ -n "$_x" ]; then _p=; fi
+	else
+		_p=
+	fi
+	DEV=
+	facts "$_p"
+	{
+		printf '{"Authorization":"Bearer %s","ME-Harness":"claude-code","ME-Client-Version":"%s"' "$TOK" "$ME_VERSION" &&
+			fact_lines ',"%s":"%s"' &&
+			printf '}\n'
+	} || exit 1
 	exit 0
 }
 
@@ -386,5 +438,8 @@ capture | session-start)
 	capture
 	;;
 flush) flush ;;
+headers)
+	case ${2-} in me | kb) headers "$2" ;; *) usage ;; esac
+	;;
 *) usage ;;
 esac

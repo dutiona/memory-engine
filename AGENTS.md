@@ -56,8 +56,13 @@ podman rmi memory-engine:verify
 claude plugin validate --strict plugins/memory-engine && claude plugin validate --strict .
 sh plugins/memory-engine/tests/run.sh                    # under dash, and under macOS /bin/sh (bash 3.2) on a macOS host over ssh
 python3 -I plugins/memory-engine/tests/latency.py        # a capture hook's p95, budget 50 ms
-ME_TEST_CLAUDE_TOKEN_FILE=<file> sh plugins/memory-engine/tests/real-claude.sh   # real claude -p, scratch HOME
+ME_TEST_CLAUDE_TOKEN_FILE=<file> ME_TEST_KB_DIR=<knowledge-base checkout> sh plugins/memory-engine/tests/real-claude.sh   # real claude -p, scratch HOME
 ```
+
+The real run starts the `memory-engine-mcp` and `memory-engine-cli` that `cargo build --workspace --locked` leaves in
+`target/debug/` (`ME_TEST_ME_BIN` overrides the path) and a knowledge-base from a checkout whose `.venv` was synced with
+`uv sync --locked`, on loopback ports. It needs a Claude token and that checkout, so it runs on a maintainer's desktop,
+not in CI.
 
 **Dispatching and monitoring CI** (it will not run itself):
 

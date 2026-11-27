@@ -513,6 +513,7 @@ L2.
 - The same remote-less project on two machines needs one confirmed `add` per extra machine before it shares memory.
 - Knowledge-base cannot file under a new project while ME is down (#1034).
 - Rows from before ADR-0020 need a human to file them.
+- A project's key is self-asserted by its checkout: a repository's own git configuration (its remotes, a submodule's) can claim another project's key, on the hook channel and on the MCP channel alike, and the session then reads and writes that project's memories. No client can tell a claim from the truth. Accepted (owner, #1028).
 
 ### Mitigations
 

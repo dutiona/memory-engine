@@ -108,11 +108,11 @@ The five `ME-Project-*` values are percent-encoded on both channels, the hooks (
 - **A bad fact is dropped, not the event.** Facts are optional. A fact is ignored, and flagged in the event's provenance, when it holds a raw byte outside 0x21 to 0x7E, holds a `%` that two hex digits do not follow, does not decode to valid UTF-8, decodes to a control character, exceeds its limit, or holds, or would key to, a machine token (§4); the event is stored and filed without it. Rejecting the event instead would park every event of a project whose path is legal but odd, and a replay would fail the same way.
 - **A project directory whose path holds a line break yields no project fact, on either channel.** The one exception is the forged delimiter of the Claude Code MCP helper (§12).
 - **Userinfo never leaves the machine.** Before it queues an event, the client removes everything up to and including the last `@` in front of the host, in both forms a remote takes: `scheme://user:secret@host/path` (a bare token before the `@` included) and `user@host:path`. The server strips again before it stores or logs anything. Stored facts never hold userinfo.
-- **The dev root is plain ASCII.** It is sent as configured, and it must be an absolute path of printable ASCII without space, `"`, `%` or `\`, so that its encoded form is itself. The server ignores any other value, on both channels alike. The reason is Claude Code's MCP channel (§12): a plugin's helper cannot read the plugin's configuration, so there the dev root travels in a static header, which nothing can encode. A static header was observed to send a non-ASCII character as one Latin-1 byte, not as UTF-8.
+- **The dev root is plain ASCII.** It is sent as configured, and it must be an absolute path of printable ASCII without space, `"`, `%` or `\`, so that its encoded form is itself. The server ignores any other value, on both channels alike. The reason is Claude Code's MCP channel (§12): a plugin's helper cannot read the plugin's configuration, so there the dev root travels in a static header, which nothing can encode. A static header was observed to send a non-ASCII character as one Latin-1 byte, not as UTF-8. It is also configured as its physical path, as `pwd -P` prints it, and the client sends every project root physical: git reports a top level resolved, and the client resolves a project directory outside git the same way. The client never resolves the dev root: the static header of §12 cannot, and resolving it on the hook channel alone would give one project two keys. A dev root configured through a symlink therefore gives no path key, on either channel.
 
 #### The MCP channel
 
-A harness can also give the model its tools over MCP. Those requests carry the same project facts, under the same header names and with the same encoding, so that one project has one key on both channels. How the Claude Code plugin does it is in §12.
+A harness can also give the model its tools over MCP. Requests to memory-engine carry the same project facts, under the same header names and with the same encoding, so that one project has one key on both channels. Requests to knowledge-base carry only the token, until knowledge-base adopts ADR-0021 §13. How the Claude Code plugin does it is in §12.
 
 #### Statuses
 
@@ -489,7 +489,7 @@ The project directory reaches the helper as data, on its standard input. The hel
 - the substitution is textual, so a path that holds a `'` breaks a quoted argument, and the helper never runs;
 - the here-document delivers a path with a space, a non-ASCII character and a `'` intact.
 
-The helper accepts exactly one line that names an existing directory; otherwise it sends no project fact.
+The helper accepts exactly one line holding an absolute path that names an existing directory; otherwise it sends no project fact. The knowledge-base server's helper prints `Authorization` alone.
 
 **One accepted residual.** A directory whose name holds a line break followed by the delimiter line ends the here-document early. It cannot run code: with `exec`, the shell is replaced before it reads another line (checked on dash, bash, busybox sh and zsh). It can cut the path short, so that session's MCP calls are filed under the shortened path, which can be another project's. Putting such a directory beside a project needs write access to the dev root, which already allows far more. The owner accepted this residual. The alternative that was not taken is under "Alternatives considered".
 
@@ -533,7 +533,8 @@ The helper accepts exactly one line that names an existing directory; otherwise 
 - **A path key without the machine**, the dev-root-relative path alone. Two unrelated directories at the same relative path on two machines would share their memories without anyone having decided it.
 - **Storing an unparseable body raw.** Redaction never ran on it.
 - **202 Accepted.** It invites acknowledging before the commit.
-- **The dev root read from a file the hooks write.** It would lift the ASCII restriction, but it races the first connection after an install.
+- **The dev root read from a file the hooks write.** It would lift the ASCII restriction, but it races the first connection after an install, and, after `dev_root` changes, a file written before the change would override the static header for a whole session.
+- **The dev root resolved with `pwd -P` by the client** (#1028): the static header cannot run it, and resolving it on one channel alone splits a symlinked dev root's projects between two keys.
 - **The project directory as a quoted argument of the helper.** It breaks on a path that holds a quote.
 - **A session-ID header on the MCP channel**, with a server check of each call's project against its session. It would close the residual of §12 on today's Claude Code, provided the server also refuses a call for which it holds no session-start root. The session ID was observed in a plugin helper's environment on 2.1.325; that it equals the hook input's session ID was not checked. It rests on a variable that is not documented for a helper, and it costs a header and a server check.
 

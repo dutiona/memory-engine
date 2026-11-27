@@ -6,6 +6,9 @@ files in DIR at request time, so a test changes the stub's behaviour by writing 
 - DIR/status: the status for POST /lifecycle/events (default 204);
 - DIR/token: when present, any other Authorization than "Bearer <token>" gets 401.
 
+Any other request (another path, or GET) is answered 404 and recorded as DIR/other/<k>.headers and a
+"<ms since epoch> <method> <path>" line in DIR/other.log, never in DIR/log.
+
 Each request is saved as DIR/req/<n>.headers and DIR/req/<n>.body, and logged in DIR/log as
 "<ms since epoch> <status> <ME-Event-Id>".
 """
@@ -18,7 +21,7 @@ import time
 
 DIR = sys.argv[1]
 LOCK = threading.Lock()
-STATE = {"n": 0}
+STATE = {"n": 0, "other": 0}
 
 
 def read(name, default):
@@ -43,14 +46,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def record_other(self):
+        with LOCK:
+            STATE["other"] += 1
+            k = STATE["other"]
+            os.makedirs(os.path.join(DIR, "other"), exist_ok=True)
+            with open(os.path.join(DIR, "other", "%d.headers" % k), "w") as f:
+                f.write(str(self.headers))
+            with open(os.path.join(DIR, "other.log"), "a") as f:
+                f.write("%d %s %s\n" % (time.time() * 1000, self.command, self.path))
+
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         token = read("token", None)
         if self.path != "/lifecycle/events":
-            status = 404
-        elif (
-            token is not None and self.headers.get("Authorization") != "Bearer " + token
-        ):
+            self.record_other()
+            self.answer(404)
+            return
+        if token is not None and self.headers.get("Authorization") != "Bearer " + token:
             status = 401
         else:
             status = int(read("status", "204"))
@@ -71,6 +84,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.answer(status, extra)
 
     def do_GET(self):
+        self.record_other()
         self.answer(404)
 
 
