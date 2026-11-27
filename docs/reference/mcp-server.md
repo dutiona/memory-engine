@@ -522,6 +522,7 @@ most 4,096 bytes:
 | `ME-Backfill-Source` | yes | The file's path under the bundle root, percent-encoded like a project fact; decoded, it is relative, holds no `.` or `..` segment and no control character |
 | `ME-Backfill-Mtime` | `memory-file` | The copy's modification time, `YYYY-MM-DDTHH:MM:SSZ`; checked whenever sent |
 | `ME-Backfill-Preview` | `write` | The 64 lowercase hex digits of the reviewed dry run's `preview` |
+| `ME-Backfill-Event-Sample` | dry run, optional | `1`: also return the event sample (below). Absent, no sample; any other value, a repeated header or an overlong one is a 400 naming it. A write ignores it whatever it holds |
 | `ME-Client-Version` | yes | `[0-9A-Za-z.+-]{1,64}`, stored as sent |
 | `ME-Project-*` | no | The five project facts of [Project facts](#project-facts-and-the-project-key), one set for the whole upload |
 
@@ -651,12 +652,14 @@ write connection while an upload's insert phase runs.
 | `redaction` | `{found, stubbed, placeholders}`, the placeholders counted by rule in the stored texts |
 | `facts` | `{created, reinforced, blocked, items}`, each item `{event_id, capture, fact_type, home, t_created, outcome, hint, importance, preview}`, `preview` the stored text cut to 512 bytes |
 | `collisions` | `[{event_id, line}]` |
+| `event_sample` | An opted-in dry run only (#1170): up to eight entries, `{line, kind: "prompt", text}` and `{line, kind: "tool_use", input?, result?}`, the stored texts of prompts and tool calls after redaction, each cut to 512 bytes and settled again after the cut. Eligible: the stored captures that are not sensitive-path stubs, ranked by the SHA-256 of their stable event ID with the order key breaking a tie, keeping the four lowest-ranked of each kind and returning them in order-key order. `[]` when nothing is eligible or when any item collides, since such a batch cannot be written. Never present on a write, and its answer is `Cache-Control: no-store` |
 
 Every string is a count, a digest, a fixed phrase, an identifier that passed the machine-token rule, or text exactly as
-the store would hold it: the report never holds a byte the store would not. A refused item is counted by its reason
+the store would hold it: the report never holds a byte the store would not, and an `event_sample` entry is a possibly
+further-redacted excerpt of a stored text, never more. A refused item is counted by its reason
 only. The project facts in `project` and in each payload's provenance keep the machine-token rule alone, as for a live
 event, so a denylisted name in a project path stays there. The log names the machine, the kind, the mode, the status
-and the error class, never a byte of the body.
+and the error class, never a byte of the body and never a sample.
 
 ### Embedding queue
 
