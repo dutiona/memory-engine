@@ -1,14 +1,16 @@
 //! `POST /backfill/uploads` (#1026), driven with the checked-in synthetic Claude Code transcripts
 //! and native memory files.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use memory_engine_mcp::adapters::claude_code::{claude_mem, claude_memory};
 use serde_json::{Value, json};
 
 mod common;
 
-use common::{TestServer, fixture, holds, store_bytes, token};
+use common::{ServerProcess, TestServer, fixture, holds, store_bytes, token};
 
 const SESSION: &str = "52c6c7b7-c890-43ec-81a5-a1cf99d3cc84";
 const SOURCE: &str = "projects/-work-fixture-p/52c6c7b7-c890-43ec-81a5-a1cf99d3cc84.jsonl";
@@ -1664,4 +1666,314 @@ async fn a_prompt_the_engine_skips_is_reported() {
         write["events"]["skipped"]["task-notification"], 1,
         "{write}"
     );
+}
+
+/// What the route answered: the status, the `Cache-Control` it set, and the JSON body.
+async fn send_with_cache(
+    server: &TestServer,
+    machine: &str,
+    upload: &Upload,
+) -> (u16, Option<String>, Value) {
+    let mut request = server
+        .client
+        .post(format!("{}/backfill/uploads", server.url))
+        .bearer_auth(token(machine))
+        .body(upload.body.clone());
+    for (name, value) in &upload.headers {
+        request = request.header(name, value);
+    }
+    let response = request.send().await.unwrap();
+    let status = response.status().as_u16();
+    let cache = response
+        .headers()
+        .get("cache-control")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let text = response.text().await.unwrap();
+    (
+        status,
+        cache,
+        serde_json::from_str(&text).unwrap_or(Value::Null),
+    )
+}
+
+/// An opted-in dry run samples the event texts it would store (#1170): bounded, redacted, and
+/// the only difference from the same dry run without the header, which is never cached.
+#[tokio::test]
+async fn a_dry_run_samples_its_event_texts_only_when_asked() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let before = table_counts(&server);
+    let asked = Upload::transcript().header("ME-Backfill-Event-Sample", "1");
+
+    let (status, cache, sampled) = send_with_cache(&server, "laptop", &asked).await;
+    assert_eq!(status, 200, "{sampled}");
+    assert_eq!(
+        cache.as_deref(),
+        Some("no-store"),
+        "a sample is never cached"
+    );
+    let sample = sampled["event_sample"].as_array().expect("the field");
+    assert!(!sample.is_empty() && sample.len() <= 8, "{sample:?}");
+    let mut kinds = BTreeSet::new();
+    for entry in sample {
+        assert!(entry["line"].as_u64().unwrap_or(0) >= 1, "{entry}");
+        let kind = entry["kind"].as_str().expect("a kind");
+        kinds.insert(kind.to_owned());
+        match kind {
+            "prompt" => {
+                let text = entry["text"].as_str().expect("the text");
+                assert!(
+                    !text.is_empty() && text.len() <= 512,
+                    "{} bytes",
+                    text.len()
+                );
+                assert!(entry.get("input").is_none() && entry.get("result").is_none());
+            }
+            "tool_use" => {
+                assert!(entry.get("text").is_none());
+                assert!(
+                    entry.get("input").is_some() || entry.get("result").is_some(),
+                    "a tool entry holds a text: {entry}"
+                );
+                for field in ["input", "result"] {
+                    if let Some(text) = entry.get(field).and_then(Value::as_str) {
+                        assert!(text.len() <= 512, "{field}: {} bytes", text.len());
+                    }
+                }
+            }
+            other => panic!("kind {other}"),
+        }
+    }
+    assert!(
+        kinds.contains("prompt") && kinds.contains("tool_use"),
+        "{kinds:?}"
+    );
+
+    // Without the header: no field, no no-store, and otherwise the very same dry run.
+    let (status, cache, plain) = send_with_cache(&server, "laptop", &Upload::transcript()).await;
+    assert_eq!(status, 200, "{plain}");
+    assert!(plain.get("event_sample").is_none());
+    assert_eq!(cache, None, "the ordinary report keeps its caching");
+    let mut without = sampled.clone();
+    without.as_object_mut().unwrap().remove("event_sample");
+    assert_eq!(plain, without, "the sample changes nothing else");
+    assert_eq!(table_counts(&server), before, "both dry runs wrote nothing");
+}
+
+/// A sample belongs to the request that asked for it: another token's upload of the same source
+/// never returns it, an unauthenticated one is refused, and a body that differs is sampled from
+/// its own texts alone.
+#[tokio::test]
+async fn a_sample_goes_only_to_the_requesting_upload() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let source = "projects/-work-fixture-p/independent.jsonl";
+    let ours = one_turn("laptop", "/work/fixture/p", &|_| {
+        "laptop marker 4a1c".to_owned()
+    });
+    let theirs = one_turn("desktop", "/work/fixture/p", &|_| {
+        "desktop marker 9b2d".to_owned()
+    });
+    let laptop = Upload::of("transcript", source, ours).header("ME-Backfill-Event-Sample", "1");
+    let desktop = Upload::of("transcript", source, theirs).header("ME-Backfill-Event-Sample", "1");
+
+    let (status, _, mine) = send_with_cache(&server, "laptop", &laptop).await;
+    assert_eq!(status, 200, "{mine}");
+    let (status, _, other) = send_with_cache(&server, "desktop", &desktop).await;
+    assert_eq!(status, 200, "{other}");
+    let mine = mine["event_sample"].to_string();
+    let other = other["event_sample"].to_string();
+    assert!(mine.contains("laptop marker 4a1c"), "{mine}");
+    assert!(!mine.contains("desktop marker 9b2d"), "{mine}");
+    assert!(other.contains("desktop marker 9b2d"), "{other}");
+    assert!(!other.contains("laptop marker 4a1c"), "{other}");
+
+    // No token, no sample: the Bearer layer answers first.
+    let response = server
+        .client
+        .post(format!("{}/backfill/uploads", server.url))
+        .body(laptop.body.clone())
+        .header("ME-Harness", "claude-code")
+        .header("ME-Backfill-Kind", "transcript")
+        .header("ME-Backfill-Mode", "dry-run")
+        .header("ME-Backfill-Source", source)
+        .header("ME-Client-Version", "0.1.0")
+        .header("ME-Backfill-Event-Sample", "1")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 401);
+    assert!(!response.text().await.unwrap().contains("event_sample"));
+}
+
+/// A write never samples, whatever the header holds, and the dry run's preview still binds it:
+/// a sampled dry run's preview writes its effects, and a changed body under that preview is 412
+/// with no new row.
+#[tokio::test]
+async fn a_write_ignores_the_sample_header() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let asked = Upload::transcript().header("ME-Backfill-Event-Sample", "1");
+    let (status, _, dry) = send_with_cache(&server, "laptop", &asked).await;
+    assert_eq!(status, 200, "{dry}");
+    let preview = dry["preview"].as_str().unwrap().to_owned();
+
+    let (status, cache, write) =
+        send_with_cache(&server, "laptop", &asked.clone().write(&preview)).await;
+    assert_eq!(status, 200, "{write}");
+    assert_eq!(write["committed"].as_bool(), Some(true), "{write}");
+    assert!(write.get("event_sample").is_none(), "a write never samples");
+    assert_eq!(cache, None);
+
+    let before = rows(&server);
+    let mut changed = transcript();
+    changed.push(b'\n');
+    changed.extend_from_slice(
+        entry(
+            "u-late",
+            "user",
+            "2026-03-19T11:00:00.000Z",
+            "/work/fixture/p",
+            &json!({ "message": { "content": "a prompt the dry run never saw" } }),
+        )
+        .as_bytes(),
+    );
+    let stale = asked.write(&preview).body(changed);
+    let (status, _, refused) = send_with_cache(&server, "laptop", &stale).await;
+    assert_eq!(status, 412, "{refused}");
+    assert_eq!(rows(&server), before, "a 412 writes nothing");
+}
+
+/// The opt-in header follows the dry run's 400 contract: a value other than a lone `1`, a
+/// repeated header or an overlong one is refused from the headers alone, before any body byte.
+#[tokio::test]
+async fn a_malformed_sample_header_is_refused_before_the_body() {
+    let server = TestServer::start_with_denylist(&[]).await;
+    let ok = Upload::transcript();
+    // HTTP trims surrounding whitespace, so only a visible value can be malformed on the wire.
+    for value in ["", "0", "true", "01"] {
+        let bad = ok.clone().header("ME-Backfill-Event-Sample", value);
+        let (status, body) = send(&server, "laptop", &bad).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (400, Some("ME-Backfill-Event-Sample")),
+            "{value:?}"
+        );
+        assert_eq!(
+            status_from_headers(&server, &bad, bad.body.len() as u64).await,
+            400,
+            "{value:?}: an answer before any body byte"
+        );
+    }
+    let repeated = ok
+        .clone()
+        .header("ME-Backfill-Event-Sample", "1")
+        .repeated("ME-Backfill-Event-Sample");
+    let (status, body) = send(&server, "laptop", &repeated).await;
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("ME-Backfill-Event-Sample"))
+    );
+    let long = ok.header("ME-Backfill-Event-Sample", &"1".repeat(4097));
+    assert_eq!(send(&server, "laptop", &long).await.0, 400);
+}
+
+/// The event IDs a reader mints, in order: the sample's ranking key must not move between two
+/// reads of one file, for any of the four reader kinds.
+fn reading_ids(mapped: memory_engine_mcp::adapters::Mapped) -> Vec<String> {
+    mapped
+        .items
+        .into_iter()
+        .map(|item| match item {
+            memory_engine::types::lifecycle::ImportItem::Event(event) => event.event_id,
+            memory_engine::types::lifecycle::ImportItem::Memory(memory) => memory.event_id,
+        })
+        .collect()
+}
+
+#[test]
+fn every_reader_mints_stable_event_ids_for_the_sample_ranking() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let seeds = repo.join("fuzz/seeds/backfill_upload");
+    let mtime = chrono::DateTime::from_timestamp(1_773_914_400, 0).unwrap();
+    let bodies: [(&str, Vec<u8>); 4] = [
+        ("transcript", transcript()),
+        ("memory-file", memory_file("feedback_tests_first.md")),
+        (
+            "claude-mem",
+            std::fs::read(seeds.join("claude-mem-claude-mem-8ed3f6ad685b.jsonl")).unwrap(),
+        ),
+        (
+            "claude-memory",
+            std::fs::read(seeds.join("claude-memory-claude-memory-e912c1261d47.jsonl")).unwrap(),
+        ),
+    ];
+    for (kind, body) in bodies {
+        let read = || match kind {
+            "transcript" => memory_engine_mcp::adapters::claude_code::transcript::read(&body),
+            "memory-file" => memory_engine_mcp::adapters::claude_code::memory::read(
+                "feedback_tests_first.md",
+                "user:alice/project:p",
+                &body,
+                mtime,
+            ),
+            "claude-mem" => claude_mem::read(&body),
+            _ => claude_memory::read(&body),
+        };
+        let first = reading_ids(read().unwrap());
+        let second = reading_ids(read().unwrap());
+        assert!(!first.is_empty(), "{kind} minted no event");
+        assert_eq!(first, second, "{kind}: the reader's event IDs are stable");
+    }
+}
+
+/// A sampled text is never logged (#1170): the upload's positive log line is there, and the
+/// marker the reviewer asked for appears in the answer alone.
+#[test]
+fn a_sampled_text_never_reaches_the_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let denylist = dir.path().join("denylist.txt");
+    std::fs::write(&denylist, "").unwrap();
+    let mut server = ServerProcess::spawn(
+        dir.path(),
+        &[],
+        &[("ME_REDACT_DENYLIST_FILE", denylist.to_str().unwrap())],
+    );
+    server.wait_ready().unwrap();
+    let marker = "sample-log-marker 7f3c1a";
+    let body = one_turn("log", "/work/fixture/p", &|_| marker.to_owned());
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let response = client
+        .post(format!("{}/backfill/uploads", server.url()))
+        .bearer_auth(token("laptop"))
+        .header("ME-Harness", "claude-code")
+        .header("ME-Backfill-Kind", "transcript")
+        .header("ME-Backfill-Mode", "dry-run")
+        .header("ME-Backfill-Source", "projects/-work-fixture-p/log.jsonl")
+        .header("ME-Client-Version", "0.1.0")
+        .header("ME-Backfill-Event-Sample", "1")
+        .header("ME-Project-Root", "/work/fixture/p")
+        .header("ME-Project-Dev-Root", "/work/fixture")
+        .header("ME-Project-Origin-Url", "https://example.com/example/p.git")
+        .body(body)
+        .send()
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let report: Value = response.json().unwrap();
+    assert!(
+        report["event_sample"].to_string().contains(marker),
+        "the sample is in the answer: {report}"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let log = server.stderr();
+        if log.contains("backfill upload") {
+            assert!(!log.contains(marker), "the sample text was logged:\n{log}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no log line:\n{log}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

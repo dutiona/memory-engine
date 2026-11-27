@@ -10,8 +10,9 @@ use memory_engine::MemoryEngine;
 use memory_engine::inspect::ReplayFilter;
 use memory_engine::read_redaction_counts;
 use memory_engine::types::lifecycle::{
-    Actor, BatchMode, Content, Delivery, FactPreview, ImportEvent, ImportItem, ImportMemory,
-    ImportOutcome, Imported, MemoryItem, NeutralRecord, Recorded, StopOutcome, ToolOutcome, Upload,
+    Actor, BackfillEventSample, BatchMode, Content, Delivery, FactPreview, ImportEvent, ImportItem,
+    ImportMemory, ImportOutcome, Imported, MemoryItem, NeutralRecord, Recorded, StopOutcome,
+    ToolOutcome, Upload,
 };
 use memory_engine::types::{Event, FactType, NewEvent};
 use serde_json::{Value, json};
@@ -1117,4 +1118,530 @@ async fn the_preview_changes_with_every_effect_bearing_input() {
         dated,
         "a memory's importance, which the report shows"
     );
+}
+
+/// A dry run can sample the event texts it would store (#1170): a prompt and a tool call come
+/// back as the write would hold them, after redaction, and the write's stored payload agrees.
+#[tokio::test]
+async fn sampled_backfill_dry_run_returns_the_stored_redacted_texts() {
+    let s = Store::new();
+    let aws = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+    let marker = "deploy the sampled marker";
+    let items = vec![
+        main_item("bf.1.p", 0, prompt(&format!("{marker} with {aws} now"))),
+        main_item(
+            "bf.2.t0",
+            5,
+            tool(json!({ "command": "cat .env" }), "X=1", &[]),
+        ),
+    ];
+    let before = s.tables();
+
+    let (dry, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items.clone(), &[])
+        .await
+        .unwrap();
+
+    assert!(!dry.committed, "a dry run never commits");
+    assert_eq!(s.tables(), before, "nothing written");
+    assert_eq!(
+        dry.items.iter().map(|(o, _)| *o).collect::<Vec<_>>(),
+        [ImportOutcome::Stored, ImportOutcome::Stored]
+    );
+    assert_eq!(
+        sample,
+        [
+            BackfillEventSample::Prompt {
+                line: 1,
+                text: format!("{marker} with [REDACTED:aws-access-key] now"),
+            },
+            BackfillEventSample::ToolUse {
+                line: 1,
+                input: Some(r#"{"command":"cat .env"}"#.to_owned()),
+                result: Some("X=1".to_owned()),
+            },
+        ]
+    );
+    assert!(
+        !format!("{sample:?}").contains(marker),
+        "no content in Debug"
+    );
+
+    let write = s
+        .import(
+            &upload(HOME),
+            items,
+            &[],
+            BatchMode::Write {
+                preview: dry.preview,
+            },
+        )
+        .await;
+    assert!(write.committed);
+    let events = s.events().await;
+    let prompt = events
+        .iter()
+        .find(|e| e.payload["kind"] == "prompt")
+        .expect("the prompt");
+    let call = events
+        .iter()
+        .find(|e| e.payload["kind"] == "tool_use")
+        .expect("the call");
+    let BackfillEventSample::Prompt { text, .. } = &sample[0] else {
+        panic!("a prompt sample");
+    };
+    let BackfillEventSample::ToolUse { input, result, .. } = &sample[1] else {
+        panic!("a tool sample");
+    };
+    assert_eq!(
+        memory_engine::redact::excerpt(prompt.payload["prompt"].as_str().unwrap()).unwrap(),
+        *text,
+        "the sample is the stored prompt at its line"
+    );
+    assert_eq!(call.payload["input"].to_string(), *input.as_ref().unwrap());
+    assert_eq!(call.payload["result"].as_str(), result.as_deref());
+}
+
+/// The sample is deterministic for a given file, upload context and store: a later receipt
+/// changes neither the sample nor the preview.
+#[tokio::test]
+async fn sampled_backfill_dry_run_is_deterministic_across_receipts() {
+    let s = Store::new();
+    let items = an_upload();
+    let first = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items.clone(), &[])
+        .await
+        .unwrap();
+    let later = Upload {
+        received_at: received() + review(),
+        ..upload(HOME)
+    };
+    let second = s
+        .engine
+        .preview_backfill_with_event_sample(&later, items, &[])
+        .await
+        .unwrap();
+
+    assert_eq!(first.1, second.1, "the sample");
+    assert_eq!(first.0.preview, second.0.preview, "the preview");
+}
+
+/// The IDs a ranking keeps from `prefix0..6`: the four lowest SHA-256 digests, sorted.
+fn four_lowest(prefix: &str) -> Vec<String> {
+    let mut ids: Vec<([u8; 32], String)> = (0..6)
+        .map(|i| {
+            let id = format!("{prefix}{i}");
+            (Sha256::digest(id.as_bytes()).into(), id)
+        })
+        .collect();
+    ids.sort();
+    ids.truncate(4);
+    let mut kept: Vec<String> = ids.into_iter().map(|(_, id)| id).collect();
+    kept.sort();
+    kept
+}
+
+/// The index a sample entry carries: `prompt 3` is 3, a tool's `{"command":"ls 3"}` is 13.
+fn sampled_index(entry: &BackfillEventSample) -> u32 {
+    match entry {
+        BackfillEventSample::Prompt { text, .. } => text
+            .trim_start_matches("prompt ")
+            .parse()
+            .expect("a prompt index"),
+        BackfillEventSample::ToolUse { input, .. } => {
+            input
+                .as_ref()
+                .expect("a command")
+                .trim_start_matches(r#"{"command":"ls "#)
+                .trim_end_matches(r#""}"#)
+                .parse::<u32>()
+                .expect("a tool index")
+                + 10
+        }
+    }
+}
+
+/// The kept indices, by kind, from one sample.
+fn sampled_indices(sample: &[BackfillEventSample], want: &str) -> Vec<String> {
+    let mut kept: Vec<String> = sample
+        .iter()
+        .filter(|entry| {
+            matches!(
+                (want, entry),
+                ("prompt", BackfillEventSample::Prompt { .. })
+                    | ("tool", BackfillEventSample::ToolUse { .. })
+            )
+        })
+        .map(|entry| match entry {
+            BackfillEventSample::Prompt { text, .. } => {
+                text.trim_start_matches("prompt ").to_owned()
+            }
+            BackfillEventSample::ToolUse { .. } => (sampled_index(entry) - 10).to_string(),
+        })
+        .collect();
+    kept.sort();
+    kept
+}
+
+/// Ranking is SHA-256 of the stable event ID with the order key as the tie-breaker: the four
+/// lowest-ranked prompts and the four lowest-ranked tool calls.
+#[tokio::test]
+async fn sampled_backfill_dry_run_ranks_by_event_id_and_keeps_four_per_kind() {
+    let s = Store::new();
+    let mut items = Vec::new();
+    for i in 0..6 {
+        items.push(main_item(
+            &format!("bf.p{i}"),
+            i,
+            prompt(&format!("prompt {i}")),
+        ));
+        items.push(main_item(
+            &format!("bf.t{i}"),
+            10 + i,
+            tool(
+                json!({ "command": format!("ls {i}") }),
+                &format!("r{i}"),
+                &[],
+            ),
+        ));
+    }
+
+    let (_, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items, &[])
+        .await
+        .unwrap();
+
+    assert_eq!(sample.len(), 8);
+    let want = |prefix: &str| -> Vec<String> {
+        four_lowest(prefix)
+            .iter()
+            .map(|id| id.trim_start_matches(prefix).to_owned())
+            .collect()
+    };
+    assert_eq!(sampled_indices(&sample, "prompt"), want("bf.p"));
+    assert_eq!(sampled_indices(&sample, "tool"), want("bf.t"));
+}
+
+/// Entries come back in order-key order, and a kind with fewer eligible events keeps every one
+/// of them: the ranking never lets a file's many tool calls crowd out its prompts.
+#[tokio::test]
+async fn sampled_backfill_dry_run_keeps_both_kinds_in_order_key_order() {
+    let s = Store::new();
+    let mut items: Vec<ImportItem> = (0..6)
+        .map(|i| main_item(&format!("bf.m{i}"), i, prompt(&format!("prompt {i}"))))
+        .collect();
+    items.push(main_item(
+        "bf.only",
+        20,
+        tool(json!({ "command": "ls 10" }), "only", &[]),
+    ));
+
+    let (_, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items, &[])
+        .await
+        .unwrap();
+
+    let prompts = sampled_indices(&sample, "prompt").len();
+    let tools = sampled_indices(&sample, "tool").len();
+    assert_eq!((prompts, tools), (4, 1));
+    let times: Vec<u32> = sample.iter().map(sampled_index).collect();
+    let mut sorted = times.clone();
+    sorted.sort_unstable();
+    assert_eq!(times, sorted, "returned in order-key order");
+}
+
+/// A sample holds only what a reviewer can read: a stub, an empty prompt, a stop, a memory and
+/// an already stored event contribute nothing, and duplicates never re-sample a committed upload.
+#[tokio::test]
+async fn sampled_backfill_dry_run_omits_what_cannot_be_reviewed() {
+    let s = Store::new();
+    let items = vec![
+        main_item("bf.1.s", 0, stop(StopOutcome::Completed, "a message")),
+        main_item("bf.2.p", 1, prompt("")),
+        main_item(
+            "bf.3.t0",
+            2,
+            tool(
+                json!({ "file_path": "/work/p/.env" }),
+                "X=1",
+                &["/work/p/.env"],
+            ),
+        ),
+        memory("bf.m.1", "a rule", at(3)),
+    ];
+    let (_, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items.clone(), &[])
+        .await
+        .unwrap();
+    assert!(sample.is_empty(), "{sample:?}");
+
+    let kept = vec![main_item("bf.4.p", 4, prompt("a prompt"))];
+    s.write(&upload(HOME), &kept, &[]).await;
+    let (_, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), kept, &[])
+        .await
+        .unwrap();
+    assert!(
+        sample.is_empty(),
+        "a duplicate is not a new write: {sample:?}"
+    );
+
+    // An empty prompt never takes one of the four slots, even when its digest ranks it first.
+    let others: Vec<String> = (0..4).map(|i| format!("bf.ok{i}")).collect();
+    let smallest = others
+        .iter()
+        .map(|id| Sha256::digest(id.as_bytes()))
+        .min()
+        .unwrap();
+    let empty_id = (0..10_000u32)
+        .map(|n| format!("bf.empty{n}"))
+        .find(|id| Sha256::digest(id.as_bytes()) < smallest)
+        .expect("an empty prompt ranking first");
+    let mut items: Vec<ImportItem> = others
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            main_item(
+                id,
+                i64::try_from(i).unwrap(),
+                prompt(&format!("prompt {i}")),
+            )
+        })
+        .collect();
+    items.push(main_item(&empty_id, 10, prompt("")));
+    let (_, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items, &[])
+        .await
+        .unwrap();
+    assert_eq!(sample.len(), 4, "the empty prompt is no slot: {sample:?}");
+    assert!(sample.iter().all(|entry| matches!(
+        entry,
+        BackfillEventSample::Prompt { text, .. } if !text.is_empty()
+    )));
+}
+
+/// A batch with a collision cannot commit, so its sample is empty: WYSIWYG over what the write
+/// would do, never a sample of effects the store refuses.
+#[tokio::test]
+async fn sampled_backfill_dry_run_is_empty_when_an_item_collides() {
+    let s = Store::new();
+    s.write(
+        &upload(HOME),
+        &[main_item("bf.1.p", 0, prompt("the first body"))],
+        &[],
+    )
+    .await;
+    let items = vec![
+        main_item("bf.1.p", 0, prompt("another body")),
+        main_item("bf.2.p", 1, prompt("a fresh prompt")),
+    ];
+
+    let (dry, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items, &[])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        dry.items.iter().map(|(o, _)| *o).collect::<Vec<_>>(),
+        [ImportOutcome::Collision, ImportOutcome::Stored]
+    );
+    assert!(sample.is_empty(), "{sample:?}");
+}
+
+/// The fixed bounds: each excerpt is at most 512 bytes of valid UTF-8, a structured input is its
+/// compact JSON, and an oversized stored prompt is capped at the settled cut the report's own
+/// `excerpt` reproduces.
+#[tokio::test]
+async fn sampled_backfill_dry_run_caps_each_field() {
+    let s = Store::new();
+    let quoted = "\"".repeat(400);
+    let compact = json!({ "command": "printf", "text": quoted.clone() }).to_string();
+    assert!(
+        compact.len() > 512,
+        "the cap bites: {} bytes",
+        compact.len()
+    );
+    let items = vec![
+        main_item("bf.1.p", 0, prompt(&"€".repeat(400))),
+        main_item(
+            "bf.2.t0",
+            1,
+            tool(
+                json!({ "command": "printf", "text": quoted }),
+                &"é".repeat(600),
+                &[],
+            ),
+        ),
+    ];
+
+    let (dry, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items.clone(), &[])
+        .await
+        .unwrap();
+
+    let BackfillEventSample::Prompt { text, .. } = &sample[0] else {
+        panic!("a prompt");
+    };
+    assert!(text.len() <= 512, "{} bytes", text.len());
+    assert_eq!(
+        text.chars().count(),
+        510 / 3,
+        "the cut walks a char boundary"
+    );
+    let BackfillEventSample::ToolUse { input, result, .. } = &sample[1] else {
+        panic!("a tool");
+    };
+    let input = input.as_ref().unwrap();
+    let result = result.as_ref().unwrap();
+    assert!(input.len() <= 512, "{} bytes", input.len());
+    assert!(result.len() <= 512);
+    assert_eq!(result.chars().count(), 512 / 2, "a whole number of é");
+
+    let write = s
+        .import(
+            &upload(HOME),
+            items,
+            &[],
+            BatchMode::Write {
+                preview: dry.preview,
+            },
+        )
+        .await;
+    assert!(write.committed);
+    let events = s.events().await;
+    for event in &events {
+        if event.payload["kind"] == "prompt" {
+            assert_eq!(
+                memory_engine::redact::excerpt(event.payload["prompt"].as_str().unwrap()).unwrap(),
+                *text
+            );
+        }
+        if event.payload["kind"] == "tool_use" {
+            assert_eq!(
+                event.payload["input"].as_str(),
+                Some(input.as_str()),
+                "the stored cut of an escaped input"
+            );
+            assert_eq!(event.payload["result"].as_str().unwrap(), result);
+        }
+    }
+}
+
+/// The secret charset of a high-entropy token, for the cut test's fixture.
+const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/// A recognized secret is redacted before the sample is cut, whether it sits well before the
+/// byte limit or straddles it: the collector never sees the key, and the cut never completes one.
+#[tokio::test]
+async fn sampled_backfill_dry_run_redacts_a_secret_at_the_cut() {
+    let s = Store::new();
+    let aws = format!("AKIA{}", "IOSFODNN7EXAMPLE");
+    let before = format!("{} {aws} after", "x".repeat(400));
+    let straddling = format!("{}{aws} after", "x".repeat(500));
+    let items = vec![
+        main_item("bf.1.p", 0, prompt(&before)),
+        main_item("bf.2.p", 1, prompt(&straddling)),
+    ];
+
+    let (_, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items, &[])
+        .await
+        .unwrap();
+
+    let BackfillEventSample::Prompt { text, .. } = &sample[0] else {
+        panic!("a prompt sample");
+    };
+    assert!(text.contains("[REDACTED:aws-access-key]"), "{text}");
+    assert!(!text.contains(&aws));
+    let BackfillEventSample::Prompt { text, .. } = &sample[1] else {
+        panic!("a prompt sample");
+    };
+    assert!(!text.contains(&aws), "the cut never completes the key");
+    assert_eq!(text.len(), 512, "the cap still holds");
+}
+
+/// A cut can create a match the whole text did not hold: a 512-byte high-entropy prefix padded
+/// with one repeated letter scores below the threshold whole and above it once cut, so the
+/// sample is scrubbed again and never falls back to an unsettled prefix.
+#[tokio::test]
+async fn sampled_backfill_dry_run_scrubs_the_secret_its_cut_creates() {
+    let s = Store::new();
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut token: String = (0..512)
+        .map(|_| {
+            let index = usize::try_from(next() % ALPHABET.len() as u64).unwrap();
+            char::from(ALPHABET[index])
+        })
+        .collect();
+    token.replace_range(..1, "7");
+    let text = format!("{token}{}", "a".repeat(1000));
+    assert_eq!(
+        memory_engine::redact::scrub(&text).unwrap(),
+        text,
+        "the whole token scores below the entropy rule"
+    );
+
+    let items = vec![main_item("bf.1.p", 0, prompt(&text))];
+    let (_, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items, &[])
+        .await
+        .unwrap();
+
+    let BackfillEventSample::Prompt { text: sampled, .. } = &sample[0] else {
+        panic!("a prompt sample");
+    };
+    assert!(
+        sampled.contains("[REDACTED:high-entropy]"),
+        "the cut's own match is scrubbed: {sampled:?}"
+    );
+    assert!(!sampled.contains(&token[..400]), "no unsettled prefix");
+    assert!(sampled.len() <= 512);
+}
+
+/// Requesting the sample changes nothing of the import: the same dry run's report, preview and
+/// items, so a write under that preview still lands.
+#[tokio::test]
+async fn sampled_backfill_dry_run_leaves_the_ordinary_report_unchanged() {
+    let s = Store::new();
+    let items = an_upload();
+    let ordinary = s
+        .import(&upload(HOME), items.clone(), &[], BatchMode::DryRun)
+        .await;
+    let (sampled, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items.clone(), &[])
+        .await
+        .unwrap();
+
+    assert_eq!(sampled, ordinary);
+    assert_ne!(sample.len(), 0);
+
+    let write = s
+        .import(
+            &upload(HOME),
+            items,
+            &[],
+            BatchMode::Write {
+                preview: sampled.preview,
+            },
+        )
+        .await;
+    assert!(write.committed);
 }

@@ -59,6 +59,10 @@ const GATED: &[(&str, &str)] = &[
     ),
     ("import_backfill", "an_import_redacts_with_the_denylist"),
     (
+        "preview_backfill_with_event_sample",
+        "sampled_backfill_dry_run_returns_the_stored_redacted_texts",
+    ),
+    (
         "bootstrap_session",
         "tests/bootstrap_test.rs (bootstrap's own pipeline)",
     ),

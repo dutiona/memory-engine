@@ -690,6 +690,58 @@ pub struct FactPreview {
     pub importance: f64,
 }
 
+/// One excerpt of a backfill dry run's event texts (#1170), for a reviewer's last look before
+/// the write it approves.
+///
+/// The text is what the write would hold, after redaction, cut to 512 bytes and settled again
+/// after the cut: a possibly further-redacted excerpt of the stored value, never a
+/// reconstruction of the whole payload. A sample is review material only: it enters no key, no
+/// digest, no store call and no persisted row, and its [`Debug`] carries the line alone, so a
+/// sample cannot leak into a log.
+///
+/// # Examples
+///
+/// ```
+/// use me_types::types::lifecycle::BackfillEventSample;
+///
+/// let prompt = BackfillEventSample::Prompt { line: 7, text: "Add a flag.".into() };
+/// let call = BackfillEventSample::ToolUse {
+///     line: 8,
+///     input: Some(r#"{"command":"ls src"}"#.into()),
+///     result: Some("lib.rs".into()),
+/// };
+/// assert_eq!(format!("{prompt:?}"), "Prompt { line: 7, .. }");
+/// assert_eq!(format!("{call:?}"), "ToolUse { line: 8, .. }");
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub enum BackfillEventSample {
+    /// One prompt event's stored text.
+    Prompt {
+        /// The 1-based line of the uploaded file its event was read from.
+        line: usize,
+        /// The stored prompt, redacted and bounded.
+        text: String,
+    },
+    /// One tool event's stored input and result; each is present when the store holds a text.
+    ToolUse {
+        /// The 1-based line of the uploaded file its event was read from.
+        line: usize,
+        /// The stored input: an input string as stored, or a structured input's compact JSON.
+        input: Option<String>,
+        /// The stored result.
+        result: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for BackfillEventSample {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Prompt { line, .. } => write!(f, "Prompt {{ line: {line}, .. }}"),
+            Self::ToolUse { line, .. } => write!(f, "ToolUse {{ line: {line}, .. }}"),
+        }
+    }
+}
+
 /// What an import did, or what its write would do (#1026).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Imported {

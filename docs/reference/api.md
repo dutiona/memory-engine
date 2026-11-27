@@ -186,11 +186,18 @@ file into neutral items and hands them to the engine in one call (`engine::backf
 | Method | Signature | Description |
 | ------ | --------- | ----------- |
 | `import_backfill` | `async (&self, upload: &Upload, items: Vec<ImportItem>, denylist: &[String], mode: BatchMode) -> Result<Imported>` | Redact every item with every rule and the author `denylist` (never an identifier), refuse and skip what is off the lifecycle core's invariants, sort the rest by order key, and apply them in one store transaction through `Lifecycle::record_deliveries`: an event under the capture contract (labelled `backfill`, its memory dated by its event), a memory as one vectorless fact recorded by one event. `BatchMode::DryRun` rolls back; `BatchMode::Write { preview }` commits only when no item collided and the preview, a digest of every effect, of the whole body (`Upload::body_sha256`, `Upload::census`) and of the store's outcomes, is `preview`. Nothing is embedded; the scope cache, the drain's wake and the redaction totals move only after a commit. `ReadOnly` on a read-only engine; `Storage(Unavailable)` when the store cannot take the write now. An `Upload` with `copy` set is a plugin store's (#1117): its events are labelled with its kind, yield to live capture from 60 s before a session's first live event, and are `ImportOutcome::Superseded` where another import holds their actor and kind in the session. |
+| `preview_backfill_with_event_sample` | `async (&self, upload: &Upload, items: Vec<ImportItem>, denylist: &[String]) -> Result<(Imported, Vec<BackfillEventSample>)>` | The same dry run as `import_backfill` with `BatchMode::DryRun`, plus the event sample a reviewer asks for (#1170): up to four prompts and four tool calls, each with its 1-based line and the stored text after redaction, cut to 512 bytes and settled again after the cut (an entry that does not settle is omitted; a further-redacted excerpt of the stored value, never a reconstruction). Eligible are the store's `Stored` captures of a prompt or a tool call, a sensitive-path stub excluded; the ranking is the SHA-256 of the stable event ID with the order key breaking a tie, the four lowest-ranked of each kind returned in order-key order. A collision anywhere samples nothing, and the field is absent from an ordinary dry run. The sample enters no key, digest, store call or row: the returned `Imported` and its `preview` are the ordinary dry run's. |
+
+| Item | Signature | Description |
+| ---- | --------- | ----------- |
+| `BackfillEventSample` | `Prompt { line: usize, text: String }`, `ToolUse { line: usize, input: Option<String>, result: Option<String> }` | One sampled event text of an opted-in backfill dry run (#1170): its 1-based line and the stored text, redacted and bounded; its `Debug` carries the line alone, so a sample cannot leak into a log. |
 
 `types::lifecycle` holds the import's types: `Upload` with `Upload::copy` (a plugin store's copy, labelled with its
 kind, #1117), `ImportItem` (`Event(ImportEvent)` or `Memory(ImportMemory)`), `MemoryItem`, `BatchMode`, `Imported`
 with each item's `ImportOutcome` (including `ImportOutcome::Superseded`) and its `Imported::held_by` (per session,
-the other origins holding it), and each memory's `FactPreview` with `FactPreview::importance`; and the store's batch,
+the other origins holding it), each memory's `FactPreview` with `FactPreview::importance`, and the dry run's
+`BackfillEventSample` (`Prompt { line, text }`, `ToolUse { line, input, result }`, no content-bearing `Debug`, #1170);
+and the store's batch,
 `Keyed`, `MemoryWrite`, `Batch` with `Batch::held_by` and `preview_digest`, which the store computes
 and the engine relies on. `BACKFILL_BODY_BYTES` (256 MiB) is the route's body limit and the importer's stream bound.
 The readers use two parts of ADR-0009's importer, `bootstrap::read_json_lines` (its bounded JSONL loop, one JSON object

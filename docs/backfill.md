@@ -51,6 +51,7 @@ printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -q -sS --noprox
   -H 'ME-Harness: claude-code' \
   -H 'ME-Backfill-Kind: transcript' \
   -H 'ME-Backfill-Mode: dry-run' \
+  -H 'ME-Backfill-Event-Sample: 1' \
   -H 'ME-Backfill-Source: projects/<project-dir>/<session>.jsonl' \
   -H 'ME-Client-Version: <driver-version>' \
   -H 'ME-Project-Root: <project-root>' \
@@ -59,6 +60,9 @@ printf 'Authorization: Bearer %s\n' "$(cat <token-file>)" | curl -q -sS --noprox
   --data-binary @<copy>/projects/<project-dir>/<session>.jsonl \
   https://<memory-host>/backfill/uploads > <report-dir>/<session>.dry.json
 ```
+
+`ME-Backfill-Event-Sample: 1` asks the dry run for the event sample the review reads below; without it the report
+carries counts only, as before.
 
 `-q` keeps a `~/.curlrc` (a `verbose` line would print the `Authorization` header) out of the upload, and `--noproxy`
 sends it straight to the memory host, never through a proxy, as the plugin's hook does: a host whose only route out is a
@@ -87,9 +91,18 @@ Read the dry run's report (`jq . <session>.dry.json`) before any write:
   calls, refusals by reason, **skips by reason** (a record the capture contract does not keep, such as a task
   notification; never summed with the refusals), and the counts by kind and actor.
 - **`tool_events` and `stubs`**: the tools called, and every call that touched a sensitive path, kept as a stub.
-- **`redaction`**: what was found, the stubs, the placeholders by rule; read the `facts.items[].preview` texts for
-  anything redaction missed. The report previews facts only: prompts, tool excerpts and the other event texts are
-  counted by kind and actor, never shown, so a miss in them cannot be read here (#1170).
+- **`redaction`**: what was found, the stubs, the placeholders by rule; read the `facts.items[].preview` texts and the
+  `event_sample` entries for anything redaction missed.
+- **`event_sample`**: present only when the dry run sent `ME-Backfill-Event-Sample: 1`. Up to four prompts and four tool
+  calls, each with the line it was read from and its stored text, after redaction, cut to 512 bytes and settled again
+  after the cut: at most 6,144 bytes of text for one file before JSON escaping. The selection is fixed by the file (the
+  SHA-256 of each stable event ID, the order key breaking a tie) and returned in order-key order, so two dry runs of one
+  file compare directly at the same line. It shows the prompts and the tool input/result the write would store, and
+  nothing else: no final message, compaction summary, sensitive-path stub, tool name, fact or identifier. It is not
+  exhaustive, so a miss elsewhere in the file remains possible. An empty sample means either no eligible event or a
+  collision anywhere in the batch (which stops the write); `events.collision` tells them apart. A missed secret can be
+  visible here, so keep saved reports private: never send them to logs or public artifacts. Asking for the sample changes
+  nothing else, `preview` included.
 - **`facts`**: what the write would create, reinforce or find blocked, each with its Home, type and date. An item with
   `hint: set_level` is a `user` memory filed at its project: after the write, a session raises it with `set_level`.
   A date after the harvest means the host's clock ran ahead or the entry's timestamp is bad: the memory keeps that
@@ -100,7 +113,8 @@ Read the dry run's report (`jq . <session>.dry.json`) before any write:
 
 Send the same request with `ME-Backfill-Mode: write` and `ME-Backfill-Preview` set to the dry run's `preview`
 (`jq -r .preview <session>.dry.json`). A write lands only the effects the dry run showed: its report is the dry run's
-but for `mode` and `committed`. Compare the two and keep both.
+but for `mode` and `committed`, and for the dry-run-only `event_sample`, which no write returns. Compare the two after
+removing that field and keep both.
 
 | Answer | Then |
 |---|---|

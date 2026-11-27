@@ -16,12 +16,14 @@ use std::fmt::Write as _;
 
 use axum::body::Body;
 use axum::extract::{Extension, Request, State};
-use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use axum::http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, SecondsFormat, Utc};
 use memory_engine::error::{MemoryError, StorageError};
-use memory_engine::types::lifecycle::{BatchMode, ImportOutcome, Imported, Upload};
+use memory_engine::types::lifecycle::{
+    BackfillEventSample, BatchMode, ImportItem, ImportOutcome, Imported, Upload,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -34,6 +36,9 @@ use crate::server::MemoryMcpServer;
 
 /// The body limit, 256 MiB: a larger file is refused whole, never truncated.
 pub const BODY_LIMIT: usize = memory_engine::BACKFILL_BODY_BYTES;
+
+/// `ME-Backfill-Event-Sample`: the dry run's opt-in for the event sample (#1170).
+const SAMPLE_HEADER: &str = "ME-Backfill-Event-Sample";
 
 /// The answer to every upload while the server holds no denylist (decision 9 of the plan).
 const NO_DENYLIST: &str =
@@ -90,7 +95,8 @@ impl UploadEnvelope {
     /// The name of the first header that is missing, repeated, too long or off its grammar, in
     /// the order `ME-Harness`, `ME-Backfill-Kind`, `ME-Backfill-Mode`, `ME-Backfill-Source`,
     /// `ME-Client-Version`, `ME-Backfill-Mtime` (required for a `memory-file`, checked whenever
-    /// sent), `ME-Backfill-Preview` (required for a `write`).
+    /// sent), `ME-Backfill-Preview` (required for a `write`), `ME-Backfill-Event-Sample` (a lone
+    /// `1` on a dry run, ignored on a write).
     ///
     /// # Examples
     ///
@@ -148,6 +154,7 @@ impl UploadEnvelope {
         } else {
             BatchMode::DryRun
         };
+        event_sample_requested(headers, mode)?;
         Ok(Self {
             harness,
             kind,
@@ -166,6 +173,26 @@ impl UploadEnvelope {
     }
 }
 
+/// Whether the request asks for its dry run's event sample (#1170).
+///
+/// The header is optional and, on a dry run, must be a lone `1`: repeated, overlong, non-ASCII or
+/// any other value names the header that failed, through the route's existing 400. A write never
+/// samples and ignores the header whatever it holds, so the write contracts (status and preview
+/// digest) are unchanged.
+fn event_sample_requested(headers: &HeaderMap, mode: BatchMode) -> Result<bool, &'static str> {
+    if matches!(mode, BatchMode::Write { .. }) || !headers.contains_key(SAMPLE_HEADER) {
+        return Ok(false);
+    }
+    field(headers, SAMPLE_HEADER, |value| value == "1")?;
+    Ok(true)
+}
+
+/// [`event_sample_requested`] as the post-validation seam reads it: a malformed value cannot
+/// enable the sample, and never turns an import into an error either.
+fn event_sample_enabled(headers: &HeaderMap, mode: BatchMode) -> bool {
+    event_sample_requested(headers, mode).unwrap_or(false)
+}
+
 /// Whether this server has a reader for `(harness, kind)`: the `match` of ADR-0020 §1.
 fn known(harness: &str, kind: &str) -> bool {
     matches!(
@@ -177,12 +204,15 @@ fn known(harness: &str, kind: &str) -> bool {
     )
 }
 
-/// A JSON answer.
+/// A JSON answer. An answer carrying the dry run's event sample (#1170) is `no-store`, so no
+/// cache or intermediary holds text a reviewer asked for once.
 fn answer(status: StatusCode, body: &Value) -> Response {
     let mut response = (status, serde_json::to_vec(body).unwrap_or_default()).into_response();
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let headers = response.headers_mut();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if body.get("event_sample").is_some() {
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     response
 }
 
@@ -355,6 +385,7 @@ impl MemoryMcpServer {
             }
         };
         let items = std::mem::take(&mut census.items);
+        let sample = event_sample_enabled(headers, envelope.mode);
         let upload = Upload {
             machine: machine.as_str().to_owned(),
             harness: envelope.harness.clone(),
@@ -374,9 +405,8 @@ impl MemoryMcpServer {
             }),
             copy: is_copy(&envelope.kind),
         };
-        let imported = match self
-            .engine
-            .import_backfill(&upload, items, &denylist, envelope.mode)
+        let (imported, sample) = match self
+            .sample_or_import(&upload, items, &denylist, envelope.mode, sample)
             .await
         {
             Ok(imported) => imported,
@@ -406,12 +436,38 @@ impl MemoryMcpServer {
             key: key.as_ref().map(crate::project::ProjectKey::as_str),
             census: &census,
             imported: &imported,
+            sample: sample.as_deref(),
         }
         .render();
         if write && collided {
             (StatusCode::CONFLICT, report, "collision")
         } else {
             (StatusCode::OK, report, "")
+        }
+    }
+
+    /// The engine call: the sampled dry run when the request asked for it (#1170), the ordinary
+    /// import otherwise. The sample stays outside the upload, the key and the preview.
+    async fn sample_or_import(
+        &self,
+        upload: &Upload,
+        items: Vec<ImportItem>,
+        denylist: &[String],
+        mode: BatchMode,
+        sample: bool,
+    ) -> std::result::Result<(Imported, Option<Vec<BackfillEventSample>>), MemoryError> {
+        if sample {
+            let (imported, sample) = self
+                .engine
+                .preview_backfill_with_event_sample(upload, items, denylist)
+                .await?;
+            Ok((imported, Some(sample)))
+        } else {
+            let imported = self
+                .engine
+                .import_backfill(upload, items, denylist, mode)
+                .await?;
+            Ok((imported, None))
         }
     }
 }
@@ -458,6 +514,8 @@ struct Report<'a> {
     key: Option<&'a str>,
     census: &'a Mapped,
     imported: &'a Imported,
+    /// The dry run's event sample when the request asked for it (#1170); never on a write.
+    sample: Option<&'a [BackfillEventSample]>,
 }
 
 /// A session's line in the report.
@@ -582,7 +640,7 @@ impl Report<'_> {
                 .count()
         };
         let census = self.census;
-        json!({
+        let mut report = json!({
             "mode": self.envelope.mode_name(),
             "committed": imported.committed,
             "preview": hex(&imported.preview),
@@ -642,7 +700,42 @@ impl Report<'_> {
                 })).collect::<Vec<_>>(),
             },
             "collisions": collisions,
-        })
+        });
+        Self::with_sample(&mut report, self.sample);
+        report
+    }
+
+    /// Add the opted-in event sample to `report` (#1170): absent, the report is the plain one.
+    fn with_sample(report: &mut Value, sample: Option<&[BackfillEventSample]>) {
+        if let Some(sample) = sample {
+            report["event_sample"] = Value::Array(sample.iter().map(entry).collect());
+        }
+    }
+}
+
+/// One sample entry as the report shows it (#1170): `{line, kind, text}` for a prompt, and
+/// `{line, kind, input?, result?}` for a tool call, each text as stored.
+fn entry(sample: &BackfillEventSample) -> Value {
+    match sample {
+        BackfillEventSample::Prompt { line, text } => {
+            json!({ "line": line, "kind": "prompt", "text": text })
+        }
+        BackfillEventSample::ToolUse {
+            line,
+            input,
+            result,
+        } => {
+            let mut entry = serde_json::Map::new();
+            entry.insert("line".to_owned(), json!(line));
+            entry.insert("kind".to_owned(), json!("tool_use"));
+            if let Some(input) = input {
+                entry.insert("input".to_owned(), json!(input));
+            }
+            if let Some(result) = result {
+                entry.insert("result".to_owned(), json!(result));
+            }
+            Value::Object(entry)
+        }
     }
 }
 
@@ -775,5 +868,65 @@ mod tests {
         }
         assert!(!known("claude-code", "no-such-kind"));
         assert!(!known("codex", "transcript"));
+    }
+
+    /// `ME-Backfill-Event-Sample` is a lone `1` on a dry run, optional there, and ignored by a
+    /// write whatever it holds (#1170). The post-validation seam never lets a malformed value
+    /// enable the sample, and never turns the upload into an error either.
+    #[test]
+    fn the_event_sample_header_is_a_dry_run_opt_in_only() {
+        let dry = headers(&[]);
+        assert!(!event_sample_enabled(&dry, BatchMode::DryRun), "absent");
+
+        let opted = headers(&[(SAMPLE_HEADER, "1")]);
+        let envelope = UploadEnvelope::from_headers(&opted).unwrap();
+        assert!(event_sample_requested(&opted, envelope.mode).unwrap());
+        assert!(event_sample_enabled(&opted, envelope.mode));
+
+        for value in ["", "0", "true", "01", " 1", "1 "] {
+            assert_eq!(
+                UploadEnvelope::from_headers(&headers(&[(SAMPLE_HEADER, value)])),
+                Err(SAMPLE_HEADER),
+                "{value:?}"
+            );
+            assert!(
+                !event_sample_enabled(&headers(&[(SAMPLE_HEADER, value)]), BatchMode::DryRun),
+                "the post-validation seam: {value:?}"
+            );
+        }
+
+        let mut repeated = headers(&[]);
+        repeated.append(SAMPLE_HEADER, "1".parse().unwrap());
+        repeated.append(SAMPLE_HEADER, "1".parse().unwrap());
+        assert_eq!(UploadEnvelope::from_headers(&repeated), Err(SAMPLE_HEADER));
+
+        let mut overlong = headers(&[]);
+        overlong.insert(SAMPLE_HEADER, "1".repeat(4097).parse().unwrap());
+        assert_eq!(UploadEnvelope::from_headers(&overlong), Err(SAMPLE_HEADER));
+
+        let mut non_ascii = headers(&[]);
+        non_ascii.insert(SAMPLE_HEADER, HeaderValue::from_bytes(b"1\x80").unwrap());
+        assert_eq!(UploadEnvelope::from_headers(&non_ascii), Err(SAMPLE_HEADER));
+        assert!(non_ascii.contains_key(SAMPLE_HEADER));
+
+        // A write ignores it: no error, no sample, whatever the value.
+        let preview = "0123456789abcdef".repeat(4);
+        for value in ["1", "nonsense", ""] {
+            let write = headers(&[
+                ("ME-Backfill-Mode", "write"),
+                ("ME-Backfill-Preview", &preview),
+                (SAMPLE_HEADER, value),
+            ]);
+            let envelope = UploadEnvelope::from_headers(&write).unwrap();
+            assert!(!event_sample_enabled(&write, envelope.mode), "{value:?}");
+        }
+        let mut repeated_write = headers(&[
+            ("ME-Backfill-Mode", "write"),
+            ("ME-Backfill-Preview", &preview),
+        ]);
+        repeated_write.append(SAMPLE_HEADER, "1".parse().unwrap());
+        repeated_write.append(SAMPLE_HEADER, "1".parse().unwrap());
+        let envelope = UploadEnvelope::from_headers(&repeated_write).unwrap();
+        assert!(!event_sample_enabled(&repeated_write, envelope.mode));
     }
 }

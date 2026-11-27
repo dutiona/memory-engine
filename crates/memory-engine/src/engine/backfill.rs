@@ -17,8 +17,9 @@ use crate::error::{ConflictError, MemoryError, Result};
 use crate::limits::{check_json_size, check_str_size};
 use crate::redact;
 use crate::types::lifecycle::{
-    Actor, Applied, BatchMode, Delivery, DeliveryWrite, FactPreview, ImportEvent, ImportItem,
-    ImportMemory, ImportOutcome, Imported, ItemSummary, Keyed, Kind, MemoryWrite, OrderKey, Upload,
+    Actor, Applied, BackfillEventSample, BatchMode, Delivery, DeliveryWrite, FactPreview,
+    ImportEvent, ImportItem, ImportMemory, ImportOutcome, Imported, ItemSummary, Keyed, Kind,
+    MemoryWrite, OrderKey, Upload,
 };
 use crate::types::{EventType, NewEvent, NewFact};
 
@@ -164,6 +165,103 @@ impl MemoryEngine {
         denylist: &[String],
         mode: BatchMode,
     ) -> Result<Imported> {
+        let (imported, _) = self
+            .import_backfill_with(upload, items, denylist, mode, false)
+            .await?;
+        Ok(imported)
+    }
+
+    /// Preview one backfill upload and sample the event texts it would store (#1170): the same
+    /// dry run as [`import_backfill`](Self::import_backfill) with [`BatchMode::DryRun`], plus up
+    /// to four prompts and four tool calls read from the texts the write would hold, after
+    /// redaction.
+    ///
+    /// Each sample entry is one stored event's text, cut to 512 bytes and settled again after
+    /// the cut, so it can be shorter (never longer) than the stored value; an entry whose cut
+    /// does not settle is omitted. The eligible events are the store's `Stored` captures of a
+    /// prompt or a tool call, a stub excluded; they are ranked by the SHA-256 of their stable
+    /// event ID, the order key breaking a tie, and returned in order-key order. A batch with any
+    /// collision writes nothing, so it samples nothing, as does a batch with no eligible event.
+    ///
+    /// The sample is review material only: it enters no key, no digest, no store call and no
+    /// persisted row, so the returned [`Imported`] is the ordinary dry run's, preview included,
+    /// and the write of it lands the effects it reports. Nothing here is logged.
+    ///
+    /// # Errors
+    ///
+    /// As [`import_backfill`](Self::import_backfill).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+    /// use chrono::Utc;
+    /// use memory_engine::types::lifecycle::{
+    ///     Actor, BackfillEventSample, Content, ImportEvent, ImportItem, NeutralRecord, Upload,
+    /// };
+    ///
+    /// let engine = memory_engine::MemoryEngine::builder(4).build()?;
+    /// let upload = Upload {
+    ///     machine: "laptop".into(),
+    ///     harness: "claude-code".into(),
+    ///     client_version: "0.1.0".into(),
+    ///     kind: "transcript".into(),
+    ///     source: "projects/demo/s1.jsonl".into(),
+    ///     received_at: Utc::now(),
+    ///     home: "user:alice/project:demo".into(),
+    ///     provenance: serde_json::json!({ "facts": {}, "dropped": {}, "key": null, "rules": 1 }),
+    ///     body_sha256: [9; 32],
+    ///     census: serde_json::json!({ "lines": 1 }),
+    ///     copy: false,
+    /// };
+    /// let prompt = ImportItem::Event(ImportEvent {
+    ///     event_id: "bf.4f6c.p".into(),
+    ///     time: Utc::now(),
+    ///     seq: 0,
+    ///     body_sha256: [1; 32],
+    ///     body_size: 120,
+    ///     line: 7,
+    ///     record: NeutralRecord {
+    ///         session_id: "s1".into(),
+    ///         actor: Actor::Main,
+    ///         cwd: None,
+    ///         harness_version: Some("2.1.296".into()),
+    ///         content: Content::Prompt { text: Some("Add a flag.".into()) },
+    ///     },
+    /// });
+    ///
+    /// let (dry, sample) = engine
+    ///     .preview_backfill_with_event_sample(&upload, vec![prompt], &[])
+    ///     .await?;
+    /// assert!(!dry.committed);
+    /// assert_eq!(
+    ///     sample,
+    ///     [BackfillEventSample::Prompt { line: 7, text: "Add a flag.".into() }]
+    /// );
+    /// assert!(engine.list_active_facts(None).await?.is_empty(), "a dry run writes nothing");
+    /// # Ok::<(), memory_engine::MemoryError>(())
+    /// # }).unwrap();
+    /// ```
+    pub async fn preview_backfill_with_event_sample(
+        &self,
+        upload: &Upload,
+        items: Vec<ImportItem>,
+        denylist: &[String],
+    ) -> Result<(Imported, Vec<BackfillEventSample>)> {
+        self.import_backfill_with(upload, items, denylist, BatchMode::DryRun, true)
+            .await
+    }
+
+    /// One implementation behind both entry points. `collect` asks for the event sample, which
+    /// only a dry run offers; it never reaches the report, a key or the preview.
+    async fn import_backfill_with(
+        &self,
+        upload: &Upload,
+        items: Vec<ImportItem>,
+        denylist: &[String],
+        mode: BatchMode,
+        collect: bool,
+    ) -> Result<(Imported, Vec<BackfillEventSample>)> {
         self.ensure_open()?;
         self.ensure_writable()?;
         let (machine, received_at) = (upload.machine.clone(), upload.received_at);
@@ -181,6 +279,11 @@ impl MemoryEngine {
             .record_deliveries(&machine, received_at, keyed, context, mode)
             .await?;
 
+        let sample = if collect {
+            sample_of(&prepared, &batch.applied)
+        } else {
+            Vec::new()
+        };
         let mut applied = batch.applied.into_iter();
         let (mut items, mut facts) = (Vec::new(), Vec::new());
         let (mut found, mut stubbed, mut queued) = (0, 0, false);
@@ -232,17 +335,161 @@ impl MemoryEngine {
             }
             self.tally(found, stubbed).await;
         }
-        Ok(Imported {
-            committed: batch.committed,
-            preview: batch.preview,
-            source,
-            items,
-            facts,
-            live_since: batch.live_since,
-            held_by: batch.held_by,
-            found,
-            stubbed,
-        })
+        Ok((
+            Imported {
+                committed: batch.committed,
+                preview: batch.preview,
+                source,
+                items,
+                facts,
+                live_since: batch.live_since,
+                held_by: batch.held_by,
+                found,
+                stubbed,
+            },
+            sample,
+        ))
+    }
+}
+
+/// How many entries of each kind a sample holds (#1170).
+const SAMPLE_PER_KIND: usize = 4;
+
+/// One eligible event of a sample: its prepared item, its kind, and the two ranking keys.
+struct Candidate<'a> {
+    prepared: &'a Prepared,
+    kind: Kind,
+    digest: [u8; 32],
+    key: OrderKey,
+}
+
+/// Whether a stored capture holds a text to sample, before the bounded cut: a prompt's stored
+/// text, or a tool's stored result or non-null input. An event with none never takes a slot.
+fn has_text(payload: &Value, kind: Kind) -> bool {
+    match kind {
+        Kind::Prompt => payload
+            .get("prompt")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        Kind::ToolUse => {
+            payload
+                .get("result")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.is_empty())
+                || payload.get("input").is_some_and(|input| !input.is_null())
+        }
+        _ => false,
+    }
+}
+
+/// Keep the best `SAMPLE_PER_KIND` candidates of one kind, ordered by digest then order key: the
+/// scan holds four at a time, whatever the upload's size, instead of every eligible event.
+fn keep_best<'a>(kept: &mut Vec<Candidate<'a>>, candidate: Candidate<'a>) {
+    let at = kept.partition_point(|k| (k.digest, &k.key) < (candidate.digest, &candidate.key));
+    if at < SAMPLE_PER_KIND {
+        kept.insert(at, candidate);
+        kept.truncate(SAMPLE_PER_KIND);
+    }
+}
+
+/// The sampled event texts of one batch (#1170): the store's `Stored` captures of a prompt or a
+/// tool call that hold a text, none of them a stub, ranked by the SHA-256 of their stable event ID
+/// with the order key breaking a tie. It keeps the four lowest-ranked of each kind and returns
+/// them in order-key order. A batch with any collision writes nothing, so it samples nothing.
+fn sample_of(prepared: &[Prepared], applied: &[Applied]) -> Vec<BackfillEventSample> {
+    if applied
+        .iter()
+        .any(|outcome| matches!(outcome, Applied::Collision))
+    {
+        return Vec::new();
+    }
+    let mut outcomes = applied.iter();
+    let (mut prompts, mut tools): (Vec<Candidate>, Vec<Candidate>) = (Vec::new(), Vec::new());
+    for p in prepared {
+        let Ok(keyed) = &p.write else { continue };
+        let Some(outcome) = outcomes.next() else {
+            break;
+        };
+        if !matches!(outcome, Applied::Stored { .. }) {
+            continue;
+        }
+        let DeliveryWrite::Capture(capture) = &keyed.write else {
+            continue;
+        };
+        if p.stubbed > 0 || !matches!(capture.kind, Kind::Prompt | Kind::ToolUse) {
+            continue;
+        }
+        if !has_text(&capture.event.payload, capture.kind) {
+            continue;
+        }
+        let Some(key) = p.key.clone() else { continue };
+        let digest: [u8; 32] = Sha256::digest(keyed.event_id.as_bytes()).into();
+        let kept = match capture.kind {
+            Kind::Prompt => &mut prompts,
+            _ => &mut tools,
+        };
+        keep_best(
+            kept,
+            Candidate {
+                prepared: p,
+                kind: capture.kind,
+                digest,
+                key,
+            },
+        );
+    }
+    let mut kept: Vec<Candidate> = prompts.into_iter().chain(tools).collect();
+    kept.sort_by(|a, b| a.key.cmp(&b.key));
+    kept.iter()
+        .filter_map(|candidate| sample_entry(candidate.prepared, candidate.kind))
+        .collect()
+}
+
+/// One retained candidate as its sample entry: the stored text, settled after the cut, or `None`
+/// when it does not settle — the whole entry, never an unsettled prefix or a partial pair.
+fn sample_entry(p: &Prepared, kind: Kind) -> Option<BackfillEventSample> {
+    let line = p.summary.line?;
+    let Ok(keyed) = &p.write else { return None };
+    let DeliveryWrite::Capture(capture) = &keyed.write else {
+        return None;
+    };
+    let payload = &capture.event.payload;
+    let settled = |text: &str| redact::settled_cut(text).ok();
+    match kind {
+        Kind::Prompt => {
+            let text = payload.get("prompt")?.as_str()?;
+            if text.is_empty() {
+                return None;
+            }
+            Some(BackfillEventSample::Prompt {
+                line,
+                text: settled(text)?,
+            })
+        }
+        Kind::ToolUse => {
+            let input = match payload.get("input").filter(|input| !input.is_null()) {
+                Some(Value::String(text)) => Some(settled(text)?),
+                Some(structured) => Some(settled(&structured.to_string())?),
+                None => None,
+            };
+            let result = match payload
+                .get("result")
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+            {
+                Some(text) => Some(settled(text)?),
+                None => None,
+            };
+            if input.is_none() && result.is_none() {
+                return None;
+            }
+            Some(BackfillEventSample::ToolUse {
+                line,
+                input,
+                result,
+            })
+        }
+        _ => None,
     }
 }
 

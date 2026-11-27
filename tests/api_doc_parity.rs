@@ -48,7 +48,7 @@ struct Row {
 
 /// Type rows are documented, not callable: their "signature" is a struct or
 /// enum literal, not a function signature, so the parity check skips them.
-const TYPE_ROWS: &[&str] = &["Backoff", "Settled"];
+const TYPE_ROWS: &[&str] = &["Backoff", "Settled", "BackfillEventSample"];
 
 /// A table row whose cells are all `-`, `:` and spaces — the `| --- |` line.
 fn is_separator(line: &str) -> bool {
