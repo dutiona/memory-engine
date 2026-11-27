@@ -150,10 +150,22 @@ def start(name):
 
 
 def stop(name):
-    proc = PROCS.pop(name, None)
-    if proc and proc.poll() is None:
-        os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=60)
+    """SIGTERM the child's process group, then SIGKILL it after 60 s. Never raises, so a final cleanup reaches
+    every child."""
+    proc = PROCS.get(name)
+    if proc is None:
+        return
+    for sig, grace in ((signal.SIGTERM, 60), (signal.SIGKILL, None)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=grace)
+            break
+        except subprocess.TimeoutExpired:
+            pass
+    del PROCS[name]
 
 
 def servers():
