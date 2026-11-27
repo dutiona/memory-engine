@@ -1354,9 +1354,9 @@ mod tests {
         assert_eq!(keys(&mapped), keys(&alone));
     }
 
-    /// A replayed call keeps its original's registration, answered or not.
+    /// A replayed call keeps its original's registration.
     #[test]
-    fn a_replayed_call_pairs_and_pends_as_its_original() {
+    fn a_replayed_call_is_paired_once() {
         let call = json!([{ "type": "tool_use", "id": "toolu_a", "name": "Read", "input": { "file_path": "a" } }]);
         let prompt = user_text("u1", "2026-03-19T10:00:00.000Z", "read a");
         let a1 = assistant(
@@ -1407,6 +1407,66 @@ mod tests {
             .find(|e| e.event_id == "bf.a1.t0")
             .expect("the call's record");
         assert_eq!(call.line, 4, "made at the result");
+    }
+
+    /// A replay landing inside an open turn — a prompt, a call, a task notification — changes
+    /// no count but `replayed entry`.
+    #[test]
+    fn a_replay_inside_an_open_turn_changes_nothing() {
+        let prompt = user_text("u1", "2026-03-19T10:00:00.000Z", "a prompt");
+        let call = json!([{ "type": "tool_use", "id": "t1", "name": "Read", "input": { "file_path": "a" } }]);
+        let a1 = assistant(
+            "a1",
+            "2026-03-19T10:00:01.000Z",
+            "m1",
+            &call,
+            Some("tool_use"),
+        );
+        let r1 = result("r1", "2026-03-19T10:00:02.000Z", "t1", "a found", false);
+        let done = json!([{ "type": "text", "text": "done" }]);
+        let a2 = assistant(
+            "a2",
+            "2026-03-19T10:00:03.000Z",
+            "m2",
+            &done,
+            Some("end_turn"),
+        );
+
+        let original = [prompt.clone(), a1.clone(), r1.clone(), a2.clone()];
+        let mut resumed = original.to_vec();
+        resumed.splice(2..2, [replay(&prompt), replay(&a1)]);
+        let mapped = read(&body(&resumed)).unwrap();
+        assert_eq!(mapped.incomplete_turns, 0);
+        assert_eq!(mapped.pending, 0);
+        assert_eq!(mapped.skipped.get("replayed entry"), Some(&2));
+        let rows = |mapped: &Mapped| {
+            table(mapped)
+                .into_iter()
+                .map(|(_, kind, what)| (kind, what))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows(&mapped), rows(&read(&body(&original)).unwrap()));
+
+        let marked = |uuid: &str, time: &str, text: &str| {
+            entry(
+                "user",
+                uuid,
+                time,
+                &json!({ "origin": { "kind": "task-notification" },
+                         "message": { "role": "user", "content": text } }),
+            )
+        };
+        let notification = marked("n1", "2026-03-19T10:00:00.000Z", "hi");
+        let original = [notification.clone(), a2.clone()];
+        let mut resumed = original.to_vec();
+        resumed.splice(1..1, [replay(&notification)]);
+        let mapped = read(&body(&resumed)).unwrap();
+        assert_eq!(mapped.skipped.get("task-notification"), Some(&1));
+        assert_eq!(mapped.skipped.get("replayed entry"), Some(&1));
+        assert_eq!(
+            mapped.incomplete_turns,
+            read(&body(&original)).unwrap().incomplete_turns
+        );
     }
 
     /// An entry whose key repeats with another message is no replay: it is read, so the store's
