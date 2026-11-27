@@ -287,11 +287,15 @@ def session(argv, turns, stream_n):
         proc.stdin.write(json.dumps(msg) + "\n")
         proc.stdin.flush()
         lines = []
-        deadline = time.time() + TURN_SECONDS
+        deadline = time.monotonic() + TURN_SECONDS
         timed_out = False
         while True:
             try:
-                raw = q.get(timeout=max(0.0, deadline - time.time()))
+                # Checked before every dequeue: a child that keeps printing must not outlive the deadline.
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise queue.Empty
+                raw = q.get(timeout=left)
             except queue.Empty:
                 open(os.path.join(OUT, "precondition"), "w").write(
                     "turn %d: no result within %d s\n" % (n, TURN_SECONDS)
@@ -321,10 +325,10 @@ def session(argv, turns, stream_n):
     proc.stdin.close()
     if timed_out:
         stop("claude")
-    drain_deadline = time.time() + 60
-    while time.time() < drain_deadline:
+    drain_deadline = time.monotonic() + 60
+    while time.monotonic() < drain_deadline:
         try:
-            raw = q.get(timeout=max(0.0, drain_deadline - time.time()))
+            raw = q.get(timeout=max(0.0, drain_deadline - time.monotonic()))
         except queue.Empty:
             break
         if raw is None:
