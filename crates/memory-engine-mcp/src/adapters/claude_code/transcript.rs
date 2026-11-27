@@ -1439,6 +1439,15 @@ mod tests {
         .unwrap();
         assert!(events(&stops).iter().any(|e| e.event_id == "bf.a1.s"));
         assert_eq!(stops.skipped.get("replayed entry"), None);
+
+        // The message's ID and model are compared too: either differing keeps the entry.
+        let original = assistant("a3", "2026-03-19T10:00:02.000Z", "m3", &done, None);
+        for (member, value) in [("id", "m4"), ("model", "claude-opus-4-1")] {
+            let mut other: Value = serde_json::from_str(&original).unwrap();
+            other["message"][member] = json!(value);
+            let mapped = read(&body(&[original.clone(), other.to_string()])).unwrap();
+            assert_eq!(mapped.skipped.get("replayed entry"), None, "{member}");
+        }
     }
 
     #[test]
