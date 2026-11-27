@@ -355,10 +355,47 @@ impl MemoryEngine {
 /// How many entries of each kind a sample holds (#1170).
 const SAMPLE_PER_KIND: usize = 4;
 
+/// One eligible event of a sample: its prepared item, its kind, and the two ranking keys.
+struct Candidate<'a> {
+    prepared: &'a Prepared,
+    kind: Kind,
+    digest: [u8; 32],
+    key: OrderKey,
+}
+
+/// Whether a stored capture holds a text to sample, before the bounded cut: a prompt's stored
+/// text, or a tool's stored result or non-null input. An event with none never takes a slot.
+fn has_text(payload: &Value, kind: Kind) -> bool {
+    match kind {
+        Kind::Prompt => payload
+            .get("prompt")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        Kind::ToolUse => {
+            payload
+                .get("result")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.is_empty())
+                || payload.get("input").is_some_and(|input| !input.is_null())
+        }
+        _ => false,
+    }
+}
+
+/// Keep the best `SAMPLE_PER_KIND` candidates of one kind, ordered by digest then order key: the
+/// scan holds four at a time, whatever the upload's size, instead of every eligible event.
+fn keep_best<'a>(kept: &mut Vec<Candidate<'a>>, candidate: Candidate<'a>) {
+    let at = kept.partition_point(|k| (k.digest, &k.key) < (candidate.digest, &candidate.key));
+    if at < SAMPLE_PER_KIND {
+        kept.insert(at, candidate);
+        kept.truncate(SAMPLE_PER_KIND);
+    }
+}
+
 /// The sampled event texts of one batch (#1170): the store's `Stored` captures of a prompt or a
-/// tool call, none of them a stub, ranked by the SHA-256 of their stable event ID with the order
-/// key breaking a tie. It keeps the four lowest-ranked of each kind and returns them in order-key
-/// order. A batch with any collision writes nothing, so it samples nothing.
+/// tool call that hold a text, none of them a stub, ranked by the SHA-256 of their stable event ID
+/// with the order key breaking a tie. It keeps the four lowest-ranked of each kind and returns
+/// them in order-key order. A batch with any collision writes nothing, so it samples nothing.
 fn sample_of(prepared: &[Prepared], applied: &[Applied]) -> Vec<BackfillEventSample> {
     if applied
         .iter()
@@ -367,7 +404,7 @@ fn sample_of(prepared: &[Prepared], applied: &[Applied]) -> Vec<BackfillEventSam
         return Vec::new();
     }
     let mut outcomes = applied.iter();
-    let mut candidates: Vec<(&Prepared, Kind, [u8; 32], OrderKey)> = Vec::new();
+    let (mut prompts, mut tools): (Vec<Candidate>, Vec<Candidate>) = (Vec::new(), Vec::new());
     for p in prepared {
         let Ok(keyed) = &p.write else { continue };
         let Some(outcome) = outcomes.next() else {
@@ -382,34 +419,34 @@ fn sample_of(prepared: &[Prepared], applied: &[Applied]) -> Vec<BackfillEventSam
         if p.stubbed > 0 || !matches!(capture.kind, Kind::Prompt | Kind::ToolUse) {
             continue;
         }
+        if !has_text(&capture.event.payload, capture.kind) {
+            continue;
+        }
         let Some(key) = p.key.clone() else { continue };
         let digest: [u8; 32] = Sha256::digest(keyed.event_id.as_bytes()).into();
-        candidates.push((p, capture.kind, digest, key));
+        let kept = match capture.kind {
+            Kind::Prompt => &mut prompts,
+            _ => &mut tools,
+        };
+        keep_best(
+            kept,
+            Candidate {
+                prepared: p,
+                kind: capture.kind,
+                digest,
+                key,
+            },
+        );
     }
-    candidates.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.3.cmp(&b.3)));
-    let mut kept: Vec<(&Prepared, Kind, [u8; 32], OrderKey)> = Vec::new();
-    let (mut prompts, mut tools) = (0, 0);
-    for candidate in candidates {
-        match candidate.1 {
-            Kind::Prompt if prompts < SAMPLE_PER_KIND => {
-                prompts += 1;
-                kept.push(candidate);
-            }
-            Kind::ToolUse if tools < SAMPLE_PER_KIND => {
-                tools += 1;
-                kept.push(candidate);
-            }
-            _ => {}
-        }
-    }
-    kept.sort_by(|a, b| a.3.cmp(&b.3));
+    let mut kept: Vec<Candidate> = prompts.into_iter().chain(tools).collect();
+    kept.sort_by(|a, b| a.key.cmp(&b.key));
     kept.iter()
-        .filter_map(|(p, kind, ..)| sample_entry(p, *kind))
+        .filter_map(|candidate| sample_entry(candidate.prepared, candidate.kind))
         .collect()
 }
 
 /// One retained candidate as its sample entry: the stored text, settled after the cut, or `None`
-/// when it has no text or does not settle (never an unsettled prefix).
+/// when it does not settle — the whole entry, never an unsettled prefix or a partial pair.
 fn sample_entry(p: &Prepared, kind: Kind) -> Option<BackfillEventSample> {
     let line = p.summary.line?;
     let Ok(keyed) = &p.write else { return None };
@@ -430,18 +467,19 @@ fn sample_entry(p: &Prepared, kind: Kind) -> Option<BackfillEventSample> {
             })
         }
         Kind::ToolUse => {
-            let input = payload
-                .get("input")
-                .filter(|input| !input.is_null())
-                .and_then(|input| match input {
-                    Value::String(text) => settled(text),
-                    structured => settled(&structured.to_string()),
-                });
-            let result = payload
+            let input = match payload.get("input").filter(|input| !input.is_null()) {
+                Some(Value::String(text)) => Some(settled(text)?),
+                Some(structured) => Some(settled(&structured.to_string())?),
+                None => None,
+            };
+            let result = match payload
                 .get("result")
                 .and_then(Value::as_str)
                 .filter(|text| !text.is_empty())
-                .and_then(settled);
+            {
+                Some(text) => Some(settled(text)?),
+                None => None,
+            };
             if input.is_none() && result.is_none() {
                 return None;
             }

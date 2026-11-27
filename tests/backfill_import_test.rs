@@ -1391,6 +1391,40 @@ async fn sampled_backfill_dry_run_omits_what_cannot_be_reviewed() {
         sample.is_empty(),
         "a duplicate is not a new write: {sample:?}"
     );
+
+    // An empty prompt never takes one of the four slots, even when its digest ranks it first.
+    let others: Vec<String> = (0..4).map(|i| format!("bf.ok{i}")).collect();
+    let smallest = others
+        .iter()
+        .map(|id| Sha256::digest(id.as_bytes()))
+        .min()
+        .unwrap();
+    let empty_id = (0..10_000u32)
+        .map(|n| format!("bf.empty{n}"))
+        .find(|id| Sha256::digest(id.as_bytes()) < smallest)
+        .expect("an empty prompt ranking first");
+    let mut items: Vec<ImportItem> = others
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            main_item(
+                id,
+                i64::try_from(i).unwrap(),
+                prompt(&format!("prompt {i}")),
+            )
+        })
+        .collect();
+    items.push(main_item(&empty_id, 10, prompt("")));
+    let (_, sample) = s
+        .engine
+        .preview_backfill_with_event_sample(&upload(HOME), items, &[])
+        .await
+        .unwrap();
+    assert_eq!(sample.len(), 4, "the empty prompt is no slot: {sample:?}");
+    assert!(sample.iter().all(|entry| matches!(
+        entry,
+        BackfillEventSample::Prompt { text, .. } if !text.is_empty()
+    )));
 }
 
 /// A batch with a collision cannot commit, so its sample is empty: WYSIWYG over what the write
