@@ -566,9 +566,11 @@ tool excerpts, sensitive-path stubs and memories. An imported event has `source`
 store's kind) and `origin_node_id` `backfill`, its entry's time as `timestamp`, the upload's receipt as `created_at`,
 and its `harness_version` from the entry; its memory is dated by its event. Thinking, meta entries, task notifications
 (`origin.kind`), interrupt markers, Claude Code's own `<synthetic>` messages and every other entry type are skipped
-and counted. A tool call whose result is not in the file yet is `pending`, and a turn with no completed message is an
-`incomplete_turn`: a later upload of the grown file brings them. A transcript records no session start or end, so its
-events open segments by the rules of ADR-0020 §5 and the idle sweep ends them.
+and counted. An entry a resumed session replays, a `user` or `assistant` entry whose `sessionId`, `uuid` and message
+(its content, ID, model and stop reason; not its token usage) an earlier entry of the file holds, is read once, at its
+first occurrence, and counted `replayed entry`. A tool call whose result is not in the file yet is `pending`, and a
+turn with no completed message is an `incomplete_turn`: a later upload of the grown file brings them. A transcript
+records no session start or end, so its events open segments by the rules of ADR-0020 §5 and the idle sweep ends them.
 
 **What a memory file stores.** `MEMORY.md` (the index) and a frontmatter-only stub are skipped with a 200 and write
 nothing. Any other file is one fact by ADR-0009's memory-file rules: `feedback` Procedural, `project` Episodic, any

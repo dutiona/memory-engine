@@ -6,7 +6,7 @@ One seed per checked-in upload input (#1120), in the target's input format: elev
 each seed sets only its kind and its source, whose last segment is the fixture's file name (a memory file is named by
 it, so `MEMORY.md` and the stub reach their own skips):
 
-- `transcript-*`: the two transcripts of `crates/memory-engine-mcp/tests/fixtures/claude-code-transcripts/`, and
+- `transcript-*`: the three transcripts of `crates/memory-engine-mcp/tests/fixtures/claude-code-transcripts/`, and
   `transcript-future`, the main one dated 2099 instead of 2026: a machine whose clock ran ahead (#1153);
 - `memory-file-*`: the seven memory files of `crates/memory-engine-mcp/tests/fixtures/claude-code-memory/`;
 - `claude-mem-*`, `claude-memory-*`: each JSON Lines file `memory-engine-plugin-export` writes from
@@ -45,7 +45,9 @@ def seed(name, kind, source, body):
 
 project = 'projects/-work-fixture-p/'
 main = '52c6c7b7-c890-43ec-81a5-a1cf99d3cc84'
-for rel, name in [(f'{main}.jsonl', 'main'), (f'{main}/subagents/agent-a3c91f2.jsonl', 'subagent')]:
+resumed = 'e3b7a1c4-5d2f-4a86-9c1e-7f40b2d8a915'
+for rel, name in [(f'{main}.jsonl', 'main'), (f'{main}/subagents/agent-a3c91f2.jsonl', 'subagent'),
+                  (f'{resumed}.jsonl', 'resumed')]:
     with open(f'{fx}/claude-code-transcripts/-work-fixture-p/{rel}', 'rb') as f:
         seed(f'transcript-{name}', 'transcript', project + rel, f.read())
 with open(f'{fx}/claude-code-transcripts/-work-fixture-p/{main}.jsonl', 'rb') as f:

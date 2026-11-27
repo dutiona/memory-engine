@@ -79,7 +79,8 @@ Read the dry run's report (`jq . <session>.dry.json`) before any write:
 
 - **`project`**: the Home and key you expect for this file; any `dropped` fact explained.
 - **`denylist_literals`**: the count you loaded.
-- **`census`**: the lines, the malformed ones, what the reader did not map, by reason, and the `incomplete_turn` count.
+- **`census`**: the lines, the malformed ones, what the reader did not map, by reason (`replayed entry`: a resumed
+  session's copies of its earlier entries, read once), and the `incomplete_turn` count.
 - **`sessions`**: each session's first and last time and its stored events; a `live_since` means the plugin captured
   that session live from then, and only what came before imports.
 - **`events`**: stored, duplicates (a re-upload, or a forked session's repeated entries), `live_overlap`, `pending`
@@ -174,6 +175,8 @@ No source is deleted before its ingestion and a verified backup taken after it.
 - A synthetic user entry the transcript does not mark (neither `isMeta` nor an interrupt marker) imports as a prompt,
   in the event log only.
 - A resume within 30 minutes stays in one segment, where live capture would have split it.
+- A fork copied into the same file under another Claude Code version answers 409: its entries keep their IDs and their
+  digests differ.
 - An `erase` of the first machine takes a memory a second machine's copy reinforced.
 - A tombstone matches the text as stored, so a text forgotten under one denylist and re-imported under another is not
   blocked.

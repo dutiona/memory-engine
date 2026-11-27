@@ -2,7 +2,7 @@
 
 Synthetic Claude Code transcripts for `POST /backfill/uploads` (#1026), written by hand in the shapes the reader
 reads by field name (Claude Code 2.1.296 and 2.1.310): one project directory, `-work-fixture-p`, as Claude Code
-encodes `/work/fixture/p`, holding a session file and one subagent file. The text is synthetic, the `uuid`s are random
+encodes `/work/fixture/p`, holding two session files and one subagent file. The text is synthetic, the `uuid`s are random
 v4, the message and tool IDs are placeholders, and no line holds a secret: the tests plant every secret, token,
 sensitive path and denylist literal at run time. `tests/fixtures/claude-code-memory/` holds the native memory files
 (`MEMORY.md`, one file per memory type, one with a file-name date, one with a frontmatter date, two with one body, and
@@ -74,3 +74,21 @@ Subagent `a3c91f2` of the same session: every line has `isSidechain` and the par
 | 2 | call `Read` | the call of line 3 |
 | 3 | `tool_result` of line 2 | `tool_use` `Read`, `success`, subagent |
 | 4 | `assistant`, text, `end_turn` | `stop` `completed`, subagent: event log only |
+
+## `-work-fixture-p/e3b7a1c4-5d2f-4a86-9c1e-7f40b2d8a915.jsonl`
+
+Session `e3b7a1c4-…`, main agent, resumed (#1173). Lines 6 to 10 replay lines 1 to 5 the way a resume writes them: the
+same `uuid`, `timestamp`, `sessionId` and message content, with a new `cwd`, `gitBranch` and `version`, a `slug`, the
+assistant entries' other `usage`, and line 8's `toolUseResult.stdout` emptied. A replay is read once, at its first
+occurrence.
+
+| Line | Entry | Rule |
+|---|---|---|
+| 1 | `user` `Run the fixture tests.`, 2.1.296 | `prompt` |
+| 2 | `assistant` `msg_fixture21`, call `Bash` `cargo test` | the call of line 3 |
+| 3 | `tool_result` of line 2, `toolUseResult.stdout` `test result: ok. 3 passed` | `tool_use` `Bash`, `success` |
+| 4 | `assistant` `msg_fixture22`, text, no `stop_reason` | the first part of line 5's message |
+| 5 | `assistant` `msg_fixture22`, text, `end_turn` | `stop` `completed`, lines 4 and 5 joined |
+| 6–10 | lines 1–5 replayed, 2.1.310; line 8's `toolUseResult.stdout` is `""` | skipped: `replayed entry` |
+| 11 | `user` `Commit the change.`, 2.1.310, an hour after line 1 | `prompt` |
+| 12 | `assistant` `msg_fixture23`, text, `end_turn` | `stop` `completed` |

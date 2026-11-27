@@ -205,6 +205,37 @@ fn messages(objects: &[(usize, Value)]) -> HashMap<MessageKey, Message> {
     messages
 }
 
+/// The indices of the entries a resumed session replays (#1173): a resume writes earlier entries
+/// again under their own session and uuid, with the same message (its usage aside), so an entry
+/// whose `(sessionId, uuid)` an earlier entry holds with an equal message is a replay. The first
+/// occurrence is the record: a copy taken before the resume holds only that one. An entry whose
+/// message differs is no replay and is read, so the store's collision still guards an edit.
+fn replays(objects: &[(usize, Value)]) -> HashSet<usize> {
+    fn read_members(object: &Map<String, Value>) -> [Option<&Value>; 4] {
+        let read = message(object);
+        ["id", "model", "stop_reason", "content"].map(|name| read.and_then(|m| m.get(name)))
+    }
+    let mut first: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut replayed = HashSet::new();
+    for (index, (_, value)) in objects.iter().enumerate() {
+        let Some(entry) = value.as_object().and_then(|o| entry(o).ok()) else {
+            continue;
+        };
+        match first.entry((entry.session, entry.uuid)) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(index);
+            }
+            std::collections::hash_map::Entry::Occupied(slot) => {
+                let original = objects[*slot.get()].1.as_object();
+                if original.is_some_and(|o| read_members(o) == read_members(entry.object)) {
+                    replayed.insert(index);
+                }
+            }
+        }
+    }
+    replayed
+}
+
 /// Read a Claude Code transcript into neutral records keyed for the backfill route (#1026).
 ///
 /// Every prompt, finished tool call, completed final message, API error and compaction summary
@@ -212,9 +243,11 @@ fn messages(objects: &[(usize, Value)]) -> HashMap<MessageKey, Message> {
 /// reason. A record's event ID is `bf.<entry uuid>.<tag>` (`p`, `s`, `c`, or `t<k>` for the
 /// `k`-th `tool_use` block of an entry, from 0), and its digest the SHA-256 of its canonical
 /// JSON without its session ID and working directory, so a forked session repeating an entry
-/// meets it as a duplicate. Its order key is its entry's time to the second, and
-/// `seq = millisecond × 1,000 + rank`, the rank in file order among the file's records of that
-/// millisecond: the 1,001st record of a millisecond is refused and counted.
+/// meets it as a duplicate. An entry whose `sessionId`, `uuid` and message (its content, ID, model
+/// and stop reason; not its token usage) an earlier entry holds is a resume's replay, counted
+/// `replayed entry`, so its first occurrence alone makes its records. Its order key is its entry's
+/// time to the second, and `seq = millisecond × 1,000 + rank`, the rank in file order among the
+/// file's records of that millisecond: the 1,001st record of a millisecond is refused and counted.
 ///
 /// # Errors
 ///
@@ -255,10 +288,21 @@ fn read_capped(body: &[u8], max_entries: usize) -> Result<Mapped, &'static str> 
     {
         return Err("no session");
     }
+    let lines = objects.len() + malformed;
+    let replayed = replays(&objects);
+    let objects: Vec<(usize, Value)> = objects
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !replayed.contains(index))
+        .map(|(_, object)| object)
+        .collect();
     let mut reader = Reader {
         messages: messages(&objects),
         ..Reader::default()
     };
+    if !replayed.is_empty() {
+        reader.skipped.insert("replayed entry", replayed.len());
+    }
     for (index, (line, value)) in objects.iter().enumerate() {
         if let Some(object) = value.as_object() {
             reader.entry(index, *line, object);
@@ -266,7 +310,7 @@ fn read_capped(body: &[u8], max_entries: usize) -> Result<Mapped, &'static str> 
     }
     let mut mapped = Mapped {
         items: Vec::new(),
-        lines: objects.len() + malformed,
+        lines,
         malformed,
         pending: reader.calls.len(),
         incomplete_turns: reader.incomplete + reader.turns.len(),
@@ -1168,6 +1212,303 @@ mod tests {
             first.body_sha256, stops[0].body_sha256,
             "the original's digest"
         );
+    }
+
+    const RESUMED: &str = "e3b7a1c4-5d2f-4a86-9c1e-7f40b2d8a915";
+
+    fn resumed_file() -> Vec<u8> {
+        fixture(&format!("{RESUMED}.jsonl"))
+    }
+
+    /// `line` as a resume writes it again: the same `uuid`, `timestamp`, `sessionId` and
+    /// message, under another `cwd`, branch and version (not the helper's 2.1.310), with a slug.
+    fn replay(line: &str) -> String {
+        let mut value: Value = serde_json::from_str(line).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("cwd".into(), json!("/work/p/src"));
+        object.insert("gitBranch".into(), json!("resumed"));
+        object.insert("version".into(), json!("2.1.311"));
+        object.insert("slug".into(), json!("a-resumed-session"));
+        value.to_string()
+    }
+
+    fn keys(mapped: &Mapped) -> Vec<(String, DateTime<Utc>, u32, [u8; 32])> {
+        events(mapped)
+            .into_iter()
+            .map(|e| (e.event_id.clone(), e.time, e.seq, e.body_sha256))
+            .collect()
+    }
+
+    /// A resume replays a block of earlier entries (#1173): each is read once, at its first
+    /// occurrence, so the file reads as the copy taken before the resume did.
+    #[test]
+    fn a_resumed_sessions_replay_is_read_once() {
+        let file = resumed_file();
+        let mapped = read(&file).unwrap();
+        let rows: Vec<(usize, &str, String)> = [
+            (1, "prompt", ""),
+            (3, "tool_use", "Bash Success"),
+            (5, "stop", "Completed"),
+            (11, "prompt", ""),
+            (12, "stop", "Completed"),
+        ]
+        .into_iter()
+        .map(|(l, k, w)| (l, k, w.to_owned()))
+        .collect();
+        assert_eq!(table(&mapped), rows);
+        let skipped: Vec<(&str, usize)> = mapped.skipped.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(skipped, [("replayed entry", 5)]);
+        assert_eq!(
+            (
+                mapped.lines,
+                mapped.malformed,
+                mapped.pending,
+                mapped.incomplete_turns
+            ),
+            (12, 0, 0, 0)
+        );
+        for line in [1, 3, 5] {
+            assert_eq!(
+                event_at(&mapped, line).record.harness_version.as_deref(),
+                Some("2.1.296"),
+                "line {line} is the first occurrence"
+            );
+        }
+        let Content::ToolUse { result, .. } = &event_at(&mapped, 3).record.content else {
+            panic!("a tool record");
+        };
+        assert!(
+            result.as_deref().is_some_and(|r| r.contains("3 passed")),
+            "{result:?}"
+        );
+        let Content::Stop { message, .. } = &event_at(&mapped, 5).record.content else {
+            panic!("a stop");
+        };
+        assert_eq!(
+            message.as_deref(),
+            Some("The three tests pass.\nNothing else changed.")
+        );
+        let full = keys(&mapped);
+        for key in keys(&read(&head(&file, 5)).unwrap()) {
+            assert!(full.contains(&key), "the pre-resume copy's {key:?}");
+        }
+        assert_eq!(keys(&read(&file).unwrap()), full, "reading twice");
+    }
+
+    /// The kinds the fixture lacks: a compaction summary and an API error, each replayed.
+    #[test]
+    fn a_replayed_entry_is_its_first_occurrence() {
+        let compact = entry(
+            "user",
+            "c1",
+            "2026-03-19T10:00:00.000Z",
+            &json!({ "isCompactSummary": true, "message": { "role": "user", "content": "a summary" } }),
+        );
+        let api_error = entry(
+            "assistant",
+            "e1",
+            "2026-03-19T10:00:00.000Z",
+            &json!({ "isApiErrorMessage": true, "message": {
+                "id": "m9", "role": "assistant", "model": "<synthetic>",
+                "content": [{ "type": "text", "text": "API Error: overloaded" }],
+            } }),
+        );
+        for line in [compact, api_error] {
+            let alone = read(&body(std::slice::from_ref(&line))).unwrap();
+            let replayed = read(&body(&[line.clone(), replay(&line)])).unwrap();
+            assert_eq!(keys(&replayed), keys(&alone), "{line}");
+            assert_eq!(replayed.skipped.get("replayed entry"), Some(&1), "{line}");
+        }
+    }
+
+    /// A replayed part of a message neither moves its stop nor doubles its text.
+    #[test]
+    fn a_replay_moves_no_stop() {
+        let one = json!([{ "type": "text", "text": "part one" }]);
+        let two = json!([{ "type": "text", "text": "part two" }]);
+        let lines = [
+            user_text("u1", "2026-03-19T10:00:00.000Z", "a prompt"),
+            assistant("a1", "2026-03-19T10:00:01.000Z", "m1", &one, None),
+            assistant(
+                "a2",
+                "2026-03-19T10:00:02.000Z",
+                "m1",
+                &two,
+                Some("end_turn"),
+            ),
+        ];
+        let alone = read(&body(&lines)).unwrap();
+        let mut resumed = lines.to_vec();
+        resumed.push(replay(&lines[1]));
+        let mapped = read(&body(&resumed)).unwrap();
+        let stops: Vec<&ImportEvent> = events(&mapped)
+            .into_iter()
+            .filter(|e| e.record.content.kind().as_str() == "stop")
+            .collect();
+        assert_eq!(stops.len(), 1);
+        assert_eq!(stops[0].event_id, "bf.a2.s");
+        let Content::Stop { message, .. } = &stops[0].record.content else {
+            panic!("a stop");
+        };
+        assert_eq!(message.as_deref(), Some("part one\npart two"));
+        assert_eq!(keys(&mapped), keys(&alone));
+    }
+
+    /// A replayed call keeps its original's registration.
+    #[test]
+    fn a_replayed_call_is_paired_once() {
+        let call = json!([{ "type": "tool_use", "id": "toolu_a", "name": "Read", "input": { "file_path": "a" } }]);
+        let prompt = user_text("u1", "2026-03-19T10:00:00.000Z", "read a");
+        let a1 = assistant(
+            "a1",
+            "2026-03-19T10:00:01.000Z",
+            "m1",
+            &call,
+            Some("tool_use"),
+        );
+        let answered = read(&body(&[
+            prompt.clone(),
+            a1.clone(),
+            result(
+                "r1",
+                "2026-03-19T10:00:02.000Z",
+                "toolu_a",
+                "a found",
+                false,
+            ),
+            replay(&a1),
+        ]))
+        .unwrap();
+        assert_eq!(answered.pending, 0, "the replay re-registers no call");
+        let ids: Vec<&str> = events(&answered)
+            .iter()
+            .map(|e| e.event_id.as_str())
+            .collect();
+        assert_eq!(ids.iter().filter(|id| **id == "bf.a1.t0").count(), 1);
+
+        let late = read(&body(&[
+            prompt,
+            a1.clone(),
+            replay(&a1),
+            result(
+                "r1",
+                "2026-03-19T10:00:03.000Z",
+                "toolu_a",
+                "a found",
+                false,
+            ),
+        ]))
+        .unwrap();
+        assert_eq!(late.pending, 0);
+        assert_eq!(late.skipped.get("orphan tool_result"), None);
+        assert_eq!(late.skipped.get("replayed entry"), Some(&1));
+        let call = events(&late)
+            .into_iter()
+            .find(|e| e.event_id == "bf.a1.t0")
+            .expect("the call's record");
+        assert_eq!(call.line, 4, "made at the result");
+    }
+
+    /// A replay landing inside an open turn — a prompt, a call, a task notification — changes
+    /// no count but `replayed entry`.
+    #[test]
+    fn a_replay_inside_an_open_turn_changes_nothing() {
+        let prompt = user_text("u1", "2026-03-19T10:00:00.000Z", "a prompt");
+        let call = json!([{ "type": "tool_use", "id": "t1", "name": "Read", "input": { "file_path": "a" } }]);
+        let a1 = assistant(
+            "a1",
+            "2026-03-19T10:00:01.000Z",
+            "m1",
+            &call,
+            Some("tool_use"),
+        );
+        let r1 = result("r1", "2026-03-19T10:00:02.000Z", "t1", "a found", false);
+        let done = json!([{ "type": "text", "text": "done" }]);
+        let a2 = assistant(
+            "a2",
+            "2026-03-19T10:00:03.000Z",
+            "m2",
+            &done,
+            Some("end_turn"),
+        );
+
+        let original = [prompt.clone(), a1.clone(), r1, a2.clone()];
+        let mut resumed = original.to_vec();
+        resumed.splice(2..2, [replay(&prompt), replay(&a1)]);
+        let mapped = read(&body(&resumed)).unwrap();
+        assert_eq!(mapped.incomplete_turns, 0);
+        assert_eq!(mapped.pending, 0);
+        assert_eq!(mapped.skipped.get("replayed entry"), Some(&2));
+        let rows = |mapped: &Mapped| {
+            table(mapped)
+                .into_iter()
+                .map(|(_, kind, what)| (kind, what))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows(&mapped), rows(&read(&body(&original)).unwrap()));
+
+        let marked = |uuid: &str, time: &str, text: &str| {
+            entry(
+                "user",
+                uuid,
+                time,
+                &json!({ "origin": { "kind": "task-notification" },
+                         "message": { "role": "user", "content": text } }),
+            )
+        };
+        let notification = marked("n1", "2026-03-19T10:00:00.000Z", "hi");
+        let original = [notification.clone(), a2];
+        let mut resumed = original.to_vec();
+        // After the stop, where a resume's block lands: undropped, it would open a turn nothing closes.
+        resumed.push(replay(&notification));
+        let mapped = read(&body(&resumed)).unwrap();
+        assert_eq!(mapped.skipped.get("task-notification"), Some(&1));
+        assert_eq!(mapped.skipped.get("replayed entry"), Some(&1));
+        assert_eq!(
+            mapped.incomplete_turns,
+            read(&body(&original)).unwrap().incomplete_turns
+        );
+    }
+
+    /// An entry whose key repeats with another message is no replay: it is read, so the store's
+    /// Collision still guards an edited source.
+    #[test]
+    fn a_same_key_entry_with_other_message_is_kept() {
+        let prompts = read(&body(&[
+            user_text("u1", "2026-03-19T10:00:00.000Z", "a prompt"),
+            user_text("u1", "2026-03-19T10:00:00.000Z", "another prompt"),
+        ]))
+        .unwrap();
+        let both = events(&prompts);
+        assert_eq!(both.len(), 2);
+        assert!(both.iter().all(|e| e.event_id == "bf.u1.p"));
+        assert_ne!(both[0].body_sha256, both[1].body_sha256);
+        assert_eq!(prompts.skipped.get("replayed entry"), None);
+
+        let done = json!([{ "type": "text", "text": "done" }]);
+        let stops = read(&body(&[
+            user_text("u2", "2026-03-19T10:00:00.000Z", "finish"),
+            assistant("a1", "2026-03-19T10:00:01.000Z", "m1", &done, None),
+            assistant(
+                "a1",
+                "2026-03-19T10:00:01.000Z",
+                "m1",
+                &done,
+                Some("end_turn"),
+            ),
+        ]))
+        .unwrap();
+        assert!(events(&stops).iter().any(|e| e.event_id == "bf.a1.s"));
+        assert_eq!(stops.skipped.get("replayed entry"), None);
+
+        // The message's ID and model are compared too: either differing keeps the entry.
+        let original = assistant("a3", "2026-03-19T10:00:02.000Z", "m3", &done, None);
+        for (member, value) in [("id", "m4"), ("model", "claude-opus-4-1")] {
+            let mut other: Value = serde_json::from_str(&original).unwrap();
+            other["message"][member] = json!(value);
+            let mapped = read(&body(&[original.clone(), other.to_string()])).unwrap();
+            assert_eq!(mapped.skipped.get("replayed entry"), None, "{member}");
+        }
     }
 
     #[test]
